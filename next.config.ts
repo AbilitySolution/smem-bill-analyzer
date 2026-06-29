@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Masque l'indicateur de dev Next.js (le bouton flottant en bas à gauche)
+  devIndicators: false,
 };
 
 export default nextConfig;
