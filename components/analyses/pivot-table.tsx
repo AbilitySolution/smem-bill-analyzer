@@ -95,7 +95,7 @@ export function PivotTable({ rows }: { rows: PivotRow[] }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="sticky left-0 bg-white">Site</TableHead>
+              <TableHead className="sticky left-0 bg-[var(--kn-card)]">Site</TableHead>
               {periods.map((p) => (
                 <TableHead key={p} className="text-right">
                   {p}
@@ -110,7 +110,7 @@ export function PivotTable({ rows }: { rows: PivotRow[] }) {
               const total = cells.reduce((s, v) => s + v, 0);
               return (
                 <TableRow key={site.id}>
-                  <TableCell className="sticky left-0 bg-white font-medium">
+                  <TableCell className="sticky left-0 bg-[var(--kn-card)] font-medium">
                     {site.nom}
                     <span className="ml-1.5 text-xs text-slate-400">{site.commune}</span>
                   </TableCell>

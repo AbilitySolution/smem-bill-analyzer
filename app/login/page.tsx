@@ -8,10 +8,10 @@ export default function LoginPage() {
   const [state, formAction, pending] = useActionState(login, undefined);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-white px-4">
+    <main className="flex min-h-screen items-center justify-center bg-[var(--kn-card)] px-4">
       <form
         action={formAction}
-        className="w-full max-w-[360px] rounded-xl border border-[var(--kn-border)] bg-white p-8 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
+        className="w-full max-w-[360px] rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-8 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
       >
         <div className="mb-1 flex justify-center">
           <Image
@@ -60,7 +60,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={pending}
-          className="w-full cursor-pointer rounded-md bg-[#111] px-4 py-2.5 text-[14px] font-medium text-white transition-colors hover:bg-black disabled:cursor-not-allowed disabled:opacity-60"
+          className="w-full cursor-pointer rounded-md bg-[#111] px-4 py-2.5 text-[14px] font-medium text-white transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {pending ? "Connexion…" : "Se connecter"}
         </button>

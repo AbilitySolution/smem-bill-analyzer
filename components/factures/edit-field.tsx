@@ -49,19 +49,19 @@ export function EditField({ invoiceId, table, rowId, field, label, value, kind =
 
   return (
     <div className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[#ffedd5]">
-      <span className="text-[12px] font-medium text-[#585e74]">{label}</span>
+      <span className="text-[12px] font-medium text-[var(--kn-text-muted)]">{label}</span>
       <div className="flex items-center gap-2">
         {editing ? (
           <div className="flex items-center gap-1">
             {kind === "select" ? (
               <select autoFocus value={draft} onChange={(e) => { setDraft(e.target.value); save(e.target.value); }}
-                className="h-7 rounded-md border border-[#1a1a1a]/25 px-1 text-sm focus:outline-none focus:ring-2 focus:ring-[#f97316]">
+                className="h-7 rounded-md border border-[var(--kn-text)]/25 px-1 text-sm focus:outline-none focus:ring-2 focus:ring-[#f97316]">
                 <option value="">—</option>
                 {options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             ) : kind === "boolean" ? (
               <select autoFocus value={draft} onChange={(e) => { setDraft(e.target.value); save(e.target.value); }}
-                className="h-7 rounded-md border border-[#1a1a1a]/25 px-1 text-sm focus:outline-none focus:ring-2 focus:ring-[#f97316]">
+                className="h-7 rounded-md border border-[var(--kn-text)]/25 px-1 text-sm focus:outline-none focus:ring-2 focus:ring-[#f97316]">
                 <option value="true">Oui</option>
                 <option value="false">Non</option>
               </select>
@@ -69,7 +69,7 @@ export function EditField({ invoiceId, table, rowId, field, label, value, kind =
               <input autoFocus type={kind === "number" ? "number" : kind === "date" ? "date" : "text"}
                 value={draft} onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); }}
-                className="h-7 w-36 rounded-md border border-[#1a1a1a]/25 px-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#f97316]" />
+                className="h-7 w-36 rounded-md border border-[var(--kn-text)]/25 px-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#f97316]" />
             )}
             {kind !== "select" && kind !== "boolean" && (
               <button onClick={() => save()} disabled={pending} className="text-[#0f6e56] hover:text-[#0c5644]"><Check className="size-3.5" /></button>
@@ -78,9 +78,9 @@ export function EditField({ invoiceId, table, rowId, field, label, value, kind =
           </div>
         ) : (
           <button onClick={() => { setDraft(value == null ? "" : String(value)); setEditing(true); }}
-            className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-sm font-medium text-[#1a1a1a] group-hover:bg-[#fb923c]">
+            className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-sm font-medium text-[var(--kn-text)] group-hover:bg-[#fb923c]">
             {display}
-            <Pencil className="size-3 text-[#1a1a1a]/30 opacity-0 group-hover:opacity-100" />
+            <Pencil className="size-3 text-[var(--kn-text)]/30 opacity-0 group-hover:opacity-100" />
           </button>
         )}
         {!compact && (

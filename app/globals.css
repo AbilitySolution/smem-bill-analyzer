@@ -149,6 +149,7 @@
   --kn-sidebar-bg: #ffffff;
   --kn-border: #e8eaed;
   --kn-page: #ffffff;
+  --kn-card: #ffffff;
   --kn-panel: #f7f8f9;
   --kn-value-box: #f4f5f6;
   --kn-text: #1a1a1a;
@@ -157,8 +158,32 @@
   --kn-badge-fg: #0f6e56;
   --kn-active: #f2f3f5;
   --kn-black: #1a1a1a;
+  /* Surface « solide » contrastée (boutons/avatars « noirs ») — s'inverse en sombre */
+  --kn-solid: #1a1a1a;
+  --kn-solid-fg: #ffffff;
   --kn-yellow: #fb923c;
   --kn-yellow-soft: #ffedd5;
+}
+
+/* ===== Variante sombre des tokens Koncile ===== */
+.dark {
+  --kn-sidebar-bg: #121519;
+  --kn-border: #2a2f37;
+  --kn-page: #0e1115;
+  --kn-card: #161a20;
+  --kn-panel: #181c22;
+  --kn-value-box: #1d222a;
+  --kn-text: #e7e9ee;
+  --kn-text-muted: #98a2b3;
+  --kn-badge-bg: #10271d;
+  --kn-badge-fg: #4ade80;
+  --kn-active: #232831;
+  /* Surfaces « solides » : restent foncées en sombre (texte blanc lisible) mais distinctes du fond */
+  --kn-black: #30353f;
+  --kn-solid: #30353f;
+  --kn-solid-fg: #ffffff;
+  --kn-yellow: #fb923c;
+  --kn-yellow-soft: rgba(249, 115, 22, 0.16);
 }
 
 /* type badge (façon Koncile : pill verte avec icône) */

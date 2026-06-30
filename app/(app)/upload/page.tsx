@@ -79,7 +79,7 @@ function UploadPageInner() {
       if (pendingId) {
         await fetch(`/api/pending/${pendingId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ processed: true }) });
       }
-      router.push(`/factures/${json.invoice_id}`);
+      router.push(`/documents/extraction?id=${json.invoice_id}`);
     } catch { setError("Erreur réseau lors de l'enregistrement."); }
     finally { setSaving(false); }
   }
@@ -92,7 +92,7 @@ function UploadPageInner() {
 
   return (
     <div className="mx-auto max-w-2xl px-8 py-6">
-      <h1 className="font-heading text-2xl font-bold text-[#1a1a1a]">Importer une facture</h1>
+      <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer une facture</h1>
       <p className="mb-6 text-[13px] text-[var(--kn-text-muted)]">PDF, PNG, JPEG ou WEBP — extraction automatique par l&apos;IA.</p>
 
       <div className="mb-4 grid grid-cols-2 gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-panel)] p-3">
@@ -130,17 +130,17 @@ function UploadPageInner() {
           className={`flex h-52 w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed transition-colors ${
             !canUpload ? "cursor-not-allowed border-[var(--kn-border)] bg-[var(--kn-panel)]"
             : dragOver ? "cursor-pointer border-[#f97316] bg-[var(--kn-yellow-soft)]"
-            : "cursor-pointer border-[#c8ccd2] bg-white hover:border-[#f97316]"}`}
+            : "cursor-pointer border-[#c8ccd2] bg-[var(--kn-card)] hover:border-[#f97316]"}`}
         >
           {loading ? (
             <>
               <Loader2 className="size-6 animate-spin text-[#f97316]" />
-              <p className="text-sm text-[#1a1a1a]">Extraction en cours…</p>
+              <p className="text-sm text-[var(--kn-text)]">Extraction en cours…</p>
             </>
           ) : (
             <>
               <UploadCloud className="size-7 text-[var(--kn-text-muted)]" />
-              <p className="text-sm font-medium text-[#1a1a1a]">
+              <p className="text-sm font-medium text-[var(--kn-text)]">
                 {canUpload ? "Glissez-déposez la facture ici, ou cliquez pour sélectionner" : "Choisissez d'abord une commune et un site"}
               </p>
               <p className="text-xs text-[var(--kn-text-muted)]">PDF, PNG, JPEG, WEBP</p>
@@ -155,24 +155,24 @@ function UploadPageInner() {
       {error && <p className="mt-3 text-sm text-[#d33]">{error}</p>}
 
       {result && (
-        <div className="rounded-xl border border-[var(--kn-border)] bg-white p-4">
+        <div className="rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
           <div className="mb-3 flex items-center gap-2 text-[#0f6e56]">
             <CheckCircle2 className="size-4" />
             <span className="text-sm font-medium">Extraction réussie — vérifiez avant d&apos;enregistrer</span>
           </div>
           <div className="grid grid-cols-2 gap-3 text-sm">
-            <div><span className="text-[var(--kn-text-muted)]">N° facture{precBadge("facture_number")}</span><p className="font-medium text-[#1a1a1a]">{result.extraction.invoice.facture_number}</p></div>
-            <div><span className="text-[var(--kn-text-muted)]">Date{precBadge("facture_date")}</span><p className="font-medium text-[#1a1a1a]">{formatDate(result.extraction.invoice.facture_date)}</p></div>
-            <div><span className="text-[var(--kn-text-muted)]">Total HT{precBadge("total_ht")}</span><p className="font-medium text-[#1a1a1a]">{formatEur(result.extraction.invoice.total_ht)}</p></div>
-            <div><span className="text-[var(--kn-text-muted)]">Total TTC{precBadge("total_ttc")}</span><p className="font-medium text-[#1a1a1a]">{formatEur(result.extraction.invoice.total_ttc)}</p></div>
+            <div><span className="text-[var(--kn-text-muted)]">N° facture{precBadge("facture_number")}</span><p className="font-medium text-[var(--kn-text)]">{result.extraction.invoice.facture_number}</p></div>
+            <div><span className="text-[var(--kn-text-muted)]">Date{precBadge("facture_date")}</span><p className="font-medium text-[var(--kn-text)]">{formatDate(result.extraction.invoice.facture_date)}</p></div>
+            <div><span className="text-[var(--kn-text-muted)]">Total HT{precBadge("total_ht")}</span><p className="font-medium text-[var(--kn-text)]">{formatEur(result.extraction.invoice.total_ht)}</p></div>
+            <div><span className="text-[var(--kn-text-muted)]">Total TTC{precBadge("total_ttc")}</span><p className="font-medium text-[var(--kn-text)]">{formatEur(result.extraction.invoice.total_ttc)}</p></div>
           </div>
           <div className="mt-4 flex gap-2">
             <button onClick={handleSave} disabled={saving}
-              className="rounded-lg bg-[#1a1a1a] px-4 py-2 text-[13px] font-medium text-white hover:bg-black disabled:opacity-50">
+              className="rounded-lg bg-[var(--kn-solid)] px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-50">
               {saving ? "Enregistrement…" : "Enregistrer la facture"}
             </button>
             <button onClick={() => setResult(null)} disabled={saving}
-              className="rounded-lg border border-[var(--kn-border)] px-4 py-2 text-[13px] font-medium text-[#1a1a1a] hover:bg-[var(--kn-active)] disabled:opacity-50">
+              className="rounded-lg border border-[var(--kn-border)] px-4 py-2 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)] disabled:opacity-50">
               Annuler
             </button>
           </div>

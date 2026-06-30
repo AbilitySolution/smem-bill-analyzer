@@ -42,7 +42,7 @@ export function ActivityFeed({
           <p className="text-xs text-slate-400">Aucune note pour l&apos;instant.</p>
         )}
         {activities.map((a) => (
-          <div key={a.id} className="rounded-md border border-slate-200 bg-white p-2.5 text-sm">
+          <div key={a.id} className="rounded-md border border-slate-200 bg-[var(--kn-card)] p-2.5 text-sm">
             <p className="text-slate-700">{a.body}</p>
             <p className="mt-1 text-[11px] text-slate-400">
               {new Date(a.created_at).toLocaleString("fr-FR")}

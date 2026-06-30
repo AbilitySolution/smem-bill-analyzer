@@ -46,12 +46,12 @@ export function ExtractionPanel({ data }: { data: ExtractionData }) {
   );
 
   return (
-    <div className="flex h-full flex-col rounded-xl border border-[var(--kn-border)] bg-white">
+    <div className="flex h-full flex-col rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)]">
       {/* Onglets */}
       <div className="flex shrink-0 items-center gap-4 overflow-x-auto border-b border-[var(--kn-border)] px-4 text-[13px]">
         {tabs.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
-            className={cx("relative flex h-11 shrink-0 items-center gap-1.5 font-medium transition-colors", tab === t.id ? "text-[#1a1a1a]" : "text-[var(--kn-text-muted)] hover:text-[#1a1a1a]")}>
+            className={cx("relative flex h-11 shrink-0 items-center gap-1.5 font-medium transition-colors", tab === t.id ? "text-[var(--kn-text)]" : "text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]")}>
             {t.label}
             <span className={cx("flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px]", tab === t.id ? "bg-[#f97316] text-white" : "bg-[var(--kn-value-box)] text-[var(--kn-text-muted)]")}>{t.count}</span>
             {tab === t.id && <span className="absolute -bottom-px left-0 h-0.5 w-full bg-[#f97316]" />}
@@ -175,7 +175,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function LineCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-[var(--kn-border)]">
-      <div className="border-b border-[var(--kn-border)] bg-[var(--kn-panel)] px-3 py-1.5 text-[12px] font-semibold text-[#1a1a1a]">{title}</div>
+      <div className="border-b border-[var(--kn-border)] bg-[var(--kn-panel)] px-3 py-1.5 text-[12px] font-semibold text-[var(--kn-text)]">{title}</div>
       <div className="p-1">{children}</div>
     </div>
   );

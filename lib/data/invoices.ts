@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { detectAnomalies, topSeverity, median, costPerKwh, type AnomalyLite, type Severity } from "./anomalies";
 
 export interface InvoiceLine {
   poste: string;
@@ -18,9 +19,16 @@ export interface InvoiceDoc {
   isDuplicata: boolean;
   totalHt: number;
   tva: number;
+  autresTaxes?: number;
   totalTtc: number;
   kwh: number;
   lines: InvoiceLine[];
+  filePath?: string | null; // chemin storage (invoice-files) si un PDF est attaché
+  previewUrl?: string | null; // URL signée pour la vignette (générée côté page)
+  archived?: boolean;
+  confidence?: number | null; // précision modèle moyenne (0-100), null si non disponible
+  anomalies?: AnomalyLite[];
+  anomalySeverity?: Severity | null;
 }
 
 function periodeLabel(start?: string | null, end?: string | null): string {
@@ -39,11 +47,23 @@ interface RawInvoice {
   facture_date: string;
   total_ht: number | null;
   tva: number | null;
+  autres_taxes: number | null;
   total_ttc: number | null;
   is_duplicata: boolean | null;
   categorie: "batiment" | "eclairage_public";
+  file_path: string | null;
+  archived: boolean | null;
+  precision: Record<string, number> | null;
   sites: { nom: string } | null;
   communes: { nom: string } | null;
+}
+
+/** Moyenne (0-100) des scores de précision modèle, ou null si absente. */
+function avgConfidence(precision: Record<string, number> | null): number | null {
+  if (!precision) return null;
+  const vals = Object.values(precision).filter((v) => typeof v === "number");
+  if (!vals.length) return null;
+  return Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 100);
 }
 
 interface RawLine {
@@ -62,7 +82,7 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
 
   const { data: invoices, error } = await supabase
     .from("invoices")
-    .select("id, facture_number, facture_date, total_ht, tva, total_ttc, is_duplicata, categorie, sites(nom), communes(nom)")
+    .select("id, facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, is_duplicata, categorie, file_path, archived, precision, sites(nom), communes(nom)")
     .order("facture_date", { ascending: false });
 
   if (error || !invoices || invoices.length === 0) return null;
@@ -84,7 +104,7 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
     linesByInvoice.set(l.invoice_id, arr);
   }
 
-  return (invoices as unknown as RawInvoice[]).map((i) => {
+  const docs: InvoiceDoc[] = (invoices as unknown as RawInvoice[]).map((i) => {
     const docLines = linesByInvoice.get(i.id) ?? [];
     return {
       id: i.id,
@@ -96,11 +116,27 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
       isDuplicata: !!i.is_duplicata,
       totalHt: Number(i.total_ht ?? 0),
       tva: Number(i.tva ?? 0),
+      autresTaxes: Number(i.autres_taxes ?? 0),
       totalTtc: Number(i.total_ttc ?? 0),
       kwh: docLines.reduce((s, l) => s + l.kwh, 0),
       lines: docLines,
+      filePath: i.file_path ?? null,
+      archived: !!i.archived,
+      confidence: avgConfidence(i.precision),
     };
   });
+
+  // Passe anomalies : la médiane du coût/kWh nécessite l'ensemble du portefeuille.
+  const med = median(docs.map((d) => costPerKwh(d.totalTtc, d.kwh)).filter((v): v is number => v != null));
+  for (const d of docs) {
+    d.anomalies = detectAnomalies(
+      { totalHt: d.totalHt, tva: d.tva, autresTaxes: d.autresTaxes ?? 0, totalTtc: d.totalTtc, kwh: d.kwh, isDuplicata: d.isDuplicata },
+      { medianCostPerKwh: med },
+    );
+    d.anomalySeverity = topSeverity(d.anomalies);
+  }
+
+  return docs;
 }
 
 const L = (poste: string, periode: string, kwh: number, prix: number | null, montant: number): InvoiceLine => ({ poste, periode, kwh, prix, montant });

@@ -35,9 +35,19 @@ export default function RootLayout({
   return (
     <html
       lang="fr"
+      suppressHydrationWarning
       className={`${inter.variable} ${spaceGrotesk.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-white text-[#1a1a1a]">
+      <head>
+        {/* Applique le thème avant le premier rendu pour éviter le flash */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "(function(){try{var t=localStorage.getItem('theme');if(t==='dark'||(!t&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)){document.documentElement.classList.add('dark');}}catch(e){}})();",
+          }}
+        />
+      </head>
+      <body className="min-h-full flex flex-col bg-[var(--kn-page)] text-[var(--kn-text)]">
         <TooltipProvider delay={200}>{children}</TooltipProvider>
       </body>
     </html>

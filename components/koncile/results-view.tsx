@@ -79,12 +79,12 @@ export function ResultsView({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: boo
   }
 
   return (
-    <div className="flex h-full flex-col bg-white">
+    <div className="flex h-full flex-col bg-[var(--kn-card)]">
       {/* Topbar */}
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--kn-border)] px-4">
         <div className="flex items-center gap-2 text-[13px]">
           <FileText className="size-4 text-[var(--kn-text-muted)]" strokeWidth={1.75} />
-          <span className="font-medium text-[#1a1a1a]">Facture d&apos;électricité</span>
+          <span className="font-medium text-[var(--kn-text)]">Facture d&apos;électricité</span>
           <span className="rounded-full bg-[var(--kn-value-box)] px-2 py-0.5 text-[11px] text-[var(--kn-text-muted)]">
             {docs.length} factures
           </span>
@@ -96,7 +96,7 @@ export function ResultsView({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: boo
         </div>
         <button
           onClick={exportAll}
-          className="flex items-center gap-1.5 rounded-lg bg-[#1a1a1a] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-black"
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--kn-solid)] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90"
         >
           <Download className="size-3.5" /> Exporter tout (CSV)
         </button>
@@ -112,13 +112,13 @@ export function ResultsView({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: boo
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Rechercher (n°, site, commune)"
-                className="h-9 w-full rounded-lg border border-[var(--kn-border)] pl-9 pr-3 text-[13px] focus:border-[#1a1a1a] focus:outline-none"
+                className="h-9 w-full rounded-lg border border-[var(--kn-border)] pl-9 pr-3 text-[13px] focus:border-[var(--kn-text)] focus:outline-none"
               />
             </div>
             <div className="mt-2 flex items-center gap-2 text-[11px] text-[var(--kn-text-muted)]">
               <span>Trier :</span>
               {([["date", "Date"], ["totalTtc", "Montant"], ["kwh", "kWh"]] as [SortKey, string][]).map(([k, label]) => (
-                <button key={k} onClick={() => toggleSort(k)} className={cx("inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 hover:bg-[var(--kn-active)]", sort.key === k && "text-[#1a1a1a]")}>
+                <button key={k} onClick={() => toggleSort(k)} className={cx("inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 hover:bg-[var(--kn-active)]", sort.key === k && "text-[var(--kn-text)]")}>
                   {label}
                   {sort.key === k ? (sort.dir === 1 ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />) : <ChevronsUpDown className="size-3 opacity-40" />}
                 </button>
@@ -137,8 +137,8 @@ export function ResultsView({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: boo
                 )}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-[13px] font-semibold text-[#1a1a1a]">{d.number}</span>
-                  <span className="shrink-0 text-[12px] font-medium tabular-nums text-[#1a1a1a]">{eur(d.totalTtc)}</span>
+                  <span className="truncate text-[13px] font-semibold text-[var(--kn-text)]">{d.number}</span>
+                  <span className="shrink-0 text-[12px] font-medium tabular-nums text-[var(--kn-text)]">{eur(d.totalTtc)}</span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-[12px] text-[var(--kn-text-muted)]">{d.site} · {d.commune}</span>
@@ -190,28 +190,28 @@ function InvoiceDetail({ doc, onExport }: { doc: InvoiceDoc; onExport: () => voi
     <div className="px-6 py-5">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 className="font-heading text-[18px] font-bold text-[#1a1a1a]">{doc.number}</h2>
+          <h2 className="font-heading text-[18px] font-bold text-[var(--kn-text)]">{doc.number}</h2>
           <p className="text-[13px] text-[var(--kn-text-muted)]">{doc.site} · {doc.commune} · {frDate(doc.date)}</p>
         </div>
         <button
           onClick={onExport}
-          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--kn-border)] bg-white px-3 py-1.5 text-[13px] font-medium text-[#1a1a1a] transition-colors hover:bg-[var(--kn-active)]"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-3 py-1.5 text-[13px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]"
         >
           <Download className="size-3.5" /> Exporter (CSV)
         </button>
       </div>
 
-      <h3 className="mb-2 font-heading text-[14px] font-semibold text-[#1a1a1a]">Champs extraits</h3>
+      <h3 className="mb-2 font-heading text-[14px] font-semibold text-[var(--kn-text)]">Champs extraits</h3>
       <div className="mb-6 grid grid-cols-1 gap-x-6 md:grid-cols-2">
         {fields.map((f) => (
           <div key={f.label} className="flex items-center justify-between gap-4 border-b border-[var(--kn-border)] py-2.5">
             <span className="text-[13px] text-[var(--kn-text-muted)]">{f.label}</span>
-            <span className="text-[13px] font-medium text-[#1a1a1a]">{f.value}</span>
+            <span className="text-[13px] font-medium text-[var(--kn-text)]">{f.value}</span>
           </div>
         ))}
       </div>
 
-      <h3 className="mb-2 font-heading text-[14px] font-semibold text-[#1a1a1a]">Lignes de consommation</h3>
+      <h3 className="mb-2 font-heading text-[14px] font-semibold text-[var(--kn-text)]">Lignes de consommation</h3>
       {doc.lines.length === 0 ? (
         <p className="rounded-lg border border-dashed border-[var(--kn-border)] px-3 py-6 text-center text-[12px] text-[var(--kn-text-muted)]">
           Aucune ligne de consommation détaillée sur cette facture.
@@ -231,7 +231,7 @@ function InvoiceDetail({ doc, onExport }: { doc: InvoiceDoc; onExport: () => voi
             <tbody>
               {doc.lines.map((l, i) => (
                 <tr key={i} className="border-b border-[var(--kn-border)] last:border-0 hover:bg-[var(--kn-active)]">
-                  <td className="px-3 py-2 font-medium text-[#1a1a1a]">{l.poste}</td>
+                  <td className="px-3 py-2 font-medium text-[var(--kn-text)]">{l.poste}</td>
                   <td className="px-3 py-2 text-[var(--kn-text-muted)]">{l.periode}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{l.kwh.toLocaleString("fr-FR")}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{l.prix != null ? l.prix.toFixed(4) : "—"}</td>

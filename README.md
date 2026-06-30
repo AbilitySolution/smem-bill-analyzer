@@ -1,8 +1,8 @@
 # Ability — Gestion documentaire & factures d'énergie
 
-Outil de centralisation de documents et d'**extraction intelligente des factures d'électricité** (bâtiments publics & éclairage public), avec édition des champs extraits, analyses de consommation et export CSV.
+Outil de centralisation de documents et d'**extraction intelligente des factures d'électricité** (bâtiments publics & éclairage public) : visionneuse PDF + correction des champs extraits, analyses de consommation, **rapports Excel multi-feuilles**, détection d'**anomalies** (préversion) et **thème clair/sombre**.
 
-Stack : **Next.js 16** (App Router) · **React 19** · **Tailwind CSS v4** · **Supabase** (Postgres + Auth + Storage) · **Anthropic Claude** (OCR/extraction) · **Recharts**.
+Stack : **Next.js 16** (App Router) · **React 19** · **Tailwind CSS v4** · **Supabase** (Postgres + Auth + Storage) · **Anthropic Claude** (OCR/extraction) · **Recharts** · **ExcelJS** · **pdf.js** · **JSZip**.
 
 ---
 
@@ -50,7 +50,7 @@ ANTHROPIC_API_KEY=<clé API Anthropic (sk-ant-...)>
 npm run dev
 ```
 
-Ouvrez **http://localhost:3000**. Vous arrivez sur la page de connexion (`/login`) puis sur la liste des factures (`/factures`).
+Ouvrez **http://localhost:3000**. Vous arrivez sur la page de connexion (`/login`) puis sur le hub **Mes documents** (`/documents`).
 
 > **Authentification** : l'accès est protégé par Supabase Auth. Connectez-vous avec un compte existant du projet Supabase. Sans session valide, toutes les pages redirigent vers `/login`.
 
@@ -64,40 +64,63 @@ npm run lint    # linter
 
 ---
 
+## Fonctionnalités
+
+- **Barre supérieure** globale : recherche de navigation (⌘K) vers n'importe quelle page, bascule **thème clair/sombre** (persistée).
+- **Hub « Mes documents »** : vues **Liste / Galerie** (vignette réelle de la 1ʳᵉ page du PDF) **/ Colonnes**, regroupement (commune/site/catégorie), recherche, **scores de confiance** OCR, **tickers d'anomalie**, sélection multiple → actions groupées (masquer/démasquer, supprimer, télécharger les PDF en ZIP, exporter), export **CSV** filtré.
+- **Extraction** : sélecteur de facture + visionneuse PDF redimensionnable + **tous les champs éditables** (corrections journalisées).
+- **Rapport Excel** : générateur de classeur `.xlsx` multi-feuilles (Synthèse, Factures, Consommation détaillée, Par commune, Par poste HP/HC/Base, Taxes & charges) avec mise en forme.
+- **Analyse de consommation** : évolution + répartition heures pleines/creuses (kWh / € / c€).
+- **Anomalies** (préversion) : détection par règles (cohérence des totaux, coût unitaire atypique…), graphiques interactifs, résolution + **historique**.
+- **Documentation** : guide d'utilisation page par page + onglet « Champs d'extraction » (modèle OCR).
+
 ## Structure du projet
 
 ```
 app/
-  (app)/                 # espace authentifié (sidebar Ability)
-    factures/            # liste des factures + détail /factures/[id]
-    analyses/            # graphiques de consommation (filtres + kWh/€/c€)
-    upload/              # import + extraction IA d'une facture
-    champs/              # champs du modèle d'extraction
-  api/                   # routes API (extract, invoices, sites, communes…)
-  login/                 # authentification
+  (app)/                       # espace authentifié (barre supérieure + sidebar Ability)
+    documents/                 # hub Mes documents : page (liste 3 vues) + extraction/ (éditeur)
+    rapport-excel/             # générateur de rapports Excel
+    analyses/                  # graphiques de consommation
+    anomalies/                 # module Anomalies (préversion)
+    documentation/             # guide + onglet champs/ (modèle d'extraction)
+    upload/                    # import + extraction OCR d'une facture
+  api/                         # routes API (extract, invoices, export/excel, sites, communes…)
+  login/                       # authentification
 components/
-  factures/              # liste, détail PDF redimensionnable, édition des champs
-  analyses/              # vues d'analyse (Recharts)
-  koncile/               # sidebar Ability
-  ui/                    # composants shadcn
+  app-shell/                   # barre supérieure (recherche nav + thème)
+  documents/                   # hub, vues, sélection/actions, vignette PDF, builder Excel, badges
+  documentation/               # onglets de la page Documentation
+  anomalies/                   # vue du module Anomalies
+  factures/                    # visionneuse PDF, panneau d'extraction éditable
+  analyses/                    # vues d'analyse (Recharts)
+  koncile/                     # sidebar Ability
+  ui/                          # composants shadcn
 lib/
-  data/                  # requêtes Supabase agrégées (factures, consommation)
-  anthropic/             # schéma d'extraction + client Claude
-  supabase/              # clients Supabase (server/browser)
-supabase/migrations/     # schéma de la base
+  data/                        # requêtes Supabase agrégées (factures, consommation) + détection d'anomalies
+  anthropic/                   # schéma d'extraction + client Claude
+  supabase/                    # clients Supabase (server/browser)
+supabase/migrations/           # schéma de la base
 ```
 
 ## Routes principales
 
 | Route | Description |
 |-------|-------------|
-| `/` | redirige vers `/factures` |
-| `/factures` | liste de toutes les factures (recherche, regroupement, export CSV) |
-| `/factures/[id]` | détail : PDF + tous les champs extraits éditables (onglets) |
-| `/analyses` | analyses de consommation (filtres commune/site/catégorie) |
-| `/upload` | import et extraction IA d'une facture |
-| `/champs` | champs du modèle d'extraction |
+| `/` | redirige vers `/documents` |
+| `/documents` | hub Mes documents : vues Liste/Galerie/Colonnes, regroupement, confiance, tickers d'anomalie, sélection & actions groupées, export CSV |
+| `/documents/extraction?id=` | éditeur : sélecteur de facture + PDF redimensionnable + champs extraits éditables |
+| `/rapport-excel` | générateur de rapports Excel multi-feuilles (filtres + feuilles) |
+| `/analyses` | analyses de consommation (filtres commune/site/catégorie, kWh/€/c€) |
+| `/anomalies` | module Anomalies (préversion) : alertes, graphiques, résolution + historique |
+| `/documentation` · `/documentation/champs` | guide d'utilisation + champs du modèle d'extraction |
+| `/upload` | import et extraction OCR d'une facture |
+| `/factures`, `/factures/[id]`, `/documents/export`, `/champs` | anciennes routes — redirigent vers les nouvelles |
 
 ## Base de données
 
-Le schéma (tables `invoices`, `clients`, `contracts`, `sites`, `communes`, `consumption_periods`, `invoice_charges`, …) est dans `supabase/migrations/`. Appliquez les migrations sur votre projet Supabase (CLI Supabase ou dashboard) avant le premier lancement.
+Le schéma (tables `invoices`, `clients`, `contracts`, `sites`, `communes`, `consumption_periods`, `invoice_charges`, `anomalies`, …) est dans `supabase/migrations/`. Appliquez les migrations sur votre projet Supabase (CLI Supabase ou dashboard) avant le premier lancement.
+
+Colonnes notables sur `invoices` : `archived` (masquage), `precision` (jsonb — score de précision par champ, renseigné aux nouveaux imports), `file_path` (PDF dans le bucket `invoice-files`).
+
+> **Détection d'anomalies & résolutions** : la détection actuelle est un *fallback* par règles (cohérence des totaux, coût/kWh atypique) calculé à la volée ; les résolutions sont mémorisées côté navigateur (localStorage). Le suivi en base arrivera avec la version complète du module.
