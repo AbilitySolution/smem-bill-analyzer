@@ -21,6 +21,7 @@ git checkout outil_v0
 ## Prérequis
 
 - **Node.js ≥ 20** (testé sur Node 25) et **npm**
+- **Python 3 + openpyxl** (`pip3 install openpyxl`) — requis pour la génération des rapports Excel (graphiques + TCD natifs)
 - Un projet **Supabase** (URL + clés)
 - Une **clé API Anthropic**
 
@@ -69,7 +70,8 @@ npm run lint    # linter
 - **Barre supérieure** globale : recherche de navigation (⌘K) vers n'importe quelle page, bascule **thème clair/sombre** (persistée).
 - **Hub « Mes documents »** : vues **Liste / Galerie** (vignette réelle de la 1ʳᵉ page du PDF) **/ Colonnes**, regroupement (commune/site/catégorie), recherche, **scores de confiance** OCR, **tickers d'anomalie**, sélection multiple → actions groupées (masquer/démasquer, supprimer, télécharger les PDF en ZIP, exporter), export **CSV** filtré.
 - **Extraction** : sélecteur de facture + visionneuse PDF redimensionnable + **tous les champs éditables** (corrections journalisées).
-- **Rapport Excel** : générateur de classeur `.xlsx` multi-feuilles (Synthèse, Factures, Consommation détaillée, Par commune, Par poste HP/HC/Base, Taxes & charges) avec mise en forme.
+- **Rapports** : 5 rapports Excel prédéfinis (par commune, par site, synthèse, avant/après rénovation PEPP, évolution tarifaire) générés en **Python/openpyxl** — **graphiques natifs + tableaux croisés dynamiques natifs** (actualisés à l'ouverture), décomposition Base/HP/HC/part fixe/taxes, périodes de facturation **ventilées au pro-rata des jours** sur les semestres ; case « données du connecteur data logger » (démo / placeholder) ; + export personnalisé feuille par feuille (ExcelJS).
+- **Connecteurs** (version bêta) : aperçu des sources externes à venir (EDF, dépôt des communes, data loggers d'armoires, IPPER) — non fonctionnel à ce stade.
 - **Analyse de consommation** : évolution + répartition heures pleines/creuses (kWh / € / c€).
 - **Anomalies** (préversion) : détection par règles (cohérence des totaux, coût unitaire atypique…), graphiques interactifs, résolution + **historique**.
 - **Documentation** : guide d'utilisation page par page + onglet « Champs d'extraction » (modèle OCR).
@@ -110,7 +112,8 @@ supabase/migrations/           # schéma de la base
 | `/` | redirige vers `/documents` |
 | `/documents` | hub Mes documents : vues Liste/Galerie/Colonnes, regroupement, confiance, tickers d'anomalie, sélection & actions groupées, export CSV |
 | `/documents/extraction?id=` | éditeur : sélecteur de facture + PDF redimensionnable + champs extraits éditables |
-| `/rapport-excel` | générateur de rapports Excel multi-feuilles (filtres + feuilles) |
+| `/rapport-excel` | Rapports : 5 rapports prédéfinis (Python/openpyxl, TCD + graphiques natifs) + export personnalisé |
+| `/connecteurs` | Connecteurs (version bêta) : sources de données externes à venir |
 | `/analyses` | analyses de consommation (filtres commune/site/catégorie, kWh/€/c€) |
 | `/anomalies` | module Anomalies (préversion) : alertes, graphiques, résolution + historique |
 | `/documentation` · `/documentation/champs` | guide d'utilisation + champs du modèle d'extraction |
@@ -123,4 +126,14 @@ Le schéma (tables `invoices`, `clients`, `contracts`, `sites`, `communes`, `con
 
 Colonnes notables sur `invoices` : `archived` (masquage), `precision` (jsonb — score de précision par champ, renseigné aux nouveaux imports), `file_path` (PDF dans le bucket `invoice-files`).
 
-> **Détection d'anomalies & résolutions** : la détection actuelle est un *fallback* par règles (cohérence des totaux, coût/kWh atypique) calculé à la volée ; les résolutions sont mémorisées côté navigateur (localStorage). Le suivi en base arrivera avec la version complète du module.
+> **Détection d'anomalies & résolutions** : la détection actuelle est un *fallback* par règles (cohérence des totaux, coût/kWh atypique vs médiane annuelle) calculé à la volée ; les résolutions sont mémorisées côté navigateur (localStorage). Le suivi en base arrivera avec la version complète du module.
+
+## Données de démonstration (seed)
+
+`scripts/seed-demo.ts` peuple la base avec des **factures simulées réalistes** (8 communes, ~76 sites, ~1 100 factures semestrielles 2019→2026) calées sur les données réelles de Fonds-Saint-Denis : courbe tarifaire Base/HP/HC, part fixe kVA, taxes (accise, octroi de mer), fenêtre de rénovation EP par commune (−55 % de conso après travaux). Sans artefact OCR (`raw_ocr_json`/`precision` NULL, `file_path` sentinelle `seed-sim/…`).
+
+```bash
+npx tsx scripts/seed-demo.ts --dry        # volumes sans écrire
+npx tsx scripts/seed-demo.ts              # complète les semestres manquants (idempotent)
+npx tsx scripts/seed-demo.ts --reset-sim  # supprime les factures SIM- puis regénère
+```

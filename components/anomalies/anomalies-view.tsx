@@ -85,14 +85,14 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
       <div className="mb-1 flex items-center gap-2.5">
         <AlertTriangle className="size-6 text-[#f59e0b]" strokeWidth={1.9} />
         <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Anomalies</h1>
-        <span className="rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#9a3412]">Préversion</span>
+        <span className="rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#9a3412]">Version bêta</span>
       </div>
 
-      {/* Disclaimer préversion */}
+      {/* Disclaimer version bêta */}
       <div className="mb-5 mt-3 flex items-start gap-2.5 rounded-xl border border-[#fed7aa] bg-[var(--kn-yellow-soft)] px-4 py-3">
         <Info className="mt-0.5 size-4 shrink-0 text-[#ea580c]" />
         <p className="text-[13px] text-[var(--kn-text)]">
-          Module en <strong>préversion</strong> — la détection présentée ici est un <strong>contrôle automatique de démonstration</strong> (cohérence des totaux, coût unitaire atypique…).
+          Module en <strong>version bêta</strong> — la détection présentée ici est un <strong>contrôle automatique de démonstration</strong> (cohérence des totaux, coût unitaire atypique…).
           La version complète (détection avancée, suivi en base, règles configurables) arrive prochainement.
         </p>
       </div>

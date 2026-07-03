@@ -127,11 +127,21 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   });
 
   // Passe anomalies : la médiane du coût/kWh nécessite l'ensemble du portefeuille.
-  const med = median(docs.map((d) => costPerKwh(d.totalTtc, d.kwh)).filter((v): v is number => v != null));
+  // Médiane du coût/kWh PAR ANNÉE : les tarifs ont plus que doublé entre 2019 et 2024,
+  // une médiane globale marquerait toutes les factures anciennes comme « coût bas ».
+  const byYear = new Map<string, number[]>();
+  for (const d of docs) {
+    const c = costPerKwh(d.totalTtc, d.kwh);
+    if (c == null) continue;
+    const y = d.date.slice(0, 4);
+    (byYear.get(y) ?? byYear.set(y, []).get(y)!).push(c);
+  }
+  const medianByYear = new Map<string, number | null>();
+  for (const [y, vals] of byYear) medianByYear.set(y, median(vals));
   for (const d of docs) {
     d.anomalies = detectAnomalies(
       { totalHt: d.totalHt, tva: d.tva, autresTaxes: d.autresTaxes ?? 0, totalTtc: d.totalTtc, kwh: d.kwh, isDuplicata: d.isDuplicata },
-      { medianCostPerKwh: med },
+      { medianCostPerKwh: medianByYear.get(d.date.slice(0, 4)) ?? null },
     );
     d.anomalySeverity = topSeverity(d.anomalies);
   }

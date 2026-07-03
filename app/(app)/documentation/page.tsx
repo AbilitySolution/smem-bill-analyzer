@@ -1,6 +1,6 @@
 import Link from "next/link";
 import {
-  FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, UploadCloud, SlidersHorizontal,
+  FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, Plug, UploadCloud, SlidersHorizontal,
   ArrowRight, Lightbulb, ListChecks,
 } from "lucide-react";
 
@@ -36,14 +36,15 @@ const GUIDES: Guide[] = [
     ],
   },
   {
-    icon: FileSpreadsheet, title: "Rapport Excel", href: "/rapport-excel", hrefLabel: "Ouvrir Rapport Excel",
-    role: "Générer un classeur Excel multi-feuilles à partir d'un périmètre de factures.",
+    icon: FileSpreadsheet, title: "Rapports", href: "/rapport-excel", hrefLabel: "Ouvrir Rapports",
+    role: "Générer des rapports Excel complets : graphiques intégrés, TCD natifs, vues S1/S2 et annuelles, décomposition Base/HP/HC/part fixe/taxes.",
     steps: [
-      "Définissez le périmètre : période, communes, sites, catégorie, duplicatas.",
-      "Cochez les feuilles voulues (Synthèse, Factures, Consommation détaillée, Par commune, Par poste HP/HC/Base, Taxes & charges).",
-      "Le compteur indique en direct le nombre de factures concernées.",
-      "Cliquez « Générer » : le fichier .xlsx est mis en forme (en-têtes, totaux, formats €/kWh) et téléchargé.",
-      "Astuce : sélectionnez des factures dans Mes documents puis « Exporter Excel » pour préremplir le périmètre.",
+      "Choisissez un rapport prédéfini : par commune, par site, synthèse, avant/après rénovation (PEPP), ou évolution tarifaire.",
+      "Les périodes de facturation sont ventilées au pro-rata des jours sur les semestres (pas de somme naïve).",
+      "Cochez « Inclure les données du connecteur data logger » : données de démonstration dans une section distincte (placeholder sinon).",
+      "Les TCD s'actualisent automatiquement à l'ouverture du classeur dans Excel.",
+      "En bas de page, l'export personnalisé permet de composer un classeur feuille par feuille.",
+      "Astuce : sélectionnez des factures dans Mes documents puis « Exporter Excel » pour préremplir le périmètre de l'export personnalisé.",
     ],
   },
   {
@@ -58,12 +59,20 @@ const GUIDES: Guide[] = [
   },
   {
     icon: AlertTriangle, title: "Anomalies", href: "/anomalies", hrefLabel: "Ouvrir Anomalies", role:
-      "Repérer les factures atypiques (préversion) : un contrôle automatique de démonstration.",
+      "Repérer les factures atypiques (version bêta) : un contrôle automatique de démonstration.",
     steps: [
       "Les alertes sont classées par gravité (élevée / moyenne / faible).",
       "Survolez un point du graphique « Montant vs consommation » : l'alerte correspondante ressort dans la liste.",
       "« Marquer résolue » envoie l'alerte dans l'Historique (où l'on peut la Rouvrir).",
       "Depuis Mes documents, le lien « Résoudre l'anomalie » mène directement ici.",
+    ],
+  },
+  {
+    icon: Plug, title: "Connecteurs", href: "/connecteurs", hrefLabel: "Ouvrir Connecteurs",
+    role: "Version bêta — connecter des sources externes (EDF, dépôt des communes, data loggers, IPPER) pour obtenir à terme les données réelles de consommation.",
+    steps: [
+      "Aperçu non fonctionnel : aucune connexion réelle n'est établie à ce stade.",
+      "Le connecteur data logger alimente déjà les Rapports avec des données de démonstration (case dédiée).",
     ],
   },
   {

@@ -1,4 +1,4 @@
-// Détection d'anomalies par règles (fallback de démonstration — module Anomalies en préversion).
+// Détection d'anomalies par règles (fallback de démonstration — module Anomalies en version bêta).
 // Indépendant du score de précision OCR ; basé sur la cohérence métier des factures.
 
 export type Severity = "low" | "medium" | "high";

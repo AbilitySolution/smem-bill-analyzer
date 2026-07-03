@@ -8,6 +8,7 @@ import {
   FileSpreadsheet,
   Gauge,
   AlertTriangle,
+  Plug,
   BookOpen,
   UploadCloud,
   Settings,
@@ -26,9 +27,10 @@ type NavItem = { href: string; label: string; icon: typeof FileText; soon?: bool
 
 const mainNav: NavItem[] = [
   { href: "/documents", label: "Mes documents", icon: FileText },
-  { href: "/rapport-excel", label: "Rapport Excel", icon: FileSpreadsheet },
+  { href: "/rapport-excel", label: "Rapports", icon: FileSpreadsheet },
   { href: "/analyses", label: "Analyse de consommation", icon: Gauge },
   { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
+  { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true },
 ];
 
 const adminNav: NavItem[] = [
@@ -81,7 +83,7 @@ export function AbilitySidebar({
               <span className="truncate">{item.label}</span>
               {item.soon && (
                 <span className="ml-auto shrink-0 rounded-full bg-[var(--kn-yellow-soft)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#9a3412]">
-                  Préversion
+                  Version bêta
                 </span>
               )}
             </Link>

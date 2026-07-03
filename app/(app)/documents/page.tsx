@@ -20,7 +20,9 @@ export default async function DocumentsPage() {
 
 /** Génère en lot les URLs signées des PDF pour les vignettes (galerie / aperçu). */
 async function attachPreviews(docs: InvoiceDoc[]): Promise<InvoiceDoc[]> {
-  const paths = docs.map((d) => d.filePath).filter((p): p is string => !!p);
+  // Les factures simulées portent un file_path sentinelle `seed-sim/…` sans fichier réel :
+  // inutile (et coûteux à ~1000 chemins) de demander des URLs signées pour elles.
+  const paths = docs.map((d) => d.filePath).filter((p): p is string => !!p && !p.startsWith("seed-sim/"));
   if (!paths.length) return docs;
   try {
     const supabase = await createClient();
