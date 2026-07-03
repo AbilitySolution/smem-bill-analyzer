@@ -37,14 +37,13 @@ const GUIDES: Guide[] = [
   },
   {
     icon: FileSpreadsheet, title: "Rapports", href: "/rapport-excel", hrefLabel: "Ouvrir Rapports",
-    role: "Générer des rapports Excel complets : graphiques intégrés, TCD natifs, vues S1/S2 et annuelles, décomposition Base/HP/HC/part fixe/taxes.",
+    role: "Un seul flux « Générer un rapport Excel » : 3 rapports (Par commune, Avant/après travaux, Synthèse) avec séries temporelles, TCD natifs et décomposition tarifaire.",
     steps: [
-      "Choisissez un rapport prédéfini : par commune, par site, synthèse, avant/après rénovation (PEPP), ou évolution tarifaire.",
-      "Les périodes de facturation sont ventilées au pro-rata des jours sur les semestres (pas de somme naïve).",
-      "Cochez « Inclure les données du connecteur data logger » : données de démonstration dans une section distincte (placeholder sinon).",
-      "Les TCD s'actualisent automatiquement à l'ouverture du classeur dans Excel.",
-      "En bas de page, l'export personnalisé permet de composer un classeur feuille par feuille.",
-      "Astuce : sélectionnez des factures dans Mes documents puis « Exporter Excel » pour préremplir le périmètre de l'export personnalisé.",
+      "1 · Choisissez le type : Par commune (séries kWh/€ avec fenêtre de travaux marquée), Avant/après travaux (dates réelles SMEM, une feuille d'analyse), ou Synthèse (portefeuille).",
+      "2 · Définissez le périmètre : commune, dates, sites — ou sélectionnez des factures dans Mes documents puis « Exporter Excel » (préselection automatique).",
+      "3 · Option : « Inclure les données du connecteur data logger » (conso quotidienne + coupures, données de démonstration).",
+      "Les graphiques sont des séries temporelles avec axes et unités affichés ; les périodes de facturation sont ventilées au pro-rata des jours.",
+      "Les TCD s'actualisent à l'ouverture dans Excel ; la feuille « Données » (masquée) contient le détail normalisé.",
     ],
   },
   {

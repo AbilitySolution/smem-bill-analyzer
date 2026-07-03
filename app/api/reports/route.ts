@@ -9,9 +9,12 @@ import { createClient } from "@/lib/supabase/server";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const REPORTS = new Set(["commune", "site", "synthese", "avant_apres", "tarifs"]);
+const REPORTS = new Set(["commune", "avant_apres", "synthese"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+const uuidList = (v: unknown, max: number): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && UUID.test(x)).slice(0, max) : [];
 
 function run(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
@@ -29,16 +32,16 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
   const report = String(body.report ?? "");
   if (!REPORTS.has(report)) return NextResponse.json({ error: "Type de rapport inconnu." }, { status: 400 });
-  if (report === "commune" && !UUID.test(String(body.communeId ?? ""))) {
+  if ((report === "commune" || report === "avant_apres") && !UUID.test(String(body.communeId ?? ""))) {
     return NextResponse.json({ error: "Choisissez une commune." }, { status: 400 });
-  }
-  if (report === "site" && !UUID.test(String(body.siteId ?? ""))) {
-    return NextResponse.json({ error: "Choisissez un site." }, { status: 400 });
   }
 
   const params: Record<string, unknown> = { report, dataLogger: !!body.dataLogger };
   if (UUID.test(String(body.communeId ?? ""))) params.communeId = body.communeId;
-  if (UUID.test(String(body.siteId ?? ""))) params.siteId = body.siteId;
+  const ids = uuidList(body.ids, 1200);
+  if (ids.length) params.ids = ids;
+  const siteIds = uuidList(body.siteIds, 200);
+  if (siteIds.length) params.siteIds = siteIds;
   if (DATE.test(String(body.from ?? ""))) params.from = body.from;
   if (DATE.test(String(body.to ?? ""))) params.to = body.to;
 
@@ -53,7 +56,9 @@ export async function POST(request: Request) {
     console.error("[reports] python:", stderr.slice(0, 2000));
     const friendly = stderr.includes("openpyxl")
       ? "Python/openpyxl introuvable sur le serveur (pip3 install openpyxl)."
-      : "Échec de la génération du rapport.";
+      : stderr.includes("Aucune facture")
+        ? "Aucune facture dans le périmètre demandé."
+        : "Échec de la génération du rapport.";
     return NextResponse.json({ error: friendly }, { status: 500 });
   }
 

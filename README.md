@@ -1,8 +1,8 @@
 # Ability — Gestion documentaire & factures d'énergie
 
-Outil de centralisation de documents et d'**extraction intelligente des factures d'électricité** (bâtiments publics & éclairage public) : visionneuse PDF + correction des champs extraits, analyses de consommation, **rapports Excel multi-feuilles**, détection d'**anomalies** (préversion) et **thème clair/sombre**.
+Outil de centralisation de documents et d'**extraction intelligente des factures d'électricité** (bâtiments publics & éclairage public) : visionneuse PDF + correction des champs extraits, analyses de consommation, **rapports Excel multi-feuilles**, détection d'**anomalies** (version bêta) et **thème clair/sombre**.
 
-Stack : **Next.js 16** (App Router) · **React 19** · **Tailwind CSS v4** · **Supabase** (Postgres + Auth + Storage) · **Anthropic Claude** (OCR/extraction) · **Recharts** · **ExcelJS** · **pdf.js** · **JSZip**.
+Stack : **Next.js 16** (App Router) · **React 19** · **Tailwind CSS v4** · **Supabase** (Postgres + Auth + Storage) · **Anthropic Claude** (OCR/extraction) · **Recharts** · **openpyxl (Python)** · **pdf.js** · **JSZip**.
 
 ---
 
@@ -70,10 +70,10 @@ npm run lint    # linter
 - **Barre supérieure** globale : recherche de navigation (⌘K) vers n'importe quelle page, bascule **thème clair/sombre** (persistée).
 - **Hub « Mes documents »** : vues **Liste / Galerie** (vignette réelle de la 1ʳᵉ page du PDF) **/ Colonnes**, regroupement (commune/site/catégorie), recherche, **scores de confiance** OCR, **tickers d'anomalie**, sélection multiple → actions groupées (masquer/démasquer, supprimer, télécharger les PDF en ZIP, exporter), export **CSV** filtré.
 - **Extraction** : sélecteur de facture + visionneuse PDF redimensionnable + **tous les champs éditables** (corrections journalisées).
-- **Rapports** : 5 rapports Excel prédéfinis (par commune, par site, synthèse, avant/après rénovation PEPP, évolution tarifaire) générés en **Python/openpyxl** — **graphiques natifs + tableaux croisés dynamiques natifs** (actualisés à l'ouverture), décomposition Base/HP/HC/part fixe/taxes, périodes de facturation **ventilées au pro-rata des jours** sur les semestres ; case « données du connecteur data logger » (démo / placeholder) ; + export personnalisé feuille par feuille (ExcelJS).
+- **Rapports** : flux unique « Générer un rapport Excel » — 3 rapports (Par commune, Avant/après travaux, Synthèse) générés en **Python/openpyxl** : **séries temporelles** (axes et unités affichés, fenêtre de travaux marquée), **TCD natifs** actualisés à l'ouverture, décomposition Base/HP/HC/part fixe/taxes, avant/après aux **dates de travaux réelles SMEM** (fenêtre exclue, moyennes annualisées), périodes ventilées au pro-rata des jours ; case « données du connecteur data logger » (démo / placeholder) ; présélection de factures depuis Mes documents.
 - **Connecteurs** (version bêta) : aperçu des sources externes à venir (EDF, dépôt des communes, data loggers d'armoires, IPPER) — non fonctionnel à ce stade.
 - **Analyse de consommation** : évolution + répartition heures pleines/creuses (kWh / € / c€).
-- **Anomalies** (préversion) : détection par règles (cohérence des totaux, coût unitaire atypique…), graphiques interactifs, résolution + **historique**.
+- **Anomalies** (version bêta) : détection par règles (cohérence des totaux, coût unitaire atypique…), graphiques interactifs, résolution + **historique**.
 - **Documentation** : guide d'utilisation page par page + onglet « Champs d'extraction » (modèle OCR).
 
 ## Structure du projet
@@ -84,14 +84,14 @@ app/
     documents/                 # hub Mes documents : page (liste 3 vues) + extraction/ (éditeur)
     rapport-excel/             # générateur de rapports Excel
     analyses/                  # graphiques de consommation
-    anomalies/                 # module Anomalies (préversion)
+    anomalies/                 # module Anomalies (version bêta)
     documentation/             # guide + onglet champs/ (modèle d'extraction)
     upload/                    # import + extraction OCR d'une facture
-  api/                         # routes API (extract, invoices, export/excel, sites, communes…)
+  api/                         # routes API (extract, invoices, reports, sites, communes…)
   login/                       # authentification
 components/
   app-shell/                   # barre supérieure (recherche nav + thème)
-  documents/                   # hub, vues, sélection/actions, vignette PDF, builder Excel, badges
+  documents/                   # hub, vues, sélection/actions, vignette PDF, badges
   documentation/               # onglets de la page Documentation
   anomalies/                   # vue du module Anomalies
   factures/                    # visionneuse PDF, panneau d'extraction éditable
@@ -112,10 +112,10 @@ supabase/migrations/           # schéma de la base
 | `/` | redirige vers `/documents` |
 | `/documents` | hub Mes documents : vues Liste/Galerie/Colonnes, regroupement, confiance, tickers d'anomalie, sélection & actions groupées, export CSV |
 | `/documents/extraction?id=` | éditeur : sélecteur de facture + PDF redimensionnable + champs extraits éditables |
-| `/rapport-excel` | Rapports : 5 rapports prédéfinis (Python/openpyxl, TCD + graphiques natifs) + export personnalisé |
+| `/rapport-excel` | Générer un rapport Excel : 3 rapports (Par commune, Avant/après travaux, Synthèse) — Python/openpyxl, TCD + séries temporelles |
 | `/connecteurs` | Connecteurs (version bêta) : sources de données externes à venir |
 | `/analyses` | analyses de consommation (filtres commune/site/catégorie, kWh/€/c€) |
-| `/anomalies` | module Anomalies (préversion) : alertes, graphiques, résolution + historique |
+| `/anomalies` | module Anomalies (version bêta) : alertes, graphiques, résolution + historique |
 | `/documentation` · `/documentation/champs` | guide d'utilisation + champs du modèle d'extraction |
 | `/upload` | import et extraction OCR d'une facture |
 | `/factures`, `/factures/[id]`, `/documents/export`, `/champs` | anciennes routes — redirigent vers les nouvelles |

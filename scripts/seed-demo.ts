@@ -78,20 +78,20 @@ const BAT = (nom: string, kva = 9, ampere = 30): SiteDef => ({ nom, categorie: "
 
 const COMMUNES: CommuneDef[] = [
   // Existantes : on ne crée pas de sites (FSD complet), on complète juste les factures.
-  { nom: "Fonds-Saint-Denis", scale: 1.0, renovation: { start: "2021-02", end: "2022-02" } },
+  { nom: "Fonds-Saint-Denis", scale: 1.0, renovation: { start: "2020-06", end: "2022-06" } },
   {
-    nom: "Grand'Rivière", scale: 0.8, renovation: { start: "2022-11", end: "2023-08" },
+    nom: "Grand'Rivière", scale: 0.8, renovation: { start: "2020-06", end: "2022-03" },
     sites: [EP("EP Pointe Lamare", 6, 30), EP("EP Route de la Falaise", 9, 45), BAT("Bibliothèque", 6, 30)],
   },
   {
-    nom: "Morne-Rouge", scale: 1.6, renovation: { start: "2022-03", end: "2023-01" },
+    nom: "Morne-Rouge", scale: 1.6, renovation: { start: "2020-06", end: "2022-06" },
     sites: [
       EP("EP Bourg", 12, 60), EP("EP Champflore", 9, 45), EP("EP Savane Petit", 6, 30), EP("EP Route de la Trace", 12, 60),
       BAT("Mairie", 18, 30), BAT("Groupe scolaire", 18, 30), BAT("Salle polyvalente", 12, 30), BAT("Dispensaire", 6, 30),
     ],
   },
   {
-    nom: "Le Lamentin", scale: 4.0, renovation: { start: "2023-01", end: "2023-11" },
+    nom: "Le Lamentin", scale: 4.0, renovation: { start: "2021-03", end: "2022-09" },
     sites: [
       EP("EP Centre-bourg", 36, 60), EP("EP Place d'Armes", 24, 60), EP("EP Californie", 18, 60),
       EP("EP Longvilliers", 18, 60), EP("EP Bois d'Inde", 12, 45),
@@ -100,28 +100,28 @@ const COMMUNES: CommuneDef[] = [
     ],
   },
   {
-    nom: "Le Lorrain", scale: 1.4, renovation: { start: "2022-09", end: "2023-06" },
+    nom: "Le Lorrain", scale: 1.4, renovation: { start: "2021-02", end: "2022-06" },
     sites: [
       EP("EP Bourg", 12, 60), EP("EP Séguineau", 9, 45), EP("EP Carabin", 6, 30),
       BAT("Mairie", 18, 30), BAT("École des Filles", 12, 30), BAT("Salle des fêtes", 12, 30), BAT("Stade municipal", 9, 45),
     ],
   },
   {
-    nom: "Macouba", scale: 0.6, renovation: { start: "2023-06", end: "2024-02" },
+    nom: "Macouba", scale: 0.6, renovation: { start: "2020-06", end: "2022-05" },
     sites: [
       EP("EP Bourg", 6, 30), EP("EP Bellevue", 6, 30), EP("EP Nord-Plage", 6, 30),
       BAT("Mairie", 9, 30), BAT("École du bourg", 9, 30), BAT("Maison des associations", 6, 30),
     ],
   },
   {
-    nom: "Sainte-Anne", scale: 1.8, renovation: { start: "2022-05", end: "2023-03" },
+    nom: "Sainte-Anne", scale: 1.8, renovation: { start: "2021-03", end: "2022-07" },
     sites: [
       EP("EP Bourg", 18, 60), EP("EP Pointe Marin", 12, 60), EP("EP Anse Caritan", 9, 45), EP("EP Val d'Or", 6, 30),
       BAT("Mairie", 18, 30), BAT("Groupe scolaire", 18, 30), BAT("Marché couvert", 12, 30), BAT("Office de tourisme", 6, 30),
     ],
   },
   {
-    nom: "Les Anses-d'Arlet", scale: 1.2, renovation: { start: "2023-09", end: "2024-05" },
+    nom: "Les Anses-d'Arlet", scale: 1.2, renovation: { start: "2021-03", end: "2022-07" },
     sites: [
       EP("EP Bourg", 12, 60), EP("EP Grande Anse", 9, 45), EP("EP Petite Anse", 6, 30),
       BAT("Mairie", 12, 30), BAT("École du bourg", 12, 30), BAT("Salle polyvalente", 9, 30), BAT("Poste de secours", 6, 30),

@@ -1,43 +1,42 @@
 #!/usr/bin/env python3
 """
-Générateur de rapports Excel Ability (démo SMEM).
+Générateur de rapports Excel Ability (démo SMEM) — version simplifiée.
 
 Usage : python3 generate_report.py '<params-json>' <sortie.xlsx>
 Env   : SUPABASE_URL, SUPABASE_SERVICE_KEY
 
 params-json :
 {
-  "report": "commune" | "site" | "synthese" | "avant_apres" | "tarifs",
-  "communeId": "...uuid (report=commune)",
-  "siteId": "...uuid (report=site)",
-  "from": "YYYY-MM-DD" (optionnel), "to": "YYYY-MM-DD" (optionnel),
+  "report": "commune" | "avant_apres" | "synthese",
+  "communeId": "uuid (requis pour commune / avant_apres)",
+  "siteIds": ["uuid", ...] (optionnel),
+  "ids": ["uuid", ...] (optionnel — factures présélectionnées depuis Mes documents),
+  "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" (optionnels),
   "dataLogger": true|false
 }
 
-Points clés :
-- NORMALISATION DES PÉRIODES : chaque période de facturation (souvent août→février,
-  à cheval sur deux semestres calendaires) est ventilée PRO-RATA JOURS sur les
-  buckets S1 (janv–juin) / S2 (juil–déc). Aucune somme naïve.
-- Décomposition tarifaire : Base / HP / HC (part variable) + Part fixe + Taxes.
-- Graphiques natifs Excel (openpyxl) + TCD natifs (injection XML pivotCache
-  refreshOnLoad=1 : Excel reconstruit le cache à l'ouverture). En cas d'échec
-  d'injection, le classeur reste valide (feuilles d'agrégats équivalentes).
+Principes :
+- Séries temporelles chronologiques partout (X = semestres 2019-S1 → …), axes titrés avec unités.
+- Périodes de facturation ventilées PRO-RATA JOURS sur les semestres calendaires.
+- Avant/après travaux : dates RÉELLES SMEM par commune (mail du 03/07/2026), fenêtre de
+  travaux EXCLUE, moyennes annualisées.
+- Feuille « Données » masquée (source des TCD), triée chronologiquement → TCD ordonnés.
+- Données simulées : disclaimers explicites sur la page de garde.
 """
 import json
-import math
 import os
-import re
 import sys
 import urllib.request
 import urllib.parse
 import zipfile
 import shutil
-import tempfile
 from datetime import date, datetime, timedelta
 from collections import defaultdict
 
 from openpyxl import Workbook
-from openpyxl.chart import BarChart, LineChart, DoughnutChart, Reference, Series
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.series import SeriesLabel
+from openpyxl.drawing.fill import PatternFillProperties
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -51,10 +50,9 @@ HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
 TITLE_FONT = Font(bold=True, size=15, color=ORANGE_DARK)
 SUB_FONT = Font(italic=True, size=10, color=GREY)
 KPI_FILL = PatternFill("solid", fgColor=SOFT)
-THIN = Border(bottom=Side(style="thin", color="E8EAED"))
 EUR_FMT = '#,##0.00" €"'
+EUR0_FMT = '#,##0" €"'
 KWH_FMT = '#,##0" kWh"'
-CENT_FMT = '0.00" c€"'
 PCT_FMT = '0.0"%"'
 
 # ── Accès Supabase (REST, paginé) ────────────────────────────────────────────
@@ -76,28 +74,37 @@ def sb_get(path: str, params: dict) -> list:
             return rows
         start += 1000
 
+INVOICE_SELECT = "id,facture_number,facture_date,total_ht,tva,autres_taxes,total_ttc,categorie,commune_id,site_id,communes(nom),sites(nom,pdl,kva)"
+
 def load_data(p: dict):
-    inv_params = {
-        "select": "id,facture_number,facture_date,total_ht,tva,autres_taxes,total_ttc,categorie,commune_id,site_id,communes(nom),sites(nom,pdl,kva)",
-        "archived": "eq.false", "order": "facture_date.asc",
-    }
+    base = {"select": INVOICE_SELECT, "archived": "eq.false", "order": "facture_date.asc"}
     if p.get("communeId"):
-        inv_params["commune_id"] = f"eq.{p['communeId']}"
-    if p.get("siteId"):
-        inv_params["site_id"] = f"eq.{p['siteId']}"
+        base["commune_id"] = f"eq.{p['communeId']}"
     if p.get("from"):
-        inv_params["facture_date"] = f"gte.{p['from']}"
-    invoices = sb_get("invoices", inv_params)
+        base["facture_date"] = f"gte.{p['from']}"
+    ids = p.get("ids") or []
+    if ids:
+        invoices = []
+        for i in range(0, len(ids), 60):  # limite de longueur d'URL PostgREST
+            q = dict(base)
+            q["id"] = f"in.({','.join(ids[i:i + 60])})"
+            invoices.extend(sb_get("invoices", q))
+    else:
+        invoices = sb_get("invoices", base)
     if p.get("to"):
         invoices = [i for i in invoices if i["facture_date"] <= p["to"]]
-    ids = {i["id"] for i in invoices}
+    site_ids = set(p.get("siteIds") or [])
+    if site_ids:
+        invoices = [i for i in invoices if i.get("site_id") in site_ids]
+    inv_ids = {i["id"] for i in invoices}
     periods = [r for r in sb_get("consumption_periods", {
-        "select": "invoice_id,poste_tarifaire,period_start,period_end,consommation_kwh,prix_unitaire_ckwh,montant_eur"}) if r["invoice_id"] in ids]
+        "select": "invoice_id,poste_tarifaire,period_start,period_end,consommation_kwh,prix_unitaire_ckwh,montant_eur"}) if r["invoice_id"] in inv_ids]
     charges = [r for r in sb_get("invoice_charges", {
-        "select": "invoice_id,category,libelle,period_start,period_end,montant_eur"}) if r["invoice_id"] in ids]
-    return invoices, periods, charges
+        "select": "invoice_id,category,libelle,period_start,period_end,montant_eur"}) if r["invoice_id"] in inv_ids]
+    communes = sb_get("communes", {"select": "id,nom,points_lumineux,armoires,travaux_debut,travaux_fin,travaux_estimes"})
+    return invoices, periods, charges, {c["id"]: c for c in communes}
 
-# ── Normalisation pro-rata sur semestres calendaires ─────────────────────────
+# ── Normalisation pro-rata (semestres calendaires) ───────────────────────────
 def classify(poste: str) -> str:
     s = (poste or "").lower()
     if "pleine" in s or s.startswith("hp"):
@@ -106,11 +113,10 @@ def classify(poste: str) -> str:
         return "HC"
     return "Base"
 
-def d(s: str) -> date:
-    return date.fromisoformat(s)
+def d(s):
+    return date.fromisoformat(s) if s else None
 
 def semester_buckets(start: date, end: date):
-    """Rend [(annee, semestre, jours_de_chevauchement)] pour [start, end] inclus."""
     out = []
     y = start.year
     while y <= end.year:
@@ -121,8 +127,12 @@ def semester_buckets(start: date, end: date):
         y += 1
     return out
 
+def fallback_range(inv):
+    fd = d(inv["facture_date"])
+    return fd - timedelta(days=181), fd
+
 def normalize(invoices, periods, charges):
-    """→ lignes longues : 1 ligne par (facture × poste × bucket semestriel), pro-rata jours."""
+    """→ lignes longues (facture × poste × bucket semestriel), pro-rata jours, TRIÉES chronologiquement."""
     inv_by_id = {i["id"]: i for i in invoices}
     period_range = {}
     for r in periods:
@@ -134,8 +144,7 @@ def normalize(invoices, periods, charges):
 
     def push(inv, type_, poste, start, end, kwh, eur):
         if not start or not end:
-            fd = d(inv["facture_date"])
-            start, end = fd - timedelta(days=181), fd  # repli : semestre glissant avant facture
+            start, end = fallback_range(inv)
         total_days = (end - start).days + 1
         for (yy, hh, days) in semester_buckets(start, end):
             f = days / total_days
@@ -143,68 +152,137 @@ def normalize(invoices, periods, charges):
                 "commune": (inv.get("communes") or {}).get("nom", "—"),
                 "site": (inv.get("sites") or {}).get("nom", "—"),
                 "cat": "Éclairage public" if inv.get("categorie") == "eclairage_public" else "Bâtiment",
-                "type": type_, "poste": poste, "annee": yy, "sem": f"S{hh}", "periode": f"{yy}-S{hh}",
-                "kwh": round(kwh * f, 1), "eur": round(eur * f, 2),
+                "type": type_, "poste": poste, "annee": yy, "sem": hh, "periode": f"{yy}-S{hh}",
+                "kwh": kwh * f, "eur": eur * f,
                 "num": inv["facture_number"], "date": inv["facture_date"],
             })
 
     for r in periods:
         inv = inv_by_id.get(r["invoice_id"])
-        if not inv:
-            continue
-        push(inv, "Consommation", classify(r["poste_tarifaire"]),
-             d(r["period_start"]) if r["period_start"] else None,
-             d(r["period_end"]) if r["period_end"] else None,
-             float(r["consommation_kwh"] or 0), float(r["montant_eur"] or 0))
+        if inv:
+            push(inv, "Consommation", classify(r["poste_tarifaire"]), d(r["period_start"]), d(r["period_end"]),
+                 float(r["consommation_kwh"] or 0), float(r["montant_eur"] or 0))
     for r in charges:
         inv = inv_by_id.get(r["invoice_id"])
         if not inv:
             continue
         typ = "Part fixe" if r["category"] == "fixed" else "Taxes"
-        poste = "Part fixe" if typ == "Part fixe" else (r["libelle"] or "Taxe")
         rng = period_range.get(r["invoice_id"])
-        start = d(r["period_start"]) if r["period_start"] else (rng[0] if rng else None)
-        end = d(r["period_end"]) if r["period_end"] else (rng[1] if rng else None)
-        push(inv, typ, poste, start, end, 0.0, float(r["montant_eur"] or 0))
-    return rows
+        start = d(r["period_start"]) or (rng[0] if rng else None)
+        end = d(r["period_end"]) or (rng[1] if rng else None)
+        push(inv, typ, typ if typ == "Part fixe" else (r["libelle"] or "Taxe"), start, end, 0.0, float(r["montant_eur"] or 0))
 
-# ── Agrégations utilitaires ──────────────────────────────────────────────────
-def agg(rows, keyf):
-    out = defaultdict(lambda: {"kwh": 0.0, "eur": 0.0})
-    for r in rows:
-        k = keyf(r)
-        out[k]["kwh"] += r["kwh"]
-        out[k]["eur"] += r["eur"]
-    return out
+    rows.sort(key=lambda r: (r["annee"], r["sem"], r["commune"], r["site"], r["type"], r["poste"]))
+    return rows
 
 def periods_sorted(rows):
     return sorted({r["periode"] for r in rows})
 
-def years_sorted(rows):
-    return sorted({r["annee"] for r in rows})
+# ── Avant/après : allocation par fenêtres de dates RÉELLES ───────────────────
+TODAY = date.today()
+BEFORE_START = date(2019, 1, 1)
 
-# ── Écriture des feuilles ────────────────────────────────────────────────────
-def style_header(ws, row=1, upto=None):
-    upto = upto or ws.max_column
+def overlap_days(a0, a1, b0, b1):
+    lo, hi = max(a0, b0), min(a1, b1)
+    return max(0, (hi - lo).days + 1)
+
+def alloc_windows(invoices, periods, charges, debut: date, fin: date, keyf):
+    """Ventile kWh (conso) et € (toutes composantes) sur AVANT [2019, debut) et APRÈS (fin, auj.],
+    pro-rata jours ; la fenêtre de travaux est exclue. Rend {key: {kb,ka,eb,ea}} annualisés ensuite."""
+    inv_by_id = {i["id"]: i for i in invoices}
+    before = (BEFORE_START, debut - timedelta(days=1))
+    after = (fin + timedelta(days=1), TODAY)
+    out = defaultdict(lambda: {"kb": 0.0, "ka": 0.0, "eb": 0.0, "ea": 0.0})
+
+    def add(inv, start, end, kwh, eur):
+        if not start or not end:
+            start, end = fallback_range(inv)
+        total = (end - start).days + 1
+        k = keyf(inv)
+        fb = overlap_days(start, end, *before) / total
+        fa = overlap_days(start, end, *after) / total
+        out[k]["kb"] += kwh * fb
+        out[k]["ka"] += kwh * fa
+        out[k]["eb"] += eur * fb
+        out[k]["ea"] += eur * fa
+
+    for r in periods:
+        inv = inv_by_id.get(r["invoice_id"])
+        if inv:
+            add(inv, d(r["period_start"]), d(r["period_end"]), float(r["consommation_kwh"] or 0), float(r["montant_eur"] or 0))
+    for r in charges:
+        inv = inv_by_id.get(r["invoice_id"])
+        if inv:
+            add(inv, d(r["period_start"]), d(r["period_end"]), 0.0, float(r["montant_eur"] or 0))
+
+    yb = max(0.25, ((before[1] - before[0]).days + 1) / 365.25)
+    ya = max(0.25, ((after[1] - after[0]).days + 1) / 365.25)
+    return {k: {"kwh_avant": v["kb"] / yb, "kwh_apres": v["ka"] / ya,
+                "eur_avant": v["eb"] / yb, "eur_apres": v["ea"] / ya} for k, v in out.items()}
+
+# ── Graphiques (séries temporelles, axes titrés) ─────────────────────────────
+def make_timeseries_chart(ws, anchor, title, y_title, cats_ref, data_ref, band_ref=None):
+    """Courbe temporelle ; bande grisée « Fenêtre de travaux » optionnelle (barres superposées)."""
+    line = LineChart()
+    line.add_data(data_ref, titles_from_data=True)
+    if band_ref is not None:
+        chart = BarChart()
+        chart.type = "col"
+        chart.gapWidth = 0
+        chart.add_data(band_ref, titles_from_data=True)
+        s = chart.series[0]
+        s.graphicalProperties.solidFill = "D9D9D9"
+        s.graphicalProperties.line.noFill = True
+        chart += line
+    else:
+        chart = line
+    chart.title = title
+    chart.height, chart.width = 9, 21
+    chart.x_axis.title = "Période (semestre)"
+    chart.y_axis.title = y_title
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.set_categories(cats_ref)
+    ws.add_chart(chart, anchor)
+    return chart
+
+def make_bar_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref):
+    ch = BarChart()
+    ch.type = "col"
+    ch.title = title
+    ch.height, ch.width = 9, 21
+    ch.x_axis.title = x_title
+    ch.y_axis.title = y_title
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.add_data(data_ref, titles_from_data=True)
+    ch.set_categories(cats_ref)
+    ws.add_chart(ch, anchor)
+    return ch
+
+def style_header_row(ws, row, upto):
     for c in range(1, upto + 1):
         cell = ws.cell(row=row, column=c)
         cell.fill = HDR_FILL
         cell.font = HDR_FONT
         cell.alignment = Alignment(vertical="center")
-    ws.freeze_panes = ws.cell(row=row + 1, column=1)
 
-def sheet_garde(wb, p, invoices, scope_label):
+# ── Feuilles ─────────────────────────────────────────────────────────────────
+def travaux_label(ci):
+    if not ci or not ci.get("travaux_debut"):
+        return "n.d."
+    est = " (estimé)" if ci.get("travaux_estimes") else ""
+    return f"{datetime.fromisoformat(ci['travaux_debut']).strftime('%d/%m/%Y')} → {datetime.fromisoformat(ci['travaux_fin']).strftime('%d/%m/%Y')}{est}"
+
+def sheet_garde(wb, p, invoices, scope_label, ci=None):
     ws = wb.active
     ws.title = "Garde"
     ws["A1"] = "Ability — Rapport d'analyse des factures d'électricité"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = "Syndicat Mixte d'Électricité de la Martinique (SMEM)"
     ws["A2"].font = SUB_FONT
-    labels = {
-        "commune": "Rapport par commune", "site": "Rapport par site", "synthese": "Rapport de synthèse",
-        "avant_apres": "Rapport avant / après rénovation (PEPP)", "tarifs": "Évolution tarifaire & effet prix-volume",
-    }
-    rows = [
+    labels = {"commune": "Rapport par commune", "avant_apres": "Rapport avant / après travaux (PEPP)", "synthese": "Rapport de synthèse"}
+    items = [
         ("Type de rapport", labels.get(p["report"], p["report"])),
         ("Périmètre", scope_label),
         ("Factures analysées", len(invoices)),
@@ -212,248 +290,296 @@ def sheet_garde(wb, p, invoices, scope_label):
         ("Généré le", datetime.now().strftime("%d/%m/%Y %H:%M")),
         ("Données data logger", "Incluses (démonstration)" if p.get("dataLogger") else "Non incluses (espace réservé)"),
     ]
+    if ci:
+        items.insert(2, ("Travaux d'éclairage public", travaux_label(ci)))
+        if ci.get("points_lumineux"):
+            items.insert(3, ("Parc EP (référentiel SMEM)", f"{ci['points_lumineux']} points lumineux · {ci['armoires']} armoires"))
     r = 4
-    for k, v in rows:
+    for k, v in items:
         ws.cell(row=r, column=1, value=k).font = Font(bold=True)
-        c = ws.cell(row=r, column=2, value=v)
-        c.fill = KPI_FILL
+        ws.cell(row=r, column=2, value=v).fill = KPI_FILL
         r += 1
-    ws["A11"] = "Méthodologie : les périodes de facturation (souvent à cheval sur deux semestres) sont ventilées"
-    ws["A12"] = "au pro-rata des jours sur les semestres calendaires S1 (janv–juin) et S2 (juil–déc)."
-    ws["A11"].font = SUB_FONT
-    ws["A12"].font = SUB_FONT
-    ws.column_dimensions["A"].width = 26
-    ws.column_dimensions["B"].width = 52
+    notes = [
+        "AVERTISSEMENT : rapport de démonstration — les factures sont SIMULÉES, calibrées sur les données",
+        "réelles de Fonds-Saint-Denis (tarifs, saisonnalité, impact des travaux). Les dates de travaux par",
+        "commune proviennent du référentiel réel SMEM (mail du 03/07/2026) ; celles marquées « estimé »",
+        "correspondent aux communes absentes du référentiel.",
+        "",
+        "Méthode : les périodes de facturation (souvent à cheval sur deux semestres) sont ventilées au",
+        "pro-rata des jours sur les semestres calendaires S1 (janv–juin) / S2 (juil–déc).",
+        "La feuille masquée « Données » contient le détail normalisé et alimente les tableaux croisés",
+        "dynamiques (clic droit sur l'onglet → Afficher pour la consulter).",
+    ]
+    r += 1
+    for line in notes:
+        ws.cell(row=r, column=1, value=line).font = SUB_FONT
+        r += 1
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 60
     return ws
 
 DATA_HEADERS = ["Commune", "Site", "Catégorie", "Type", "Poste", "Année", "Semestre", "Période", "kWh", "Montant €", "Prix moyen c€/kWh", "N° facture", "Date facture"]
+COL = {h: i for i, h in enumerate(DATA_HEADERS)}
 
 def sheet_donnees(wb, rows):
     ws = wb.create_sheet("Données")
     ws.append(DATA_HEADERS)
     for r in rows:
         prix = round(r["eur"] / r["kwh"] * 100, 2) if r["kwh"] > 0 and r["type"] == "Consommation" else None
-        ws.append([r["commune"], r["site"], r["cat"], r["type"], r["poste"], r["annee"], r["sem"], r["periode"],
+        ws.append([r["commune"], r["site"], r["cat"], r["type"], r["poste"], r["annee"], f"S{r['sem']}", r["periode"],
                    round(r["kwh"], 1), round(r["eur"], 2), prix, r["num"], r["date"]])
-    style_header(ws)
-    widths = [20, 24, 16, 14, 16, 8, 10, 10, 11, 12, 16, 22, 12]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-    for col, fmt in ((9, KWH_FMT), (10, EUR_FMT), (11, CENT_FMT)):
-        for row in range(2, ws.max_row + 1):
-            ws.cell(row=row, column=col).number_format = fmt
-    ws.auto_filter.ref = f"A1:M{ws.max_row}"
+    style_header_row(ws, 1, len(DATA_HEADERS))
+    ws.sheet_state = "hidden"  # source des TCD, volontairement masquée
+    return ws
+
+def in_works_window(periode: str, ci) -> bool:
+    if not ci or not ci.get("travaux_debut"):
+        return False
+    y, s = periode.split("-S")
+    sem_start = date(int(y), 1 if s == "1" else 7, 1)
+    sem_end = date(int(y), 6 if s == "1" else 12, 30)
+    return sem_start <= d(ci["travaux_fin"]) and sem_end >= d(ci["travaux_debut"])
+
+def sheet_evolution(wb, rows, ci=None, title_suffix=""):
+    """Séries temporelles kWh & € (bande travaux si commune) + décomposition annuelle compacte."""
+    ws = wb.create_sheet("Évolution")
+    ws["A1"] = f"Évolution semestrielle{title_suffix}"
+    ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
+    ws["A2"] = "Montants toutes composantes (part variable + part fixe + taxes) ; kWh = énergie consommée."
+    ws["A2"].font = SUB_FONT
+
+    pers = periods_sorted(rows)
+    kwh_by, eur_by = defaultdict(float), defaultdict(float)
+    for r in rows:
+        eur_by[r["periode"]] += r["eur"]
+        if r["type"] == "Consommation":
+            kwh_by[r["periode"]] += r["kwh"]
+    kmax = max([kwh_by[p] for p in pers] or [0])
+    emax = max([eur_by[p] for p in pers] or [0])
+
+    headers = ["Période", "Consommation (kWh)", "Dépense (€)"]
+    with_band = ci is not None and ci.get("travaux_debut")
+    if with_band:
+        headers += ["Fenêtre travaux (kWh)", "Fenêtre travaux (€)"]
+    hr = 4
+    for j, h in enumerate(headers):
+        ws.cell(row=hr, column=1 + j, value=h)
+    style_header_row(ws, hr, len(headers))
+    ri = hr + 1
+    for p in pers:
+        row = [p, round(kwh_by[p]), round(eur_by[p], 2)]
+        if with_band:
+            band = in_works_window(p, ci)
+            row += [round(kmax * 1.05) if band else None, round(emax * 1.05) if band else None]
+        ws.append(row)
+        ws.cell(row=ri, column=2).number_format = KWH_FMT
+        ws.cell(row=ri, column=3).number_format = EUR_FMT
+        ri += 1
+    last = ri - 1
+    cats = Reference(ws, min_col=1, min_row=hr + 1, max_row=last)
+    kwh_ref = Reference(ws, min_col=2, min_row=hr, max_row=last)
+    eur_ref = Reference(ws, min_col=3, min_row=hr, max_row=last)
+    band_k = Reference(ws, min_col=4, min_row=hr, max_row=last) if with_band else None
+    band_e = Reference(ws, min_col=5, min_row=hr, max_row=last) if with_band else None
+    anchor_row = last + 2
+    make_timeseries_chart(ws, f"A{anchor_row}", f"Consommation par semestre{title_suffix}", "Consommation (kWh)", cats, kwh_ref, band_k)
+    make_timeseries_chart(ws, f"A{anchor_row + 19}", f"Dépense par semestre{title_suffix}", "Dépense (€ TTC)", cats, eur_ref, band_e)
+    if with_band:
+        ws.cell(row=anchor_row + 38, column=1,
+                value=f"Bande grisée = fenêtre de travaux d'éclairage public : {travaux_label(ci)}.").font = SUB_FONT
+
+    # Décomposition tarifaire compacte (par année, en €)
+    years = sorted({r["annee"] for r in rows})
+    postes = ["Base", "HP", "HC", "Part fixe", "Taxes"]
+    def poste_of(r):
+        return r["poste"] if r["type"] == "Consommation" else ("Part fixe" if r["type"] == "Part fixe" else "Taxes")
+    dec = defaultdict(float)
+    for r in rows:
+        dec[(poste_of(r), r["annee"])] += r["eur"]
+    top = anchor_row + 40
+    ws.cell(row=top, column=1, value="Décomposition de la dépense par composante tarifaire (€)").font = Font(bold=True, size=12, color=ORANGE_DARK)
+    ws.cell(row=top + 1, column=1, value="Composante")
+    for j, y in enumerate(years):
+        ws.cell(row=top + 1, column=2 + j, value=y)
+    style_header_row(ws, top + 1, 1 + len(years))
+    for i, po in enumerate(postes):
+        ws.cell(row=top + 2 + i, column=1, value=po)
+        for j, y in enumerate(years):
+            c = ws.cell(row=top + 2 + i, column=2 + j, value=round(dec.get((po, y), 0), 2))
+            c.number_format = EUR0_FMT
+    ws.column_dimensions["A"].width = 24
+    for col in "BCDE":
+        ws.column_dimensions[col].width = 16
     return ws
 
 def write_matrix(ws, top, left_label, col_keys, line_keys, values, fmt, title):
-    """Écrit un bloc matrice (lignes × périodes) et rend (r0, c0, nrows, ncols)."""
     ws.cell(row=top, column=1, value=title).font = Font(bold=True, size=12, color=ORANGE_DARK)
     hr = top + 1
     ws.cell(row=hr, column=1, value=left_label)
     for j, ck in enumerate(col_keys):
         ws.cell(row=hr, column=2 + j, value=ck)
-    for c in range(1, len(col_keys) + 2):
-        cell = ws.cell(row=hr, column=c)
-        cell.fill = HDR_FILL
-        cell.font = HDR_FONT
+    style_header_row(ws, hr, len(col_keys) + 1)
     for i, lk in enumerate(line_keys):
         ws.cell(row=hr + 1 + i, column=1, value=lk)
         for j, ck in enumerate(col_keys):
             v = values.get((lk, ck))
             cell = ws.cell(row=hr + 1 + i, column=2 + j, value=round(v, 2) if v else None)
             cell.number_format = fmt
-    total_row = hr + 1 + len(line_keys)
-    ws.cell(row=total_row, column=1, value="TOTAL").font = Font(bold=True)
+    tr = hr + 1 + len(line_keys)
+    ws.cell(row=tr, column=1, value="TOTAL").font = Font(bold=True)
     for j, ck in enumerate(col_keys):
-        tot = sum(values.get((lk, ck)) or 0 for lk in line_keys)
-        cell = ws.cell(row=total_row, column=2 + j, value=round(tot, 2))
+        cell = ws.cell(row=tr, column=2 + j, value=round(sum(values.get((lk, ck)) or 0 for lk in line_keys), 2))
         cell.number_format = fmt
         cell.font = Font(bold=True)
         cell.fill = KPI_FILL
     ws.column_dimensions["A"].width = 26
-    return hr, 1, len(line_keys) + 1, len(col_keys)
+    return tr
 
-def add_line_chart(ws, anchor, title, data_ref, cats_ref, y_title):
-    ch = LineChart()
-    ch.title = title
-    ch.height, ch.width = 8, 20
-    ch.y_axis.title = y_title
-    ch.add_data(data_ref, titles_from_data=True)
-    ch.set_categories(cats_ref)
-    ws.add_chart(ch, anchor)
-
-def sheet_semestres(wb, rows, group_field, group_label):
-    """Feuille « Par semestre » : matrices € et kWh (group × période) + graphiques."""
-    ws = wb.create_sheet("Par semestre")
-    cols = periods_sorted(rows)
-    a_eur = agg([r for r in rows], lambda r: (r[group_field], r["periode"]))
-    conso = [r for r in rows if r["type"] == "Consommation"]
-    a_kwh = agg(conso, lambda r: (r[group_field], r["periode"]))
-    lines = sorted({r[group_field] for r in rows})
-    hr1, _, n1, nc = write_matrix(ws, 1, group_label, cols, lines, {k: v["eur"] for k, v in a_eur.items()}, EUR_FMT, "Dépenses TTC-approchées par semestre (€) — toutes composantes")
-    top2 = hr1 + n1 + 3
-    hr2, _, n2, _ = write_matrix(ws, top2, group_label, cols, lines, {k: v["kwh"] for k, v in a_kwh.items()}, KWH_FMT, "Consommation par semestre (kWh)")
-    # Graphiques sur les lignes TOTAL
-    ncols = len(cols)
-    cats = Reference(ws, min_col=2, max_col=1 + ncols, min_row=hr1, max_row=hr1)
-    data_eur = Reference(ws, min_col=1, max_col=1 + ncols, min_row=hr1 + n1, max_row=hr1 + n1)
-    add_line_chart(ws, f"A{hr2 + n2 + 3}", "Évolution des dépenses (€)", data_eur, cats, "€")
-    data_kwh = Reference(ws, min_col=1, max_col=1 + ncols, min_row=hr2 + n2, max_row=hr2 + n2)
-    add_line_chart(ws, f"L{hr2 + n2 + 3}", "Évolution de la consommation (kWh)", data_kwh, cats, "kWh")
+def sheet_par_site(wb, rows):
+    ws = wb.create_sheet("Par site")
+    pers = periods_sorted(rows)
+    sites = sorted({r["site"] for r in rows})
+    eur = defaultdict(float)
+    kwh = defaultdict(float)
+    for r in rows:
+        eur[(r["site"], r["periode"])] += r["eur"]
+        if r["type"] == "Consommation":
+            kwh[(r["site"], r["periode"])] += r["kwh"]
+    tr1 = write_matrix(ws, 1, "Site", pers, sites, eur, EUR0_FMT, "Dépense par site et par semestre (€, toutes composantes)")
+    write_matrix(ws, tr1 + 3, "Site", pers, sites, kwh, KWH_FMT, "Consommation par site et par semestre (kWh)")
     return ws
 
-def sheet_decomposition(wb, rows):
-    """Décomposition tarifaire : Base / HP / HC / Part fixe / Taxes, par année + anneau."""
-    ws = wb.create_sheet("Décomposition")
-    years = years_sorted(rows)
-    postes = ["Base", "HP", "HC", "Part fixe", "Taxes"]
-    def poste_of(r):
-        return r["poste"] if r["type"] == "Consommation" else ("Part fixe" if r["type"] == "Part fixe" else "Taxes")
-    a = agg(rows, lambda r: (poste_of(r), r["annee"]))
-    hr, _, n, nc = write_matrix(ws, 1, "Composante", [str(y) for y in years], postes,
-                                {(p, str(y)): (a.get((p, y)) or {"eur": 0})["eur"] for p in postes for y in years},
-                                EUR_FMT, "Décomposition de la dépense par composante tarifaire (€)")
-    # kWh par poste variable
-    conso = [r for r in rows if r["type"] == "Consommation"]
-    ak = agg(conso, lambda r: (r["poste"], r["annee"]))
-    top2 = hr + n + 3
-    write_matrix(ws, top2, "Poste", [str(y) for y in years], ["Base", "HP", "HC"],
-                 {(p, str(y)): (ak.get((p, y)) or {"kwh": 0})["kwh"] for p in ["Base", "HP", "HC"] for y in years},
-                 KWH_FMT, "Consommation par poste tarifaire (kWh)")
-    # Anneau : répartition dernière année complète
-    last = years[-1] if years else None
-    if last:
-        ch = DoughnutChart()
-        ch.title = f"Répartition de la dépense {last}"
-        labels = Reference(ws, min_col=1, min_row=hr + 1, max_row=hr + len(postes))
-        col = 1 + len(years)  # dernière colonne d'années
-        data = Reference(ws, min_col=col + 0, max_col=col, min_row=hr, max_row=hr + len(postes))
-        ch.add_data(data, titles_from_data=True)
-        ch.set_categories(labels)
-        ch.height, ch.width = 8, 12
-        ws.add_chart(ch, f"A{top2 + 8}")
-    return ws
-
-def detect_renovation(rows_commune):
-    """Détecte la fenêtre de travaux EP : plus forte baisse de kWh EP entre années consécutives."""
-    ep = [r for r in rows_commune if r["type"] == "Consommation" and r["cat"] == "Éclairage public"]
-    per_year = defaultdict(float)
-    for r in ep:
-        per_year[r["annee"]] += r["kwh"]
-    ys = sorted(y for y in per_year if per_year[y] > 0)
-    best, drop_y = 0.0, None
-    for a, b in zip(ys, ys[1:]):
-        if per_year[a] > 0:
-            dr = (per_year[a] - per_year[b]) / per_year[a]
-            if dr > best:
-                best, drop_y = dr, b
-    return drop_y, best, per_year
-
-def sheet_avant_apres(wb, rows):
+def sheet_avant_apres(wb, rows, alloc_site, ci, commune_nom):
+    """UNE feuille : méthode, tableau par site, 2 histogrammes (X = sites), 2 courbes avec bande travaux."""
     ws = wb.create_sheet("Avant-Après")
-    ws["A1"] = "Analyse avant / après rénovation de l'éclairage public (programme PEPP)"
+    ws["A1"] = f"Avant / après travaux d'éclairage public — {commune_nom}"
     ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
-    ws["A2"] = "Fenêtre de travaux estimée automatiquement : année de plus forte baisse de consommation EP."
-    ws["A2"].font = SUB_FONT
-    headers = ["Commune", "Année charnière (est.)", "kWh EP avant (moy./an)", "kWh EP après (moy./an)", "Baisse conso", "€ EP avant (moy./an)", "€ EP après (moy./an)", "Évolution €"]
-    ws.append([])
-    ws.append(headers)
-    hr = 4
-    style_header(ws, row=hr)
-    communes = sorted({r["commune"] for r in rows})
+    meth = [
+        f"Travaux : {travaux_label(ci)} (référentiel SMEM).",
+        "Méthode : AVANT = 01/01/2019 → veille du lancement ; APRÈS = lendemain de l'achèvement → aujourd'hui.",
+        "La fenêtre de travaux est EXCLUE. Moyennes annualisées (pro-rata jours). € = toutes composantes.",
+    ]
+    for i, m in enumerate(meth):
+        ws.cell(row=2 + i, column=1, value=m).font = SUB_FONT
+
+    headers = ["Site", "kWh/an avant", "kWh/an après", "Δ conso", "€/an avant", "€/an après", "Δ dépense"]
+    hr = 6
+    for j, h in enumerate(headers):
+        ws.cell(row=hr, column=1 + j, value=h)
+    style_header_row(ws, hr, len(headers))
+    sites = sorted(alloc_site.keys())
     ri = hr + 1
-    for cm in communes:
-        sub = [r for r in rows if r["commune"] == cm]
-        pivot_y, drop, per_year = detect_renovation(sub)
-        ep_eur = defaultdict(float)
-        for r in sub:
-            if r["cat"] == "Éclairage public":
-                ep_eur[r["annee"]] += r["eur"]
-        if not pivot_y:
-            ws.append([cm, "n.d.", None, None, None, None, None, None])
+    for s in sites:
+        a = alloc_site[s]
+        dk = (a["kwh_apres"] - a["kwh_avant"]) / a["kwh_avant"] * 100 if a["kwh_avant"] else None
+        de = (a["eur_apres"] - a["eur_avant"]) / a["eur_avant"] * 100 if a["eur_avant"] else None
+        ws.append([s, round(a["kwh_avant"]), round(a["kwh_apres"]), dk, round(a["eur_avant"], 2), round(a["eur_apres"], 2), de])
+        for col, fmt in ((2, KWH_FMT), (3, KWH_FMT), (4, PCT_FMT), (5, EUR0_FMT), (6, EUR0_FMT), (7, PCT_FMT)):
+            ws.cell(row=ri, column=col).number_format = fmt
+        ri += 1
+    # TOTAL
+    tk_av = sum(alloc_site[s]["kwh_avant"] for s in sites)
+    tk_ap = sum(alloc_site[s]["kwh_apres"] for s in sites)
+    te_av = sum(alloc_site[s]["eur_avant"] for s in sites)
+    te_ap = sum(alloc_site[s]["eur_apres"] for s in sites)
+    ws.append(["TOTAL", round(tk_av), round(tk_ap), (tk_ap - tk_av) / tk_av * 100 if tk_av else None,
+               round(te_av, 2), round(te_ap, 2), (te_ap - te_av) / te_av * 100 if te_av else None])
+    for col, fmt in ((2, KWH_FMT), (3, KWH_FMT), (4, PCT_FMT), (5, EUR0_FMT), (6, EUR0_FMT), (7, PCT_FMT)):
+        cell = ws.cell(row=ri, column=col)
+        cell.number_format = fmt
+        cell.font = Font(bold=True)
+        cell.fill = KPI_FILL
+    ws.cell(row=ri, column=1).font = Font(bold=True)
+    last_site_row = ri - 1
+
+    # Histogrammes X = sites
+    cats = Reference(ws, min_col=1, min_row=hr + 1, max_row=last_site_row)
+    a_row = ri + 2
+    make_bar_chart(ws, f"A{a_row}", "Consommation moyenne annuelle par site — avant vs après travaux",
+                   "Sites de la commune", "Consommation (kWh / an)",
+                   cats, Reference(ws, min_col=2, max_col=3, min_row=hr, max_row=last_site_row))
+    make_bar_chart(ws, f"A{a_row + 19}", "Dépense moyenne annuelle par site — avant vs après travaux",
+                   "Sites de la commune", "Dépense (€ / an)",
+                   cats, Reference(ws, min_col=5, max_col=6, min_row=hr, max_row=last_site_row))
+
+    # Courbes temporelles de la commune avec bande travaux (données à droite du tableau)
+    pers = periods_sorted(rows)
+    kwh_by, eur_by = defaultdict(float), defaultdict(float)
+    for r in rows:
+        eur_by[r["periode"]] += r["eur"]
+        if r["type"] == "Consommation":
+            kwh_by[r["periode"]] += r["kwh"]
+    kmax = max([kwh_by[p] for p in pers] or [0])
+    emax = max([eur_by[p] for p in pers] or [0])
+    base_col = 10  # colonne J : bloc série temporelle
+    ws.cell(row=hr - 1, column=base_col, value="Série temporelle (source des courbes)").font = SUB_FONT
+    for j, h in enumerate(["Période", "kWh", "€", "Travaux (kWh)", "Travaux (€)"]):
+        ws.cell(row=hr, column=base_col + j, value=h)
+    style_header_row_range(ws, hr, base_col, base_col + 4)
+    for i, p in enumerate(pers):
+        band = in_works_window(p, ci)
+        ws.cell(row=hr + 1 + i, column=base_col, value=p)
+        ws.cell(row=hr + 1 + i, column=base_col + 1, value=round(kwh_by[p]))
+        ws.cell(row=hr + 1 + i, column=base_col + 2, value=round(eur_by[p], 2))
+        ws.cell(row=hr + 1 + i, column=base_col + 3, value=round(kmax * 1.05) if band else None)
+        ws.cell(row=hr + 1 + i, column=base_col + 4, value=round(emax * 1.05) if band else None)
+    lastp = hr + len(pers)
+    cats_t = Reference(ws, min_col=base_col, min_row=hr + 1, max_row=lastp)
+    make_timeseries_chart(ws, f"J{a_row}", f"Consommation semestrielle — {commune_nom}", "Consommation (kWh)",
+                          cats_t, Reference(ws, min_col=base_col + 1, min_row=hr, max_row=lastp),
+                          Reference(ws, min_col=base_col + 3, min_row=hr, max_row=lastp))
+    make_timeseries_chart(ws, f"J{a_row + 19}", f"Dépense semestrielle — {commune_nom}", "Dépense (€ TTC)",
+                          cats_t, Reference(ws, min_col=base_col + 2, min_row=hr, max_row=lastp),
+                          Reference(ws, min_col=base_col + 4, min_row=hr, max_row=lastp))
+    ws.column_dimensions["A"].width = 26
+    return ws
+
+def style_header_row_range(ws, row, c0, c1):
+    for c in range(c0, c1 + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.fill = HDR_FILL
+        cell.font = HDR_FONT
+
+def sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info):
+    """Synthèse : avant/après PAR COMMUNE (dates réelles propres à chacune) + histogramme X = communes."""
+    ws = wb.create_sheet("Avant-Après communes")
+    ws["A1"] = "Avant / après travaux — comparaison par commune (dates réelles SMEM)"
+    ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
+    ws["A2"] = "AVANT = 01/01/2019 → lancement ; APRÈS = achèvement → aujourd'hui ; fenêtre de travaux exclue ; moyennes annualisées."
+    ws["A2"].font = SUB_FONT
+    headers = ["Commune", "Travaux (SMEM)", "Points lum.", "Armoires", "kWh/an avant", "kWh/an après", "Δ conso", "€/an avant", "€/an après", "Δ dépense"]
+    hr = 4
+    for j, h in enumerate(headers):
+        ws.cell(row=hr, column=1 + j, value=h)
+    style_header_row(ws, hr, len(headers))
+    by_commune = defaultdict(list)
+    for i in invoices:
+        by_commune[i.get("commune_id")].append(i)
+    ri = hr + 1
+    for cid, invs in sorted(by_commune.items(), key=lambda kv: (kv[1][0].get("communes") or {}).get("nom", "")):
+        ci = communes_info.get(cid)
+        nom = (invs[0].get("communes") or {}).get("nom", "—")
+        if not ci or not ci.get("travaux_debut"):
+            ws.append([nom, "n.d."] + [None] * 8)
             ri += 1
             continue
-        before_y = [y for y in per_year if y < pivot_y]
-        after_y = [y for y in per_year if y >= pivot_y]
-        kb = sum(per_year[y] for y in before_y) / max(1, len(before_y))
-        ka = sum(per_year[y] for y in after_y) / max(1, len(after_y))
-        eb = sum(ep_eur[y] for y in before_y) / max(1, len(before_y))
-        ea = sum(ep_eur[y] for y in after_y) / max(1, len(after_y))
-        ws.append([cm, pivot_y, round(kb), round(ka), (ka - kb) / kb * 100 if kb else None,
-                   round(eb, 2), round(ea, 2), (ea - eb) / eb * 100 if eb else None])
-        for col, fmt in ((3, KWH_FMT), (4, KWH_FMT), (5, PCT_FMT), (6, EUR_FMT), (7, EUR_FMT), (8, PCT_FMT)):
+        ids = {i["id"] for i in invs}
+        a = alloc_windows(invs, [p for p in periods if p["invoice_id"] in ids],
+                          [c for c in charges if c["invoice_id"] in ids],
+                          d(ci["travaux_debut"]), d(ci["travaux_fin"]), lambda inv: nom)
+        v = a.get(nom, {"kwh_avant": 0, "kwh_apres": 0, "eur_avant": 0, "eur_apres": 0})
+        dk = (v["kwh_apres"] - v["kwh_avant"]) / v["kwh_avant"] * 100 if v["kwh_avant"] else None
+        de = (v["eur_apres"] - v["eur_avant"]) / v["eur_avant"] * 100 if v["eur_avant"] else None
+        ws.append([nom, travaux_label(ci), ci.get("points_lumineux"), ci.get("armoires"),
+                   round(v["kwh_avant"]), round(v["kwh_apres"]), dk, round(v["eur_avant"], 2), round(v["eur_apres"], 2), de])
+        for col, fmt in ((5, KWH_FMT), (6, KWH_FMT), (7, PCT_FMT), (8, EUR0_FMT), (9, EUR0_FMT), (10, PCT_FMT)):
             ws.cell(row=ri, column=col).number_format = fmt
         ri += 1
-    for i, w in enumerate([22, 18, 20, 20, 12, 18, 18, 12], 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-    # Graphe barres avant/après kWh
-    ch = BarChart()
-    ch.type = "col"
-    ch.title = "kWh éclairage public : avant vs après travaux (moyenne annuelle)"
-    data = Reference(ws, min_col=3, max_col=4, min_row=hr, max_row=ri - 1)
-    cats = Reference(ws, min_col=1, min_row=hr + 1, max_row=ri - 1)
-    ch.add_data(data, titles_from_data=True)
-    ch.set_categories(cats)
-    ch.height, ch.width = 9, 22
-    ws.add_chart(ch, f"A{ri + 2}")
-    ws.cell(row=ri + 22, column=1,
-            value="Lecture : la baisse de consommation issue des travaux est en partie effacée par la hausse du prix de l'électricité (voir feuille Tarifs).").font = SUB_FONT
-    return ws
-
-def sheet_tarifs(wb, rows):
-    ws = wb.create_sheet("Tarifs")
-    conso = [r for r in rows if r["type"] == "Consommation" and r["kwh"] > 0]
-    cols = periods_sorted(conso)
-    postes = ["Base", "HP", "HC"]
-    vals = {}
-    for p in postes:
-        for per in cols:
-            sub = [r for r in conso if r["poste"] == p and r["periode"] == per]
-            k = sum(r["kwh"] for r in sub)
-            e = sum(r["eur"] for r in sub)
-            if k > 0:
-                vals[(p, per)] = e / k * 100
-    hr, _, n, nc = write_matrix(ws, 1, "Poste", cols, postes, vals, CENT_FMT, "Prix moyen constaté par poste (c€/kWh, part variable)")
-    cats = Reference(ws, min_col=2, max_col=1 + len(cols), min_row=hr, max_row=hr)
-    data = Reference(ws, min_col=1, max_col=1 + len(cols), min_row=hr + 1, max_row=hr + len(postes))
-    ch = LineChart()
-    ch.title = "Évolution du prix moyen par poste (c€/kWh)"
-    ch.add_data(data, titles_from_data=True, from_rows=True)
-    ch.set_categories(cats)
-    ch.height, ch.width = 9, 22
-    ws.add_chart(ch, f"A{hr + n + 3}")
-    # Effet prix / effet volume par année (Laspeyres simple)
-    years = years_sorted(conso)
-    per_year = defaultdict(lambda: {"kwh": 0.0, "eur": 0.0})
-    for r in conso:
-        per_year[r["annee"]]["kwh"] += r["kwh"]
-        per_year[r["annee"]]["eur"] += r["eur"]
-    top = hr + n + 22
-    ws.cell(row=top, column=1, value="Effet prix vs effet volume (part variable, année vs année précédente)").font = Font(bold=True, size=12, color=ORANGE_DARK)
-    ws.append([])
-    hdr = ["Année", "kWh", "€ (variable)", "Prix moyen c€/kWh", "Δ€ total", "dont effet volume", "dont effet prix"]
-    for j, h in enumerate(hdr):
-        c = ws.cell(row=top + 1, column=1 + j, value=h)
-        c.fill = HDR_FILL
-        c.font = HDR_FONT
-    prev = None
-    ri = top + 2
-    for y in years:
-        k, e = per_year[y]["kwh"], per_year[y]["eur"]
-        p = e / k * 100 if k else 0
-        if prev:
-            pk, pe, pp = prev
-            d_tot = e - pe
-            d_vol = (k - pk) * pp / 100
-            d_prix = (p - pp) / 100 * k
-            ws.append([y, round(k), round(e, 2), round(p, 2), round(d_tot, 2), round(d_vol, 2), round(d_prix, 2)])
-        else:
-            ws.append([y, round(k), round(e, 2), round(p, 2), None, None, None])
-        for col, fmt in ((2, KWH_FMT), (3, EUR_FMT), (4, CENT_FMT), (5, EUR_FMT), (6, EUR_FMT), (7, EUR_FMT)):
-            ws.cell(row=ri, column=col).number_format = fmt
-        prev = (k, e, p)
-        ri += 1
-    for i, w in enumerate([10, 12, 14, 16, 12, 16, 14], 1):
+    make_bar_chart(ws, f"A{ri + 2}", "Consommation moyenne annuelle par commune — avant vs après travaux",
+                   "Communes", "Consommation (kWh / an)",
+                   Reference(ws, min_col=1, min_row=hr + 1, max_row=ri - 1),
+                   Reference(ws, min_col=5, max_col=6, min_row=hr, max_row=ri - 1))
+    for i, w in enumerate([20, 30, 10, 9, 14, 14, 10, 13, 13, 10], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     return ws
 
@@ -465,74 +591,71 @@ def sheet_datalogger(wb, p, scope_label):
         ws["A3"] = "EMPLACEMENT RÉSERVÉ — le connecteur data logger n'est pas encore raccordé."
         ws["A3"].font = Font(bold=True, color="B45309")
         ws["A3"].fill = KPI_FILL
-        ws["A5"] = "À la connexion, cette section présentera : allumage/extinction, puissance instantanée,"
-        ws["A6"] = "coupures réseau, consommation d'énergie et profil de charge — indépendamment des factures."
+        ws["A5"] = "À la connexion : consommation quotidienne réelle et historique de coupures, indépendants des factures."
         ws["A5"].font = SUB_FONT
-        ws["A6"].font = SUB_FONT
         ws.column_dimensions["A"].width = 100
         return ws
     ws = wb.create_sheet("Data loggers (démo)")
-    ws["A1"] = "Données complémentaires — data loggers d'armoires (DONNÉES FICTIVES DE DÉMONSTRATION)"
+    ws["A1"] = "Data loggers d'armoires — DONNÉES FICTIVES DE DÉMONSTRATION"
     ws["A1"].font = Font(bold=True, size=13, color="B91C1C")
     ws["A2"] = f"Section indépendante des factures et abonnements · périmètre : {scope_label}"
     ws["A2"].font = SUB_FONT
-    # Profil de puissance 24 h (pas 30 min) — armoire type
-    ws["A4"] = "Profil de puissance instantanée — armoire type (24 h, pas 30 min)"
+    # Consommation quotidienne (90 jours, armoire type)
+    ws["A4"] = "Consommation quotidienne — armoire type (90 derniers jours)"
     ws["A4"].font = Font(bold=True, size=12, color=ORANGE_DARK)
-    ws.cell(row=5, column=1, value="Heure").fill = HDR_FILL
-    ws.cell(row=5, column=1).font = HDR_FONT
-    ws.cell(row=5, column=2, value="Puissance (W)").fill = HDR_FILL
-    ws.cell(row=5, column=2).font = HDR_FONT
-    ri = 6
-    for step in range(48):
-        h = step / 2
-        on = h <= 5.5 or h >= 18.5  # allumage nocturne
-        base_w = 4200 if on else 35
-        w = base_w + (math.sin(step * 1.7) * 160 if on else 3)
-        ws.cell(row=ri, column=1, value=f"{int(h):02d}:{'30' if step % 2 else '00'}")
-        ws.cell(row=ri, column=2, value=round(max(0, w)))
+    hr = 5
+    ws.cell(row=hr, column=1, value="Date")
+    ws.cell(row=hr, column=2, value="Énergie (kWh/jour)")
+    style_header_row(ws, hr, 2)
+    import math
+    ri = hr + 1
+    for k in range(90):
+        day = TODAY - timedelta(days=89 - k)
+        night_hours = 11.4 + 0.6 * math.sin((day.timetuple().tm_yday / 365) * 2 * math.pi)  # nuits ± saison
+        kwh = 4.2 * night_hours * (1 + 0.05 * math.sin(k * 1.3))
+        ws.cell(row=ri, column=1, value=day.strftime("%d/%m/%Y"))
+        ws.cell(row=ri, column=2, value=round(kwh, 1))
         ri += 1
-    ch = LineChart()
-    ch.title = "Profil de charge 24 h (fictif)"
-    data = Reference(ws, min_col=2, min_row=5, max_row=ri - 1)
-    cats = Reference(ws, min_col=1, min_row=6, max_row=ri - 1)
-    ch.add_data(data, titles_from_data=True)
-    ch.set_categories(cats)
-    ch.height, ch.width = 9, 18
-    ws.add_chart(ch, "D5")
-    # Allumage/extinction + coupures
-    ws.cell(row=ri + 2, column=1, value="Allumage / extinction (7 derniers jours, fictif)").font = Font(bold=True, size=12, color=ORANGE_DARK)
-    hdr_row = ri + 3
-    for j, h in enumerate(["Jour", "Allumage", "Extinction", "Durée (h)", "Énergie (kWh)"]):
-        c = ws.cell(row=hdr_row, column=1 + j, value=h)
-        c.fill = HDR_FILL
-        c.font = HDR_FONT
-    for k in range(7):
-        day = date.today() - timedelta(days=6 - k)
-        on_m = 18 * 60 + 24 + (k * 7) % 12
-        off_m = 5 * 60 + 41 - (k * 5) % 10
-        dur = (24 * 60 - on_m + off_m) / 60
-        ws.append([day.strftime("%d/%m"), f"{on_m // 60:02d}:{on_m % 60:02d}", f"{off_m // 60:02d}:{off_m % 60:02d}", round(dur, 2), round(dur * 4.2, 1)])
-    ws.cell(row=hdr_row + 9, column=1, value="Coupures réseau détectées (fictif)").font = Font(bold=True, size=12, color=ORANGE_DARK)
-    for j, h in enumerate(["Date", "Début", "Durée", "Armoire"]):
-        c = ws.cell(row=hdr_row + 10, column=1 + j, value=h)
-        c.fill = HDR_FILL
-        c.font = HDR_FONT
-    for vals in (["12/06/2026", "03:12", "18 min", "EP Bourg"], ["27/05/2026", "21:47", "4 min", "EP Bourg"], ["03/05/2026", "02:05", "1 h 02", "EP Route principale"]):
-        ws.append(vals)
-    for i, w in enumerate([12, 12, 12, 12, 14], 1):
+    make_timeseries_chart_daily(ws, "D5", "Consommation quotidienne (fictive)",
+                                Reference(ws, min_col=1, min_row=hr + 1, max_row=ri - 1),
+                                Reference(ws, min_col=2, min_row=hr, max_row=ri - 1))
+    # Historique de coupures
+    top = ri + 2
+    ws.cell(row=top, column=1, value="Historique de coupures réseau (fictif)").font = Font(bold=True, size=12, color=ORANGE_DARK)
+    for j, h in enumerate(["Date", "Début", "Durée", "Armoire", "Retour secteur"]):
+        ws.cell(row=top + 1, column=1 + j, value=h)
+    style_header_row(ws, top + 1, 5)
+    coupures = [
+        ("14/06/2026", "03:12", "18 min", "EP Bourg", "auto"),
+        ("29/05/2026", "21:47", "4 min", "EP Bourg", "auto"),
+        ("11/05/2026", "02:05", "1 h 02", "EP Route principale", "intervention"),
+        ("24/04/2026", "19:33", "9 min", "EP Quartier nord", "auto"),
+        ("02/04/2026", "04:18", "27 min", "EP Bourg", "auto"),
+    ]
+    for c in coupures:
+        ws.append(list(c))
+    for i, w in enumerate([14, 12, 10, 22, 14], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     return ws
 
-# ── TCD natifs : injection XML (pivotCache refreshOnLoad) ────────────────────
+def make_timeseries_chart_daily(ws, anchor, title, cats_ref, data_ref):
+    ch = LineChart()
+    ch.title = title
+    ch.height, ch.width = 9, 22
+    ch.x_axis.title = "Jour"
+    ch.y_axis.title = "Énergie (kWh / jour)"
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.add_data(data_ref, titles_from_data=True)
+    ch.set_categories(cats_ref)
+    ws.add_chart(ch, anchor)
+
+# ── TCD natif (injection XML pivotCache refreshOnLoad) ───────────────────────
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 def _cache_definition_xml(n_rows: int) -> bytes:
-    fields = "".join(
-        f'<cacheField name="{h}" numFmtId="0"><sharedItems containsBlank="1"/></cacheField>'
-        for h in DATA_HEADERS
-    )
+    fields = "".join(f'<cacheField name="{h}" numFmtId="0"><sharedItems containsBlank="1"/></cacheField>' for h in DATA_HEADERS)
     return (
         f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         f'<pivotCacheDefinition xmlns="{NS_MAIN}" xmlns:r="{NS_R}" r:id="rId1" refreshOnLoad="1" refreshedBy="Ability" '
@@ -546,23 +669,31 @@ def _cache_records_xml() -> bytes:
     return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             f'<pivotCacheRecords xmlns="{NS_MAIN}" xmlns:r="{NS_R}" count="0"/>').encode()
 
-def _pivot_table_xml(name: str, cache_id: int, row_fields, col_fields, data_field, data_label, ref: str) -> bytes:
+def _pivot_table_xml(name, cache_id, row_fields, col_fields, data_fields, ref) -> bytes:
+    """data_fields : liste [(index_colonne, libellé)] — 2 valeurs max (Σ € et Σ kWh)."""
     k = len(DATA_HEADERS)
+    data_idx = {i for i, _ in data_fields}
     pf = []
     for i in range(k):
         if i in row_fields:
             pf.append('<pivotField axis="axisRow" showAll="0"><items count="1"><item t="default"/></items></pivotField>')
         elif i in col_fields:
             pf.append('<pivotField axis="axisCol" showAll="0"><items count="1"><item t="default"/></items></pivotField>')
-        elif i == data_field:
+        elif i in data_idx:
             pf.append('<pivotField dataField="1" showAll="0"/>')
         else:
             pf.append('<pivotField showAll="0"/>')
     rows_xml = "".join(f'<field x="{i}"/>' for i in row_fields)
     cols_xml = "".join(f'<field x="{i}"/>' for i in col_fields)
+    multi = len(data_fields) > 1
+    if multi:
+        cols_xml += '<field x="-2"/>'  # champ « Σ Valeurs »
+    col_count = len(col_fields) + (1 if multi else 0)
+    col_items = '<colItems count="2"><i><x/></i><i i="1"><x v="1"/></i></colItems>' if multi else '<colItems count="1"><i t="grand"><x/></i></colItems>'
+    dfs = "".join(f'<dataField name="{label}" fld="{idx}" baseField="0" baseItem="0"/>' for idx, label in data_fields)
     return (
         f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<pivotTableDefinition xmlns="{NS_MAIN}" name="{name}" cacheId="{cache_id}" applyNumberFormats="0" '
+        f'<pivotTableDefinition xmlns="{NS_MAIN}" name="{name}" cacheId="{cache_id}" dataOnRows="0" applyNumberFormats="0" '
         f'applyBorderFormats="0" applyFontFormats="0" applyPatternFormats="0" applyAlignmentFormats="0" '
         f'applyWidthHeightFormats="1" dataCaption="Valeurs" updatedVersion="6" createdVersion="6" minRefreshableVersion="3" '
         f'useAutoFormatting="1" itemPrintTitles="1" indent="0" outline="1" outlineData="1" multipleFieldFilters="0">'
@@ -570,60 +701,48 @@ def _pivot_table_xml(name: str, cache_id: int, row_fields, col_fields, data_fiel
         f'<pivotFields count="{k}">{"".join(pf)}</pivotFields>'
         f'<rowFields count="{len(row_fields)}">{rows_xml}</rowFields>'
         f'<rowItems count="1"><i t="grand"><x/></i></rowItems>'
-        + (f'<colFields count="{len(col_fields)}">{cols_xml}</colFields><colItems count="1"><i t="grand"><x/></i></colItems>' if col_fields else "")
-        + f'<dataFields count="1"><dataField name="{data_label}" fld="{data_field}" baseField="0" baseItem="0"/></dataFields>'
+        f'<colFields count="{col_count}">{cols_xml}</colFields>{col_items}'
+        f'<dataFields count="{len(data_fields)}">{dfs}</dataFields>'
         f'<pivotTableStyleInfo name="PivotStyleMedium9" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="1"/>'
         f"</pivotTableDefinition>"
     ).encode()
 
 def inject_pivots(xlsx_path: str, n_data_rows: int, pivots: list):
-    """Ajoute des TCD natifs au classeur (post-traitement du zip).
-    pivots: [{sheet_index (1-based, ordre openpyxl), name, rows, cols, data, label, ref}]"""
     tmp = xlsx_path + ".tmp"
     with zipfile.ZipFile(xlsx_path, "r") as zin:
-        names = zin.namelist()
-        contents = {n: zin.read(n) for n in names}
-
+        contents = {n: zin.read(n) for n in zin.namelist()}
     wb_xml = contents["xl/workbook.xml"].decode()
     rels_xml = contents["xl/_rels/workbook.xml.rels"].decode()
-
-    # 2. pivotCache (1 seul, partagé)
     contents["xl/pivotCache/pivotCacheDefinition1.xml"] = _cache_definition_xml(n_data_rows)
     contents["xl/pivotCache/pivotCacheRecords1.xml"] = _cache_records_xml()
     contents["xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels"] = (
-        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        f'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/>'
-        f"</Relationships>"
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/>'
+        "</Relationships>"
     ).encode()
-
-    # 3. workbook.xml : bloc <pivotCaches> + rel
-    next_rid = max(int(m) for m in re.findall(r'Id="rId(\d+)"', rels_xml)) + 1
+    import re as _re
+    next_rid = max(int(m) for m in _re.findall(r'Id="rId(\d+)"', rels_xml)) + 1
     cache_rid = f"rId{next_rid}"
     rels_xml = rels_xml.replace("</Relationships>",
         f'<Relationship Id="{cache_rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition1.xml"/></Relationships>')
     if "<pivotCaches>" not in wb_xml:
-        wb_xml = wb_xml.replace(
-            "</workbook>",
-            f'<pivotCaches><pivotCache cacheId="10" xmlns:r="{NS_R}" r:id="{cache_rid}"/></pivotCaches></workbook>',
-        )
+        wb_xml = wb_xml.replace("</workbook>",
+            f'<pivotCaches><pivotCache cacheId="10" xmlns:r="{NS_R}" r:id="{cache_rid}"/></pivotCaches></workbook>')
     contents["xl/workbook.xml"] = wb_xml.encode()
     contents["xl/_rels/workbook.xml.rels"] = rels_xml.encode()
-
-    # 4. pivotTables + rels des feuilles cibles
     ct = contents["[Content_Types].xml"].decode()
     for idx, p in enumerate(pivots, start=1):
-        contents[f"xl/pivotTables/pivotTable{idx}.xml"] = _pivot_table_xml(
-            p["name"], 10, p["rows"], p["cols"], p["data"], p["label"], p["ref"])
+        contents[f"xl/pivotTables/pivotTable{idx}.xml"] = _pivot_table_xml(p["name"], 10, p["rows"], p["cols"], p["data"], p["ref"])
         contents[f"xl/pivotTables/_rels/pivotTable{idx}.xml.rels"] = (
-            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            f'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition1.xml"/>'
-            f"</Relationships>"
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition1.xml"/>'
+            "</Relationships>"
         ).encode()
-        # openpyxl écrit les feuilles séquentiellement : sheet{n}.xml dans l'ordre du classeur
         rels_path = f"xl/worksheets/_rels/sheet{p['sheet_index']}.xml.rels"
-        rels = contents.get(rels_path, b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>').decode()
+        rels = contents.get(rels_path,
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>').decode()
         rels = rels.replace("</Relationships>",
             f'<Relationship Id="rIdP{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable{idx}.xml"/></Relationships>')
         contents[rels_path] = rels.encode()
@@ -633,71 +752,62 @@ def inject_pivots(xlsx_path: str, n_data_rows: int, pivots: list):
         '<Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/>'
         '<Override PartName="/xl/pivotCache/pivotCacheRecords1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml"/></Types>')
     contents["[Content_Types].xml"] = ct.encode()
-
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
         for n, data in contents.items():
             zout.writestr(n, data)
     shutil.move(tmp, xlsx_path)
 
 # ── Assemblage ────────────────────────────────────────────────────────────────
-COL = {h: i for i, h in enumerate(DATA_HEADERS)}  # index 0-based pour les TCD
-
 def build(p: dict, out_path: str):
-    invoices, periods, charges = load_data(p)
+    invoices, periods, charges, communes_info = load_data(p)
     if not invoices:
         raise SystemExit("Aucune facture dans le périmètre demandé.")
     rows = normalize(invoices, periods, charges)
 
-    if p["report"] == "commune":
-        scope = rows[0]["commune"] if rows else "Commune"
-        group_field, group_label = "site", "Site"
-    elif p["report"] == "site":
-        scope = rows[0]["site"] if rows else "Site"
-        group_field, group_label = "poste", "Poste"
+    ci = communes_info.get(p.get("communeId")) if p.get("communeId") else None
+    if p["report"] in ("commune", "avant_apres"):
+        scope = (ci or {}).get("nom") or rows[0]["commune"]
     else:
         scope = "Toutes communes (portefeuille SMEM)"
-        group_field, group_label = "commune", "Commune"
+    if p.get("ids"):
+        scope += f" · {len(invoices)} factures sélectionnées manuellement"
 
     wb = Workbook()
-    sheet_garde(wb, p, invoices, scope)
-    if p["report"] == "avant_apres":
-        sheet_avant_apres(wb, rows)
-        sheet_tarifs(wb, rows)
-    elif p["report"] == "tarifs":
-        sheet_tarifs(wb, rows)
-        sheet_decomposition(wb, rows)
-    else:
-        sheet_semestres(wb, rows, group_field, group_label)
-        sheet_decomposition(wb, rows)
-        if p["report"] == "synthese":
-            sheet_avant_apres(wb, rows)
-    tcd1 = wb.create_sheet("TCD €")
-    tcd1["A1"] = "Tableau croisé dynamique — montants (€). Actualisé automatiquement à l'ouverture d'Excel."
-    tcd1["A1"].font = SUB_FONT
-    tcd2 = wb.create_sheet("TCD kWh")
-    tcd2["A1"] = "Tableau croisé dynamique — consommation (kWh). Actualisé automatiquement à l'ouverture d'Excel."
-    tcd2["A1"].font = SUB_FONT
-    ws_data = sheet_donnees(wb, rows)
+    sheet_garde(wb, p, invoices, scope, ci if p["report"] in ("commune", "avant_apres") else None)
+
+    if p["report"] == "commune":
+        sheet_evolution(wb, rows, ci, f" — {scope}")
+        sheet_par_site(wb, rows)
+    elif p["report"] == "avant_apres":
+        if not ci or not ci.get("travaux_debut"):
+            raise SystemExit("Dates de travaux inconnues pour cette commune.")
+        alloc_site = alloc_windows(invoices, periods, charges, d(ci["travaux_debut"]), d(ci["travaux_fin"]),
+                                   lambda inv: (inv.get("sites") or {}).get("nom", "—"))
+        sheet_avant_apres(wb, rows, alloc_site, ci, scope)
+    else:  # synthese
+        sheet_evolution(wb, rows, None, " — portefeuille")
+        sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info)
+
+    tcd = wb.create_sheet("TCD")
+    tcd["A1"] = "Tableau croisé dynamique (€ et kWh) — actualisé automatiquement à l'ouverture dans Excel."
+    tcd["A1"].font = SUB_FONT
     sheet_datalogger(wb, p, scope)
+    ws_data = sheet_donnees(wb, rows)  # dernière position + masquée
     wb.save(out_path)
 
     try:
         inject_pivots(out_path, ws_data.max_row, [
-            {"sheet_index": wb.sheetnames.index("TCD €") + 1, "name": "TCD_Montants",
+            {"sheet_index": wb.sheetnames.index("TCD") + 1, "name": "TCD_Ability",
              "rows": [COL["Commune"], COL["Site"]], "cols": [COL["Période"]],
-             "data": COL["Montant €"], "label": "Somme de Montant €", "ref": "A3"},
-            {"sheet_index": wb.sheetnames.index("TCD kWh") + 1, "name": "TCD_kWh",
-             "rows": [COL["Poste"], COL["Catégorie"]], "cols": [COL["Année"]],
-             "data": COL["kWh"], "label": "Somme de kWh", "ref": "A3"},
+             "data": [(COL["Montant €"], "Somme de Montant €"), (COL["kWh"], "Somme de kWh")], "ref": "A3"},
         ])
-    except Exception as exc:  # repli : classeur valide sans TCD (agrégats déjà présents)
+    except Exception as exc:  # repli : classeur valide sans TCD
         sys.stderr.write(f"[pivot] injection ignorée : {exc}\n")
 
 def main():
     if len(sys.argv) < 3:
         raise SystemExit("usage: generate_report.py '<params-json>' <out.xlsx>")
-    params = json.loads(sys.argv[1])
-    build(params, sys.argv[2])
+    build(json.loads(sys.argv[1]), sys.argv[2])
     print("OK")
 
 if __name__ == "__main__":
