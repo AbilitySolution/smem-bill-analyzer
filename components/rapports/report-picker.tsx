@@ -20,7 +20,7 @@ const REPORTS: { id: ReportType; label: string; desc: string; icon: typeof MapPi
 ];
 
 /** Générateur de rapport Excel — flux unique : type de rapport + périmètre + data logger. */
-export function ReportPicker({ communes, sites, preselectedIds }: { communes: Commune[]; sites: Site[]; preselectedIds: string[] }) {
+export function ReportPicker({ communes, sites, preselectedIds = [] }: { communes: Commune[]; sites: Site[]; preselectedIds?: string[] }) {
   const router = useRouter();
   const [report, setReport] = useState<ReportType>("commune");
   const [communeId, setCommuneId] = useState("");

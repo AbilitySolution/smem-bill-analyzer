@@ -76,23 +76,47 @@ interface RawLine {
   montant_eur: number | null;
 }
 
+async function selectAll<T>(
+  // PromiseLike : le query builder Supabase est un thenable (pas une Promise complète) ;
+  // `unknown[]` évite le conflit entre les relations inférées (tableaux) et nos types Raw*.
+  queryFactory: (from: number, to: number) => PromiseLike<{ data: unknown[] | null; error: unknown }>,
+  pageSize = 1000,
+): Promise<T[] | null> {
+  const out: T[] = [];
+  let start = 0;
+  while (true) {
+    const { data, error } = await queryFactory(start, start + pageSize - 1);
+    if (error) return null;
+    const batch = (data ?? []) as T[];
+    out.push(...batch);
+    if (batch.length < pageSize) return out;
+    start += pageSize;
+  }
+}
+
 /** Toutes les factures + leurs lignes de consommation (vraies données Supabase). */
 export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   const supabase = await createClient();
 
-  const { data: invoices, error } = await supabase
-    .from("invoices")
-    .select("id, facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, is_duplicata, categorie, file_path, archived, precision, sites(nom), communes(nom)")
-    .order("facture_date", { ascending: false });
+  const invoices = await selectAll<RawInvoice>((from, to) =>
+    supabase
+      .from("invoices")
+      .select("id, facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, is_duplicata, categorie, file_path, archived, precision, sites(nom), communes(nom)")
+      .order("facture_date", { ascending: false })
+      .range(from, to),
+  );
 
-  if (error || !invoices || invoices.length === 0) return null;
+  if (!invoices || invoices.length === 0) return null;
 
-  const { data: lines } = await supabase
-    .from("consumption_periods")
-    .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, prix_unitaire_ckwh, montant_eur");
+  const lines = await selectAll<RawLine>((from, to) =>
+    supabase
+      .from("consumption_periods")
+      .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, prix_unitaire_ckwh, montant_eur")
+      .range(from, to),
+  );
 
   const linesByInvoice = new Map<string, InvoiceLine[]>();
-  for (const l of (lines ?? []) as unknown as RawLine[]) {
+  for (const l of (lines ?? []) as RawLine[]) {
     const arr = linesByInvoice.get(l.invoice_id) ?? [];
     arr.push({
       poste: l.poste_tarifaire ?? "—",
@@ -104,7 +128,7 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
     linesByInvoice.set(l.invoice_id, arr);
   }
 
-  const docs: InvoiceDoc[] = (invoices as unknown as RawInvoice[]).map((i) => {
+  const docs: InvoiceDoc[] = invoices.map((i) => {
     const docLines = linesByInvoice.get(i.id) ?? [];
     return {
       id: i.id,

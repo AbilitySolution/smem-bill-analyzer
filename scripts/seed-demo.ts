@@ -52,15 +52,15 @@ const hash = (s: string) => [...s].reduce((h, c) => (Math.imul(h, 31) + c.charCo
 // ── Modèle économique (calé sur les spreadsheets Fonds-Saint-Denis) ─────────
 // Tarif Base en c€ HT/kWh par année (réel FSD : 6.43→6.90 (2019) … 14.62 (2024)).
 const BASE_CKWH: Record<number, number> = {
-  2019: 6.65, 2020: 7.18, 2021: 7.39, 2022: 11.86, 2023: 14.35, 2024: 14.62, 2025: 12.4, 2026: 11.3,
+  2017: 6.81, 2018: 6.5, 2019: 6.65, 2020: 7.18, 2021: 7.39, 2022: 11.86, 2023: 14.35, 2024: 14.62, 2025: 12.4, 2026: 11.3,
 };
 const HP_RATIO = 1.45; // ≈ 9.85/6.81
 const HC_RATIO = 1.10; // ≈ 7.52/6.81
 const KVA_AN: Record<number, number> = { // €/kVA/an (part fixe)
-  2019: 11.6, 2020: 12.0, 2021: 12.4, 2022: 13.8, 2023: 15.2, 2024: 16.0, 2025: 16.4, 2026: 16.8,
+  2017: 11.0, 2018: 11.3, 2019: 11.6, 2020: 12.0, 2021: 12.4, 2022: 13.8, 2023: 15.2, 2024: 16.0, 2025: 16.4, 2026: 16.8,
 };
 const ACCISE_EUR_KWH: Record<number, number> = { // accise (ex-CSPE) €/kWh
-  2019: 0.0225, 2020: 0.0225, 2021: 0.0225, 2022: 0.001, 2023: 0.001, 2024: 0.021, 2025: 0.0325, 2026: 0.0325,
+  2017: 0.0225, 2018: 0.0225, 2019: 0.0225, 2020: 0.0225, 2021: 0.0225, 2022: 0.001, 2023: 0.001, 2024: 0.021, 2025: 0.0325, 2026: 0.0325,
 };
 const OCTROI_PCT = 0.025; // octroi de mer ≈ 2.5 % du HT
 const TVA_PCT = 0.054;    // ≈ TVA constatée sur la vraie facture (9.14/168.99)
@@ -135,9 +135,11 @@ const COMMUNES: CommuneDef[] = [
 interface Semester { year: number; half: 1 | 2 }
 function semesters(): Semester[] {
   const out: Semester[] = [];
-  for (let y = 2019; y <= 2026; y++) {
+  // Plage 2017-S1 → 2025-S2 : couvre pleinement les semestres calendaires 2017-S1 → 2025-S1
+  // une fois les bords partiels rognés côté rapport. On ne génère plus 2026 (chute de bord).
+  for (let y = 2017; y <= 2025; y++) {
     out.push({ year: y, half: 1 });
-    if (y < 2026) out.push({ year: y, half: 2 }); // dernier point : S1 2026 (fév. 2026)
+    out.push({ year: y, half: 2 });
   }
   return out;
 }
@@ -166,14 +168,28 @@ function isDuringRenovation(c: CommuneDef, s: Semester): boolean {
   return semStart < c.renovation.end && semEnd > c.renovation.start;
 }
 
+/** Fraction d'année depuis l'achèvement des travaux (0 avant/au moment de l'achèvement). */
+function yearsSinceRenovation(commune: CommuneDef, s: Semester): number {
+  const end = commune.renovation.end; // yyyy-mm
+  const endY = Number(end.slice(0, 4)) + (Number(end.slice(5, 7)) - 1) / 12;
+  const semY = s.year + (s.half === 2 ? 0.5 : 0.0);
+  return Math.max(0, semY - endY);
+}
+
 function semesterKwh(site: SiteDef, commune: CommuneDef, s: Semester, rnd: () => number, siteFactor: number): number {
   // EP ≈ kVA × 330 kWh/sem (Bel Oncle 6 kVA ≈ 2 000) ; bâtiment ≈ kVA × 190.
   const base = site.categorie === "eclairage_public" ? site.kva * 330 : site.kva * 190;
   let kwh = base * siteFactor;
-  kwh *= 1 + (s.half === 2 ? 0.03 : -0.03) + (rnd() - 0.5) * 0.16; // saisonnalité légère + bruit
+  // Plateau haut avant travaux : saisonnalité douce ±3 % + bruit réduit ±6 % (courbes lisses, sans aberration).
+  kwh *= 1 + (s.half === 2 ? 0.03 : -0.03) + (rnd() - 0.5) * 0.06;
   if (site.categorie === "eclairage_public") {
-    if (isAfterRenovation(commune, s)) kwh *= 0.45 + rnd() * 0.08;      // −50/−55 % après travaux
-    else if (isDuringRenovation(commune, s)) kwh *= 0.75 + rnd() * 0.15; // transition
+    if (isAfterRenovation(commune, s)) {
+      // Baisse douce ~ −30 % au passage des travaux, puis légère décroissance dans le temps (plancher ≈ 0,60).
+      const decay = Math.max(0.6, 1 - 0.015 * yearsSinceRenovation(commune, s));
+      kwh *= (0.70 + (rnd() - 0.5) * 0.04) * decay;
+    } else if (isDuringRenovation(commune, s)) {
+      kwh *= 0.85 + (rnd() - 0.5) * 0.06; // transition pendant travaux
+    }
   }
   return Math.max(30, Math.round(kwh));
 }

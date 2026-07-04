@@ -7,16 +7,32 @@ import { ScanText } from "lucide-react";
 
 type Row = Record<string, string | number | boolean | null>;
 
+async function selectAllInvoices(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  pageSize = 1000,
+) {
+  const out: Record<string, unknown>[] = [];
+  let start = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("invoices")
+      .select("id, facture_number, facture_date, categorie, is_duplicata, sites(nom), communes(nom)")
+      .eq("archived", false)
+      .order("facture_date", { ascending: false })
+      .range(start, start + pageSize - 1);
+    if (error || !data) return out;
+    out.push(...data);
+    if (data.length < pageSize) return out;
+    start += pageSize;
+  }
+}
+
 export default async function ExtractionPage({ searchParams }: { searchParams: Promise<{ id?: string }> }) {
   const { id } = await searchParams;
   const supabase = await createClient();
 
   // Liste légère pour le sélecteur
-  const { data: list } = await supabase
-    .from("invoices")
-    .select("id, facture_number, facture_date, categorie, is_duplicata, sites(nom), communes(nom)")
-    .eq("archived", false)
-    .order("facture_date", { ascending: false });
+  const list = await selectAllInvoices(supabase);
 
   const pickerInvoices: PickerInvoice[] = (list ?? []).map((i: Record<string, unknown>) => ({
     id: i.id as string,

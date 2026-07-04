@@ -17,11 +17,18 @@ export async function archiveInvoices(ids: string[], archived: boolean) {
   const { supabase, user } = await requireUser();
   if (!user) return { error: "Unauthorized" };
 
-  const { error } = await supabase.from("invoices").update({ archived }).in("id", ids);
+  const { data, error } = await supabase
+    .from("invoices")
+    .update({ archived })
+    .in("id", ids)
+    .select("id");
   if (error) return { error: error.message };
+  // Aucune ligne renvoyée = mise à jour bloquée en amont (droits/RLS) → on le signale
+  // explicitement plutôt que de laisser l'UI « ne rien faire ».
+  if (!data || data.length === 0) return { error: "Aucune facture mise à jour (droits insuffisants ?)." };
 
   revalidatePath("/documents");
-  return { success: true, count: ids.length };
+  return { success: true, count: data.length };
 }
 
 /**

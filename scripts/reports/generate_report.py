@@ -24,12 +24,14 @@ Principes :
 - Données simulées : disclaimers explicites sur la page de garde.
 """
 import json
+import math
 import os
 import sys
 import urllib.request
 import urllib.parse
 import zipfile
 import shutil
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from collections import defaultdict
 
@@ -37,6 +39,7 @@ from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.chart.series import SeriesLabel
 from openpyxl.drawing.fill import PatternFillProperties
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -50,10 +53,11 @@ HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
 TITLE_FONT = Font(bold=True, size=15, color=ORANGE_DARK)
 SUB_FONT = Font(italic=True, size=10, color=GREY)
 KPI_FILL = PatternFill("solid", fgColor=SOFT)
-EUR_FMT = '#,##0.00" €"'
-EUR0_FMT = '#,##0" €"'
-KWH_FMT = '#,##0" kWh"'
-PCT_FMT = '0.0"%"'
+EUR_FMT = '#,##0.00'
+EUR0_FMT = '#,##0'
+KWH_FMT = '#,##0.0'
+PCT_FMT = '0.0'  # unité (%) portée par l'en-tête de colonne, pas par la cellule
+SMEM_LOGO_PATH = Path(__file__).resolve().parents[2] / "logo_smem.png"
 
 # ── Accès Supabase (REST, paginé) ────────────────────────────────────────────
 SB_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -153,7 +157,7 @@ def normalize(invoices, periods, charges):
                 "site": (inv.get("sites") or {}).get("nom", "—"),
                 "cat": "Éclairage public" if inv.get("categorie") == "eclairage_public" else "Bâtiment",
                 "type": type_, "poste": poste, "annee": yy, "sem": hh, "periode": f"{yy}-S{hh}",
-                "kwh": kwh * f, "eur": eur * f,
+                "kwh": kwh * f, "eur": eur * f, "days": days,
                 "num": inv["facture_number"], "date": inv["facture_date"],
             })
 
@@ -178,9 +182,26 @@ def normalize(invoices, periods, charges):
 def periods_sorted(rows):
     return sorted({r["periode"] for r in rows})
 
+def trim_partial_semesters(rows):
+    """Retire les semestres calendaires de bord partiellement couverts (artefacts de
+    ventilation pro-rata : demi-hauteur en début/fin de série → chute trompeuse).
+    Un semestre est conservé si sa couverture (somme des jours ventilés) atteint
+    ≥ 85 % de la couverture médiane (intérieurs ~100 %, demi-semestres de bord ~50-80 %)."""
+    if not rows:
+        return rows
+    dsum = defaultdict(float)
+    for r in rows:
+        dsum[r["periode"]] += r.get("days", 0)
+    vals = sorted(dsum.values())
+    med = vals[len(vals) // 2] if vals else 0
+    if med <= 0:
+        return rows
+    keep = {p for p, v in dsum.items() if v >= 0.85 * med}
+    return [r for r in rows if r["periode"] in keep]
+
 # ── Avant/après : allocation par fenêtres de dates RÉELLES ───────────────────
 TODAY = date.today()
-BEFORE_START = date(2019, 1, 1)
+BEFORE_START = date(2017, 1, 1)  # les données simulées démarrent en 2017
 
 def overlap_days(a0, a1, b0, b1):
     lo, hi = max(a0, b0), min(a1, b1)
@@ -190,8 +211,11 @@ def alloc_windows(invoices, periods, charges, debut: date, fin: date, keyf):
     """Ventile kWh (conso) et € (toutes composantes) sur AVANT [2019, debut) et APRÈS (fin, auj.],
     pro-rata jours ; la fenêtre de travaux est exclue. Rend {key: {kb,ka,eb,ea}} annualisés ensuite."""
     inv_by_id = {i["id"]: i for i in invoices}
+    # Borne « après » = dernière période réellement facturée (et non aujourd'hui) : sinon
+    # l'annualisation diviserait par une fenêtre plus large que les données → moyenne sous-estimée.
+    last_end = max((d(p["period_end"]) for p in periods if p.get("period_end")), default=TODAY)
     before = (BEFORE_START, debut - timedelta(days=1))
-    after = (fin + timedelta(days=1), TODAY)
+    after = (fin + timedelta(days=1), min(TODAY, last_end))
     out = defaultdict(lambda: {"kb": 0.0, "ka": 0.0, "eb": 0.0, "ea": 0.0})
 
     def add(inv, start, end, kwh, eur):
@@ -221,10 +245,11 @@ def alloc_windows(invoices, periods, charges, debut: date, fin: date, keyf):
                 "eur_avant": v["eb"] / yb, "eur_apres": v["ea"] / ya} for k, v in out.items()}
 
 # ── Graphiques (séries temporelles, axes titrés) ─────────────────────────────
-def make_timeseries_chart(ws, anchor, title, y_title, cats_ref, data_ref, band_ref=None):
-    """Courbe temporelle ; bande grisée « Fenêtre de travaux » optionnelle (barres superposées)."""
+def make_banded_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref, band_ref=None):
+    """Courbe temporelle ; bande de repère optionnelle via barres superposées."""
     line = LineChart()
     line.add_data(data_ref, titles_from_data=True)
+    line.set_categories(cats_ref)  # catégories sur la COURBE (sinon axe 1,2,3 en graphe combiné)
     if band_ref is not None:
         chart = BarChart()
         chart.type = "col"
@@ -233,18 +258,23 @@ def make_timeseries_chart(ws, anchor, title, y_title, cats_ref, data_ref, band_r
         s = chart.series[0]
         s.graphicalProperties.solidFill = "D9D9D9"
         s.graphicalProperties.line.noFill = True
-        chart += line
+        chart.set_categories(cats_ref)
+        chart += line  # la bande garde ses catégories, la courbe aussi
     else:
         chart = line
+        chart.legend = None  # synthèse / courbe simple : pas de label, une seule couleur
     chart.title = title
     chart.height, chart.width = 9, 21
-    chart.x_axis.title = "Période (semestre)"
+    chart.x_axis.title = x_title
     chart.y_axis.title = y_title
     chart.x_axis.delete = False
     chart.y_axis.delete = False
     chart.set_categories(cats_ref)
     ws.add_chart(chart, anchor)
     return chart
+
+def make_timeseries_chart(ws, anchor, title, y_title, cats_ref, data_ref, band_ref=None):
+    return make_banded_line_chart(ws, anchor, title, "Période (semestre)", y_title, cats_ref, data_ref, band_ref)
 
 def make_bar_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref):
     ch = BarChart()
@@ -260,12 +290,38 @@ def make_bar_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref):
     ws.add_chart(ch, anchor)
     return ch
 
+def make_multi_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_refs):
+    ch = LineChart()
+    ch.title = title
+    ch.height, ch.width = 9, 21
+    ch.x_axis.title = x_title
+    ch.y_axis.title = y_title
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    for ref in data_refs:
+        ch.add_data(ref, titles_from_data=True)
+    ch.set_categories(cats_ref)
+    ws.add_chart(ch, anchor)
+    return ch
+
 def style_header_row(ws, row, upto):
     for c in range(1, upto + 1):
         cell = ws.cell(row=row, column=c)
         cell.fill = HDR_FILL
         cell.font = HDR_FONT
         cell.alignment = Alignment(vertical="center")
+
+def add_smem_logo(ws, anchor="D1", width=108):
+    if not SMEM_LOGO_PATH.exists():
+        return
+    try:
+        logo = XLImage(str(SMEM_LOGO_PATH))
+    except Exception:
+        return
+    ratio = logo.height / logo.width if logo.width else 1
+    logo.width = width
+    logo.height = int(logo.width * ratio)
+    ws.add_image(logo, anchor)
 
 # ── Feuilles ─────────────────────────────────────────────────────────────────
 def travaux_label(ci):
@@ -277,10 +333,17 @@ def travaux_label(ci):
 def sheet_garde(wb, p, invoices, scope_label, ci=None):
     ws = wb.active
     ws.title = "Garde"
-    ws["A1"] = "Ability — Rapport d'analyse des factures d'électricité"
-    ws["A1"].font = TITLE_FONT
-    ws["A2"] = "Syndicat Mixte d'Électricité de la Martinique (SMEM)"
-    ws["A2"].font = SUB_FONT
+    ws.merge_cells("A1:D1")
+    ws.merge_cells("A2:D2")
+    add_smem_logo(ws, "F1", 140)
+    ws["A1"] = "Rapport d'analyse des factures d'électricité"
+    ws["A1"].font = Font(bold=True, size=18, color=ORANGE_DARK)
+    ws["A1"].alignment = Alignment(vertical="center")
+    ws["A2"] = "Ability x Syndicat Mixte d'Électricité de la Martinique (SMEM)"
+    ws["A2"].font = Font(bold=True, size=11, color=GREY)
+    ws["A2"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 24
     labels = {"commune": "Rapport par commune", "avant_apres": "Rapport avant / après travaux (PEPP)", "synthese": "Rapport de synthèse"}
     items = [
         ("Type de rapport", labels.get(p["report"], p["report"])),
@@ -294,28 +357,30 @@ def sheet_garde(wb, p, invoices, scope_label, ci=None):
         items.insert(2, ("Travaux d'éclairage public", travaux_label(ci)))
         if ci.get("points_lumineux"):
             items.insert(3, ("Parc EP (référentiel SMEM)", f"{ci['points_lumineux']} points lumineux · {ci['armoires']} armoires"))
-    r = 4
+    ws["A4"] = "Synthèse du périmètre"
+    style_header_row(ws, 4, 2)
+    r = 5
     for k, v in items:
         ws.cell(row=r, column=1, value=k).font = Font(bold=True)
         ws.cell(row=r, column=2, value=v).fill = KPI_FILL
+        ws.cell(row=r, column=2).alignment = Alignment(wrap_text=True, vertical="top")
         r += 1
-    notes = [
-        "AVERTISSEMENT : rapport de démonstration — les factures sont SIMULÉES, calibrées sur les données",
-        "réelles de Fonds-Saint-Denis (tarifs, saisonnalité, impact des travaux). Les dates de travaux par",
-        "commune proviennent du référentiel réel SMEM (mail du 03/07/2026) ; celles marquées « estimé »",
-        "correspondent aux communes absentes du référentiel.",
-        "",
-        "Méthode : les périodes de facturation (souvent à cheval sur deux semestres) sont ventilées au",
-        "pro-rata des jours sur les semestres calendaires S1 (janv–juin) / S2 (juil–déc).",
-        "La feuille masquée « Données » contient le détail normalisé et alimente les tableaux croisés",
-        "dynamiques (clic droit sur l'onglet → Afficher pour la consulter).",
-    ]
-    r += 1
-    for line in notes:
-        ws.cell(row=r, column=1, value=line).font = SUB_FONT
-        r += 1
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 60
+    note_row = r + 1
+    ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row + 2, end_column=6)
+    ws.cell(row=note_row, column=1, value=(
+        "AVERTISSEMENT : rapport de démonstration. Les factures sont simulées mais calibrées sur des ordres de grandeur réels ; "
+        "les dates de travaux proviennent du référentiel SMEM du 03/07/2026 et les communes non documentées restent marquées « estimé ». "
+        "La feuille masquée « Données » contient le détail normalisé utilisé par les tableaux croisés dynamiques."
+    ))
+    ws.cell(row=note_row, column=1).font = SUB_FONT
+    ws.cell(row=note_row, column=1).fill = PatternFill("solid", fgColor="FFF7ED")
+    ws.cell(row=note_row, column=1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 48
+    ws.column_dimensions["C"].width = 4
+    ws.column_dimensions["D"].width = 4
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 14
     return ws
 
 DATA_HEADERS = ["Commune", "Site", "Catégorie", "Type", "Poste", "Année", "Semestre", "Période", "kWh", "Montant €", "Prix moyen c€/kWh", "N° facture", "Date facture"]
@@ -359,19 +424,13 @@ def sheet_evolution(wb, rows, ci=None, title_suffix=""):
 
     headers = ["Période", "Consommation (kWh)", "Dépense (€)"]
     with_band = ci is not None and ci.get("travaux_debut")
-    if with_band:
-        headers += ["Fenêtre travaux (kWh)", "Fenêtre travaux (€)"]
     hr = 4
     for j, h in enumerate(headers):
         ws.cell(row=hr, column=1 + j, value=h)
     style_header_row(ws, hr, len(headers))
     ri = hr + 1
     for p in pers:
-        row = [p, round(kwh_by[p]), round(eur_by[p], 2)]
-        if with_band:
-            band = in_works_window(p, ci)
-            row += [round(kmax * 1.05) if band else None, round(emax * 1.05) if band else None]
-        ws.append(row)
+        ws.append([p, round(kwh_by[p]), round(eur_by[p], 2)])
         ws.cell(row=ri, column=2).number_format = KWH_FMT
         ws.cell(row=ri, column=3).number_format = EUR_FMT
         ri += 1
@@ -379,8 +438,17 @@ def sheet_evolution(wb, rows, ci=None, title_suffix=""):
     cats = Reference(ws, min_col=1, min_row=hr + 1, max_row=last)
     kwh_ref = Reference(ws, min_col=2, min_row=hr, max_row=last)
     eur_ref = Reference(ws, min_col=3, min_row=hr, max_row=last)
-    band_k = Reference(ws, min_col=4, min_row=hr, max_row=last) if with_band else None
-    band_e = Reference(ws, min_col=5, min_row=hr, max_row=last) if with_band else None
+    if with_band:
+        ws.cell(row=hr, column=6, value="Repère travaux kWh")
+        ws.cell(row=hr, column=7, value="Repère travaux €")
+        for row_idx, period in enumerate(pers, start=hr + 1):
+            band = in_works_window(period, ci)
+            ws.cell(row=row_idx, column=6, value=round(kmax * 1.05) if band else None)
+            ws.cell(row=row_idx, column=7, value=round(emax * 1.05) if band else None)
+        ws.column_dimensions["F"].hidden = True
+        ws.column_dimensions["G"].hidden = True
+    band_k = Reference(ws, min_col=6, min_row=hr, max_row=last) if with_band else None
+    band_e = Reference(ws, min_col=7, min_row=hr, max_row=last) if with_band else None
     anchor_row = last + 2
     make_timeseries_chart(ws, f"A{anchor_row}", f"Consommation par semestre{title_suffix}", "Consommation (kWh)", cats, kwh_ref, band_k)
     make_timeseries_chart(ws, f"A{anchor_row + 19}", f"Dépense par semestre{title_suffix}", "Dépense (€ TTC)", cats, eur_ref, band_e)
@@ -456,13 +524,13 @@ def sheet_avant_apres(wb, rows, alloc_site, ci, commune_nom):
     ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
     meth = [
         f"Travaux : {travaux_label(ci)} (référentiel SMEM).",
-        "Méthode : AVANT = 01/01/2019 → veille du lancement ; APRÈS = lendemain de l'achèvement → aujourd'hui.",
+        "Méthode : AVANT = début des données (2017) → veille du lancement ; APRÈS = lendemain de l'achèvement → dernière facture.",
         "La fenêtre de travaux est EXCLUE. Moyennes annualisées (pro-rata jours). € = toutes composantes.",
     ]
     for i, m in enumerate(meth):
         ws.cell(row=2 + i, column=1, value=m).font = SUB_FONT
 
-    headers = ["Site", "kWh/an avant", "kWh/an après", "Δ conso", "€/an avant", "€/an après", "Δ dépense"]
+    headers = ["Site", "kWh/an avant", "kWh/an après", "Δ conso (%)", "€/an avant", "€/an après", "Δ dépense (%)"]
     hr = 6
     for j, h in enumerate(headers):
         ws.cell(row=hr, column=1 + j, value=h)
@@ -545,9 +613,9 @@ def sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info):
     ws = wb.create_sheet("Avant-Après communes")
     ws["A1"] = "Avant / après travaux — comparaison par commune (dates réelles SMEM)"
     ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
-    ws["A2"] = "AVANT = 01/01/2019 → lancement ; APRÈS = achèvement → aujourd'hui ; fenêtre de travaux exclue ; moyennes annualisées."
+    ws["A2"] = "AVANT = début des données (2017) → lancement ; APRÈS = achèvement → dernière facture ; fenêtre de travaux exclue ; moyennes annualisées."
     ws["A2"].font = SUB_FONT
-    headers = ["Commune", "Travaux (SMEM)", "Points lum.", "Armoires", "kWh/an avant", "kWh/an après", "Δ conso", "€/an avant", "€/an après", "Δ dépense"]
+    headers = ["Commune", "Travaux (SMEM)", "Points lum.", "Armoires", "kWh/an avant", "kWh/an après", "Δ conso (%)", "€/an avant", "€/an après", "Δ dépense (%)"]
     hr = 4
     for j, h in enumerate(headers):
         ws.cell(row=hr, column=1 + j, value=h)
@@ -583,7 +651,84 @@ def sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info):
         ws.column_dimensions[get_column_letter(i)].width = w
     return ws
 
-def sheet_datalogger(wb, p, scope_label):
+def semester_range(year: int, sem: int):
+    return (date(year, 1, 1), date(year, 6, 30)) if sem == 1 else (date(year, 7, 1), date(year, 12, 31))
+
+def each_day(start: date, end: date):
+    cur = start
+    while cur <= end:
+        yield cur
+        cur += timedelta(days=1)
+
+def pick_datalogger_example(invoices, rows):
+    site_year = defaultdict(lambda: {"s1": 0.0, "s2": 0.0, "total": 0.0, "sems": set()})
+    site_kva = {}
+    for inv in invoices:
+        site = (inv.get("sites") or {}).get("nom") or "—"
+        kva = (inv.get("sites") or {}).get("kva")
+        if kva not in (None, ""):
+            try:
+                site_kva[site] = max(float(kva), site_kva.get(site, 0))
+            except Exception:
+                pass
+    for r in rows:
+        if r["type"] != "Consommation" or not r["kwh"]:
+            continue
+        bucket = site_year[(r["site"], r["annee"])]
+        bucket[f"s{r['sem']}"] += r["kwh"]
+        bucket["total"] += r["kwh"]
+        bucket["sems"].add(r["sem"])
+    if not site_year:
+        return None
+    (site, year), bucket = max(site_year.items(), key=lambda item: (item[0][1], len(item[1]["sems"]), item[1]["total"]))
+    return {
+        "site": site,
+        "year": year,
+        "invoice_sem": {1: bucket["s1"], 2: bucket["s2"]},
+        "subscribed_kva": site_kva.get(site) or 36.0,
+    }
+
+def simulate_logger_targets(invoice_sem):
+    factors = {1: 0.991, 2: 1.028}
+    return {sem: round((invoice_sem.get(sem) or 0.0) * factors[sem], 1) for sem in (1, 2)}
+
+def simulate_logger_daily(year, logger_sem, subscribed_kva):
+    daily_energy = []
+    for sem in (1, 2):
+        start, end = semester_range(year, sem)
+        days = list(each_day(start, end))
+        weights = []
+        for idx, day in enumerate(days):
+            season = 1 + 0.11 * math.sin(((day.timetuple().tm_yday - 1) / 365) * 2 * math.pi)
+            weekly = 1 + 0.04 * math.sin(idx * 2 * math.pi / 7)
+            pulse = 1.06 if day.day in (5, 14, 23) else 1.0
+            weights.append(max(0.35, season * weekly * pulse))
+        total_weight = sum(weights) or 1.0
+        scale = (logger_sem.get(sem) or 0.0) / total_weight
+        for day, weight in zip(days, weights):
+            daily_energy.append((day, weight * scale))
+    mean_daily = (sum(v for _, v in daily_energy) / len(daily_energy)) if daily_energy else 0.0
+    daily_power = []
+    for idx, (day, kwh) in enumerate(daily_energy):
+        ratio = (kwh / mean_daily) if mean_daily else 1.0
+        peak = subscribed_kva * (0.67 + 0.18 * ratio + 0.05 * math.sin(idx * 0.17) + (0.09 if idx % 37 == 0 else 0.0))
+        peak = max(subscribed_kva * 0.4, min(subscribed_kva * 1.12, peak))
+        daily_power.append((day, round(peak, 2)))
+    return daily_energy, daily_power
+
+def aggregate_weekly(daily_energy):
+    weekly = defaultdict(float)
+    for day, kwh in daily_energy:
+        week_start = day - timedelta(days=day.weekday())
+        weekly[week_start] += kwh
+    out = []
+    for week_start in sorted(weekly):
+        marker_day = week_start + timedelta(days=3)
+        sem = 1 if marker_day <= date(marker_day.year, 6, 30) else 2
+        out.append((week_start, round(weekly[week_start], 1), sem))
+    return out
+
+def sheet_datalogger(wb, p, scope_label, invoices, rows):
     if not p.get("dataLogger"):
         ws = wb.create_sheet("Data loggers")
         ws["A1"] = "Données complémentaires — data loggers d'armoires"
@@ -595,46 +740,126 @@ def sheet_datalogger(wb, p, scope_label):
         ws["A5"].font = SUB_FONT
         ws.column_dimensions["A"].width = 100
         return ws
-    ws = wb.create_sheet("Data loggers (démo)")
-    ws["A1"] = "Data loggers d'armoires — DONNÉES FICTIVES DE DÉMONSTRATION"
+
+    example = pick_datalogger_example(invoices, rows)
+    ws = wb.create_sheet("Data logger (démo)")
+    ws["A1"] = "Data logger — analyse agrégée (données fictives de démonstration)"
     ws["A1"].font = Font(bold=True, size=13, color="B91C1C")
-    ws["A2"] = f"Section indépendante des factures et abonnements · périmètre : {scope_label}"
+    ws["A2"] = f"Données horaires / infra-horaires simulées puis agrégées à la semaine et au jour · périmètre : {scope_label}"
     ws["A2"].font = SUB_FONT
-    # Consommation quotidienne (90 jours, armoire type)
-    ws["A4"] = "Consommation quotidienne — armoire type (90 derniers jours)"
-    ws["A4"].font = Font(bold=True, size=12, color=ORANGE_DARK)
-    hr = 5
-    ws.cell(row=hr, column=1, value="Date")
-    ws.cell(row=hr, column=2, value="Énergie (kWh/jour)")
-    style_header_row(ws, hr, 2)
-    import math
-    ri = hr + 1
-    for k in range(90):
-        day = TODAY - timedelta(days=89 - k)
-        night_hours = 11.4 + 0.6 * math.sin((day.timetuple().tm_yday / 365) * 2 * math.pi)  # nuits ± saison
-        kwh = 4.2 * night_hours * (1 + 0.05 * math.sin(k * 1.3))
-        ws.cell(row=ri, column=1, value=day.strftime("%d/%m/%Y"))
-        ws.cell(row=ri, column=2, value=round(kwh, 1))
-        ri += 1
-    make_timeseries_chart_daily(ws, "D5", "Consommation quotidienne (fictive)",
-                                Reference(ws, min_col=1, min_row=hr + 1, max_row=ri - 1),
-                                Reference(ws, min_col=2, min_row=hr, max_row=ri - 1))
-    # Historique de coupures
-    top = ri + 2
-    ws.cell(row=top, column=1, value="Historique de coupures réseau (fictif)").font = Font(bold=True, size=12, color=ORANGE_DARK)
-    for j, h in enumerate(["Date", "Début", "Durée", "Armoire", "Retour secteur"]):
-        ws.cell(row=top + 1, column=1 + j, value=h)
-    style_header_row(ws, top + 1, 5)
-    coupures = [
-        ("14/06/2026", "03:12", "18 min", "EP Bourg", "auto"),
-        ("29/05/2026", "21:47", "4 min", "EP Bourg", "auto"),
-        ("11/05/2026", "02:05", "1 h 02", "EP Route principale", "intervention"),
-        ("24/04/2026", "19:33", "9 min", "EP Quartier nord", "auto"),
-        ("02/04/2026", "04:18", "27 min", "EP Bourg", "auto"),
+
+    if not example:
+        ws["A4"] = "Aucune donnée de consommation disponible pour produire la démonstration data logger."
+        ws["A4"].font = Font(bold=True, color="B45309")
+        ws["A4"].fill = KPI_FILL
+        ws.column_dimensions["A"].width = 100
+        return ws
+
+    site = example["site"]
+    year = example["year"]
+    subscribed_kva = float(example["subscribed_kva"] or 36.0)
+    invoice_sem = example["invoice_sem"]
+    logger_sem = simulate_logger_targets(invoice_sem)
+    daily_energy, daily_power = simulate_logger_daily(year, logger_sem, subscribed_kva)
+    weekly_energy = aggregate_weekly(daily_energy)
+
+    ws["A4"] = "Site exemple"
+    ws["B4"] = f"{site} · année {year} · abonnement {subscribed_kva:.0f} kVA"
+    ws["A5"] = "Le logger fictif représente une mesure horaire / infra-horaire agrégée pour éviter les milliers de lignes brutes."
+    ws["A5"].font = SUB_FONT
+
+    ws["A7"] = "Tableau 1 — Synthèse comparative par période"
+    ws["A7"].font = Font(bold=True, size=12, color=ORANGE_DARK)
+    headers = ["Période", "Consommation Facture (kWh)", "Consommation Logger (kWh)", "Écart Absolu (kWh)", "Écart (%)", "Statut"]
+    for j, h in enumerate(headers, start=1):
+        ws.cell(row=8, column=j, value=h)
+    style_header_row(ws, 8, len(headers))
+
+    summary_rows = [
+        ("Semestre 1", invoice_sem.get(1, 0.0), logger_sem.get(1, 0.0)),
+        ("Semestre 2", invoice_sem.get(2, 0.0), logger_sem.get(2, 0.0)),
+        ("Total annuel", sum(invoice_sem.values()), sum(logger_sem.values())),
     ]
-    for c in coupures:
-        ws.append(list(c))
-    for i, w in enumerate([14, 12, 10, 22, 14], 1):
+    for idx, (label, facture_kwh, logger_kwh) in enumerate(summary_rows, start=9):
+        ecart_abs = abs(logger_kwh - facture_kwh)
+        ecart_pct = (ecart_abs / facture_kwh * 100) if facture_kwh else None
+        statut = "Alerte" if (ecart_pct or 0) > 2 else "Conforme"
+        ws.cell(row=idx, column=1, value=label)
+        ws.cell(row=idx, column=2, value=round(facture_kwh, 1)).number_format = KWH_FMT
+        ws.cell(row=idx, column=3, value=round(logger_kwh, 1)).number_format = KWH_FMT
+        ws.cell(row=idx, column=4, value=round(ecart_abs, 1)).number_format = KWH_FMT
+        ws.cell(row=idx, column=5, value=ecart_pct).number_format = PCT_FMT
+        ws.cell(row=idx, column=6, value=statut)
+        if statut == "Alerte":
+            ws.cell(row=idx, column=6).fill = PatternFill("solid", fgColor="FECACA")
+        else:
+            ws.cell(row=idx, column=6).fill = PatternFill("solid", fgColor="DCFCE7")
+
+    src = wb.create_sheet("Data logger source")
+    src.sheet_state = "hidden"
+
+    src["A1"] = "Semaine"
+    src["B1"] = "Énergie logger (kWh/semaine)"
+    src["C1"] = "Repère Semestre 2"
+    style_header_row(src, 1, 3)
+    max_weekly = max([v for _, v, _ in weekly_energy] or [0])
+    for row_idx, (week_start, weekly_kwh, sem) in enumerate(weekly_energy, start=2):
+        src.cell(row=row_idx, column=1, value=week_start.strftime("%d/%m/%Y"))
+        src.cell(row=row_idx, column=2, value=weekly_kwh)
+        src.cell(row=row_idx, column=3, value=round(max_weekly * 1.05, 1) if sem == 2 else None)
+
+    src["E1"] = "Date"
+    src["F1"] = "Puissance max quotidienne (kVA)"
+    src["G1"] = "Abonnement (kVA)"
+    style_header_row(src, 1, 7)
+    for row_idx, ((day, peak), (_, _kwh)) in enumerate(zip(daily_power, daily_energy), start=2):
+        src.cell(row=row_idx, column=5, value=day.strftime("%d/%m/%Y"))
+        src.cell(row=row_idx, column=6, value=peak)
+        src.cell(row=row_idx, column=7, value=round(subscribed_kva, 2))
+
+    ws["A14"] = "Graphique 1 — Courbe de charge globale et périodes de facturation"
+    ws["A14"].font = Font(bold=True, size=12, color=ORANGE_DARK)
+    ws["A33"] = "Graphique 2 — Histogramme comparatif Facture vs Logger"
+    ws["A33"].font = Font(bold=True, size=12, color=ORANGE_DARK)
+    ws["A52"] = "Graphique 3 — Analyse des pics de puissance vs abonnement"
+    ws["A52"].font = Font(bold=True, size=12, color=ORANGE_DARK)
+
+    weekly_last = 1 + len(weekly_energy)
+    make_banded_line_chart(
+        ws, "A15",
+        f"Courbe de charge globale agrégée à la semaine — {site} ({year})",
+        "Semaine",
+        "Énergie logger (kWh / semaine)",
+        Reference(src, min_col=1, min_row=2, max_row=weekly_last),
+        Reference(src, min_col=2, min_row=1, max_row=weekly_last),
+        Reference(src, min_col=3, min_row=1, max_row=weekly_last),
+    )
+    ws["A31"] = "Bande grisée = Semestre 2 ; la série hebdomadaire agrège la mesure horaire / infra-horaire du logger."
+    ws["A31"].font = SUB_FONT
+
+    make_bar_chart(
+        ws, "A34",
+        f"Facture vs logger — {site} ({year})",
+        "Période",
+        "Consommation (kWh)",
+        Reference(ws, min_col=1, min_row=9, max_row=11),
+        Reference(ws, min_col=2, max_col=3, min_row=8, max_row=11),
+    )
+
+    daily_last = 1 + len(daily_power)
+    make_multi_line_chart(
+        ws, "A53",
+        f"Pics de puissance quotidiens vs abonnement — {site}",
+        "Jour",
+        "Puissance (kVA)",
+        Reference(src, min_col=5, min_row=2, max_row=daily_last),
+        [
+            Reference(src, min_col=6, min_row=1, max_row=daily_last),
+            Reference(src, min_col=7, min_row=1, max_row=daily_last),
+        ],
+    )
+
+    for i, w in enumerate([18, 24, 24, 18, 12, 14], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     return ws
 
@@ -762,7 +987,7 @@ def build(p: dict, out_path: str):
     invoices, periods, charges, communes_info = load_data(p)
     if not invoices:
         raise SystemExit("Aucune facture dans le périmètre demandé.")
-    rows = normalize(invoices, periods, charges)
+    rows = trim_partial_semesters(normalize(invoices, periods, charges))
 
     ci = communes_info.get(p.get("communeId")) if p.get("communeId") else None
     if p["report"] in ("commune", "avant_apres"):
@@ -791,7 +1016,7 @@ def build(p: dict, out_path: str):
     tcd = wb.create_sheet("TCD")
     tcd["A1"] = "Tableau croisé dynamique (€ et kWh) — actualisé automatiquement à l'ouverture dans Excel."
     tcd["A1"].font = SUB_FONT
-    sheet_datalogger(wb, p, scope)
+    sheet_datalogger(wb, p, scope, invoices, rows)
     ws_data = sheet_donnees(wb, rows)  # dernière position + masquée
     wb.save(out_path)
 
