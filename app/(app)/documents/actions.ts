@@ -25,7 +25,7 @@ export async function archiveInvoices(ids: string[], archived: boolean) {
   if (error) return { error: error.message };
   // Aucune ligne renvoyée = mise à jour bloquée en amont (droits/RLS) → on le signale
   // explicitement plutôt que de laisser l'UI « ne rien faire ».
-  if (!data || data.length === 0) return { error: "Aucune facture mise à jour (droits insuffisants ?)." };
+  if (!data || data.length === 0) return { error: "Aucune facture mise à jour — rechargez la page (elles ont peut-être été régénérées)." };
 
   revalidatePath("/documents");
   return { success: true, count: data.length };
