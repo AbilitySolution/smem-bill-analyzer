@@ -39,7 +39,7 @@ const GUIDES: Guide[] = [
     icon: FileSpreadsheet, title: "Rapports", href: "/rapport-excel", hrefLabel: "Ouvrir Rapports",
     role: "Un seul flux « Générer un rapport Excel » : 3 rapports (Par commune, Avant/après travaux, Synthèse) avec séries temporelles, TCD natifs et décomposition tarifaire.",
     steps: [
-      "1 · Choisissez le type : Par commune (séries kWh/€ avec fenêtre de travaux marquée), Avant/après travaux (dates réelles SMEM, une feuille d'analyse), ou Synthèse (portefeuille).",
+      "1 · Choisissez le type : Par commune (séries kWh/€ avec fenêtre de travaux marquée), Avant/après travaux (dates réelles SMEM, une feuille d'analyse), ou Synthèse (toutes les communes).",
       "2 · Définissez le périmètre : commune, dates, sites — ou sélectionnez des factures dans Mes documents puis « Exporter Excel » (préselection automatique).",
       "3 · Option : « Inclure les données du connecteur data logger » (conso quotidienne + coupures, données de démonstration).",
       "Les graphiques sont des séries temporelles avec axes et unités affichés ; les périodes de facturation sont ventilées au pro-rata des jours.",

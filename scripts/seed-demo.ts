@@ -51,16 +51,21 @@ const hash = (s: string) => [...s].reduce((h, c) => (Math.imul(h, 31) + c.charCo
 
 // ── Modèle économique (calé sur les spreadsheets Fonds-Saint-Denis) ─────────
 // Tarif Base en c€ HT/kWh par année (réel FSD : 6.43→6.90 (2019) … 14.62 (2024)).
+// Tarif énergie c€HT/kWh — hausse RÉELLE atténuée pour la démo : la crise 2022-2024
+// (prix ×2) écraserait la baisse de dépense post-travaux. On garde une hausse nette mais
+// modérée (~+30 % sur 2019→2025) afin que la dépense (€) décroisse avec la consommation,
+// plus lentement qu'elle.
 const BASE_CKWH: Record<number, number> = {
-  2017: 6.81, 2018: 6.5, 2019: 6.65, 2020: 7.18, 2021: 7.39, 2022: 11.86, 2023: 14.35, 2024: 14.62, 2025: 12.4, 2026: 11.3,
+  2017: 6.81, 2018: 6.5, 2019: 6.65, 2020: 6.9, 2021: 7.15, 2022: 7.6, 2023: 8.1, 2024: 8.4, 2025: 8.5, 2026: 8.5,
 };
 const HP_RATIO = 1.45; // ≈ 9.85/6.81
 const HC_RATIO = 1.10; // ≈ 7.52/6.81
 const KVA_AN: Record<number, number> = { // €/kVA/an (part fixe)
   2017: 11.0, 2018: 11.3, 2019: 11.6, 2020: 12.0, 2021: 12.4, 2022: 13.8, 2023: 15.2, 2024: 16.0, 2025: 16.4, 2026: 16.8,
 };
-const ACCISE_EUR_KWH: Record<number, number> = { // accise (ex-CSPE) €/kWh
-  2017: 0.0225, 2018: 0.0225, 2019: 0.0225, 2020: 0.0225, 2021: 0.0225, 2022: 0.001, 2023: 0.001, 2024: 0.021, 2025: 0.0325, 2026: 0.0325,
+const ACCISE_EUR_KWH: Record<number, number> = { // accise (ex-CSPE) €/kWh — lissée (les à-coups
+  // réels 2022-2025 provoquaient une remontée de la dépense incohérente avec la baisse de conso)
+  2017: 0.021, 2018: 0.021, 2019: 0.021, 2020: 0.021, 2021: 0.0215, 2022: 0.0215, 2023: 0.022, 2024: 0.022, 2025: 0.0225, 2026: 0.0225,
 };
 const OCTROI_PCT = 0.025; // octroi de mer ≈ 2.5 % du HT
 const TVA_PCT = 0.054;    // ≈ TVA constatée sur la vraie facture (9.14/168.99)
@@ -184,8 +189,8 @@ function semesterKwh(site: SiteDef, commune: CommuneDef, s: Semester, rnd: () =>
   kwh *= 1 + (s.half === 2 ? 0.03 : -0.03) + (rnd() - 0.5) * 0.06;
   if (site.categorie === "eclairage_public") {
     if (isAfterRenovation(commune, s)) {
-      // Baisse douce ~ −30 % au passage des travaux, puis légère décroissance dans le temps (plancher ≈ 0,60).
-      const decay = Math.max(0.6, 1 - 0.015 * yearsSinceRenovation(commune, s));
+      // Baisse ~ −30 % au passage des travaux, puis décroissance continue visible (plancher ≈ 0,58).
+      const decay = Math.max(0.58, 1 - 0.03 * yearsSinceRenovation(commune, s));
       kwh *= (0.70 + (rnd() - 0.5) * 0.04) * decay;
     } else if (isDuringRenovation(commune, s)) {
       kwh *= 0.85 + (rnd() - 0.5) * 0.06; // transition pendant travaux

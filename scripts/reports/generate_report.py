@@ -248,8 +248,13 @@ def alloc_windows(invoices, periods, charges, debut: date, fin: date, keyf):
 def make_banded_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref, band_ref=None):
     """Courbe temporelle ; bande de repère optionnelle via barres superposées."""
     line = LineChart()
+    line.varyColors = False
     line.add_data(data_ref, titles_from_data=True)
     line.set_categories(cats_ref)  # catégories sur la COURBE (sinon axe 1,2,3 en graphe combiné)
+    for cs in line.series:  # une seule couleur, trait plein (fini la courbe « divisée »)
+        cs.graphicalProperties.line.solidFill = ORANGE
+        cs.graphicalProperties.line.width = 28000  # EMU ≈ 2,2 pt
+        cs.smooth = False
     if band_ref is not None:
         chart = BarChart()
         chart.type = "col"
@@ -262,7 +267,7 @@ def make_banded_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_r
         chart += line  # la bande garde ses catégories, la courbe aussi
     else:
         chart = line
-        chart.legend = None  # synthèse / courbe simple : pas de label, une seule couleur
+    chart.legend = None  # pas de label : la bande est expliquée par la note sous le graphe
     chart.title = title
     chart.height, chart.width = 9, 21
     chart.x_axis.title = x_title
@@ -406,11 +411,16 @@ def in_works_window(periode: str, ci) -> bool:
     return sem_start <= d(ci["travaux_fin"]) and sem_end >= d(ci["travaux_debut"])
 
 def sheet_evolution(wb, rows, ci=None, title_suffix=""):
-    """Séries temporelles kWh & € (bande travaux si commune) + décomposition annuelle compacte."""
+    """Séries temporelles kWh & € de l'ÉCLAIRAGE PUBLIC (objet des travaux : la bande
+    grisée marque la fenêtre de rénovation) + décomposition annuelle compacte."""
     ws = wb.create_sheet("Évolution")
-    ws["A1"] = f"Évolution semestrielle{title_suffix}"
+    # Courbes centrées sur l'éclairage public : c'est le poste rénové, seul à refléter les
+    # travaux ; les bâtiments (peu impactés) diluaient la baisse. Repli sur tout si pas d'EP.
+    ep_rows = [r for r in rows if r["cat"] == "Éclairage public"]
+    rows = ep_rows or rows
+    ws["A1"] = f"Évolution semestrielle — éclairage public{title_suffix}"
     ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
-    ws["A2"] = "Montants toutes composantes (part variable + part fixe + taxes) ; kWh = énergie consommée."
+    ws["A2"] = "Éclairage public uniquement (poste rénové). Montants toutes composantes ; kWh = énergie consommée. Bâtiments détaillés dans « Par site » / TCD."
     ws["A2"].font = SUB_FONT
 
     pers = periods_sorted(rows)
@@ -993,7 +1003,7 @@ def build(p: dict, out_path: str):
     if p["report"] in ("commune", "avant_apres"):
         scope = (ci or {}).get("nom") or rows[0]["commune"]
     else:
-        scope = "Toutes communes (portefeuille SMEM)"
+        scope = "Rapport général — toutes les communes"
     if p.get("ids"):
         scope += f" · {len(invoices)} factures sélectionnées manuellement"
 
@@ -1010,7 +1020,15 @@ def build(p: dict, out_path: str):
                                    lambda inv: (inv.get("sites") or {}).get("nom", "—"))
         sheet_avant_apres(wb, rows, alloc_site, ci, scope)
     else:  # synthese
-        sheet_evolution(wb, rows, None, " — portefeuille")
+        # Bande grise = fenêtre de travaux GLOBALE (min lancement → max achèvement des communes présentes).
+        present = {i.get("commune_id") for i in invoices}
+        debuts = [d(c["travaux_debut"]) for cid, c in communes_info.items()
+                  if cid in present and c.get("travaux_debut")]
+        fins = [d(c["travaux_fin"]) for cid, c in communes_info.items()
+                if cid in present and c.get("travaux_fin")]
+        global_ci = {"nom": "toutes communes", "travaux_debut": min(debuts).isoformat(),
+                     "travaux_fin": max(fins).isoformat(), "travaux_estimes": False} if debuts and fins else None
+        sheet_evolution(wb, rows, global_ci, "")
         sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info)
 
     tcd = wb.create_sheet("TCD")
