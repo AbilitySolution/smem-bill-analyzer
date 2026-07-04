@@ -6,6 +6,7 @@ export type AnomalyType =
   | "tariff_change";
 export type AnomalySeverity = "low" | "medium" | "high";
 export type TauxUnit = "eur_per_kwh" | "percent";
+export type ChargeCategory = "fixed" | "tax";
 
 export interface Client {
   id: string;
@@ -51,32 +52,16 @@ export interface Invoice {
   created_at: string;
 }
 
-export interface ConsumptionHistory {
+// Fact table: one row per billed consumption period. This is the single
+// source for time-series charts and anomaly detection — query by
+// contract_id + period_start, no joins needed.
+export interface ConsumptionPeriod {
   id: string;
   invoice_id: string;
-  periode_label: string;
-  periode_date: string | null; // "YYYY-MM" — month-level label, not a full date
+  contract_id: string | null;
   poste_tarifaire: string;
-  valeur_kwh: number | null;
-  is_estime: boolean;
-}
-
-export interface InvoiceFixedCharge {
-  id: string;
-  invoice_id: string;
-  libelle: string;
-  date_debut: string | null;
-  date_fin: string | null;
-  tarif_kva_an: number | null;
-  montant_eur: number;
-}
-
-export interface InvoiceConsumptionLine {
-  id: string;
-  invoice_id: string;
-  poste_tarifaire: string;
-  date_debut: string | null;
-  date_fin: string | null;
+  period_start: string | null;
+  period_end: string | null;
   numero_compteur: string | null;
   ancien_index: number | null;
   nouveau_index: number | null;
@@ -87,12 +72,15 @@ export interface InvoiceConsumptionLine {
   index_estime: boolean;
 }
 
-export interface InvoiceTax {
+// Billing detail: fixed charges + taxes, same shape (labeled line, period,
+// amount). Used for invoice display/audit, not for analytics.
+export interface InvoiceCharge {
   id: string;
   invoice_id: string;
+  category: ChargeCategory;
   libelle: string;
-  date_debut: string | null;
-  date_fin: string | null;
+  period_start: string | null;
+  period_end: string | null;
   assiette: number | null;
   taux: string | null;
   taux_numeric: number | null;
@@ -114,8 +102,9 @@ export interface CorrectionLog {
 
 export interface Anomaly {
   id: string;
-  invoice_id: string;
   contract_id: string | null;
+  consumption_period_id: string | null;
+  invoice_id: string | null;
   type: AnomalyType;
   severity: AnomalySeverity;
   description: string | null;

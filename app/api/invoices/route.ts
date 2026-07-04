@@ -114,27 +114,22 @@ export async function POST(request: Request) {
 
   const invoiceId = invoice.id;
 
-  // 4. Insert child rows.
+  // 4. Insert child rows — consumption_periods (analytics fact table,
+  // denormalized contract_id included) and charges (billing detail).
   const childInserts = await Promise.all([
-    extraction.consumption_history.length
-      ? supabase
-          .from("consumption_history")
-          .insert(extraction.consumption_history.map((row) => ({ ...row, invoice_id: invoiceId })))
+    extraction.consumption_periods.length
+      ? supabase.from("consumption_periods").insert(
+          extraction.consumption_periods.map((row) => ({
+            ...row,
+            invoice_id: invoiceId,
+            contract_id: contractId,
+          })),
+        )
       : Promise.resolve({ error: null }),
-    extraction.fixed_charges.length
+    extraction.charges.length
       ? supabase
-          .from("invoice_fixed_charges")
-          .insert(extraction.fixed_charges.map((row) => ({ ...row, invoice_id: invoiceId })))
-      : Promise.resolve({ error: null }),
-    extraction.consumption_lines.length
-      ? supabase
-          .from("invoice_consumption_lines")
-          .insert(extraction.consumption_lines.map((row) => ({ ...row, invoice_id: invoiceId })))
-      : Promise.resolve({ error: null }),
-    extraction.taxes.length
-      ? supabase
-          .from("invoice_taxes")
-          .insert(extraction.taxes.map((row) => ({ ...row, invoice_id: invoiceId })))
+          .from("invoice_charges")
+          .insert(extraction.charges.map((row) => ({ ...row, invoice_id: invoiceId })))
       : Promise.resolve({ error: null }),
   ]);
 

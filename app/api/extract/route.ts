@@ -11,10 +11,9 @@ const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité). Extrait 
 Règles importantes :
 - Toutes les dates au format ISO 8601 (YYYY-MM-DD).
 - Les montants en nombres (pas de texte, pas de symbole €), avec le point comme séparateur décimal.
-- "historique de consommation" (tableau en-tête, plusieurs colonnes de périodes type "févr 22") va dans consumption_history. is_estime = true si la valeur est en italique sur la facture.
-- Les lignes "part fixe / abonnement" vont dans fixed_charges.
-- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines. Une ligne par période de barème si plusieurs barèmes existent pour la même période de relevé.
-- Toutes les lignes de la section "Taxes et contributions" vont dans taxes, une ligne par taxe/période (ex: CSPE peut apparaître plusieurs fois pour des sous-périodes différentes — garder chaque occurrence séparée). taux_unit = "eur_per_kwh" si le taux est exprimé en €/kWh, "percent" si en %.
+- N'extrait PAS le tableau d'aperçu/historique en première page (ex: "févr 22 / août 22 / févr 23") — ce sont des résumés d'autres factures déjà capturées ailleurs, source de doublons.
+- consumption_periods : uniquement les lignes "part variable" au verso avec index ancien/nouveau de compteur réels. Une ligne par période de barème si plusieurs barèmes existent pour la même période de relevé.
+- charges : toutes les lignes "part fixe / abonnement" (category="fixed") ET toutes les lignes de la section "Taxes et contributions" (category="tax"), une ligne par taxe/période (ex: CSPE peut apparaître plusieurs fois pour des sous-périodes différentes — garder chaque occurrence séparée). taux_unit = "eur_per_kwh" si le taux est exprimé en €/kWh, "percent" si en %.
 - Si une valeur n'est pas présente sur la facture, mets null (jamais d'invention de données).
 - is_duplicata = true si le mot "DUPLICATA" apparaît sur le document.`;
 

@@ -4,10 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { InvoiceExtraction } from "@/lib/anthropic/invoice-schema";
 
-type Section = keyof Pick<
-  InvoiceExtraction,
-  "consumption_history" | "fixed_charges" | "consumption_lines" | "taxes"
->;
+type Section = keyof Pick<InvoiceExtraction, "consumption_periods" | "charges">;
 
 const inputClass =
   "w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm focus:border-[#1E40AF] focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/30";
@@ -219,30 +216,12 @@ export default function ReviewForm({
       </section>
 
       <RowTable
-        title="Historique de consommation"
-        section="consumption_history"
-        columns={["periode_label", "periode_date", "poste_tarifaire", "valeur_kwh", "is_estime"]}
-        rows={extraction.consumption_history}
-        onUpdate={updateRow}
-        onRemove={removeRow}
-      />
-
-      <RowTable
-        title="Part fixe (abonnement)"
-        section="fixed_charges"
-        columns={["libelle", "date_debut", "date_fin", "tarif_kva_an", "montant_eur"]}
-        rows={extraction.fixed_charges}
-        onUpdate={updateRow}
-        onRemove={removeRow}
-      />
-
-      <RowTable
-        title="Part variable (consommation facturée)"
-        section="consumption_lines"
+        title="Périodes de consommation facturées (fact table analytics)"
+        section="consumption_periods"
         columns={[
           "poste_tarifaire",
-          "date_debut",
-          "date_fin",
+          "period_start",
+          "period_end",
           "ancien_index",
           "nouveau_index",
           "coefficient",
@@ -251,16 +230,16 @@ export default function ReviewForm({
           "montant_eur",
           "index_estime",
         ]}
-        rows={extraction.consumption_lines}
+        rows={extraction.consumption_periods}
         onUpdate={updateRow}
         onRemove={removeRow}
       />
 
       <RowTable
-        title="Taxes et contributions"
-        section="taxes"
-        columns={["libelle", "date_debut", "date_fin", "assiette", "taux", "montant_eur"]}
-        rows={extraction.taxes}
+        title="Charges (part fixe + taxes)"
+        section="charges"
+        columns={["category", "libelle", "period_start", "period_end", "assiette", "taux", "montant_eur"]}
+        rows={extraction.charges}
         onUpdate={updateRow}
         onRemove={removeRow}
       />
