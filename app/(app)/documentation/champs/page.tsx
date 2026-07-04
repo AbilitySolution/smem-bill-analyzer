@@ -1,47 +1,82 @@
 import { Info } from "lucide-react";
 
-// Champs du modèle d'extraction unique (reflète lib/anthropic/invoice-schema.ts).
 const GROUPS: { titre: string; champs: { nom: string; type: string; desc: string }[] }[] = [
   {
     titre: "Facture",
     champs: [
-      { nom: "Numéro de facture", type: "Code", desc: "Identifiant unique de la facture." },
-      { nom: "Date de facture", type: "Date", desc: "Date d'émission." },
-      { nom: "Date limite de paiement", type: "Date", desc: "Échéance de règlement." },
-      { nom: "Total HT", type: "Nombre", desc: "Montant hors taxes." },
-      { nom: "TVA", type: "Nombre", desc: "Montant de TVA." },
-      { nom: "Autres taxes", type: "Nombre", desc: "Total des autres taxes." },
-      { nom: "Total TTC", type: "Nombre", desc: "Montant toutes taxes comprises." },
-      { nom: "Duplicata", type: "Booléen", desc: "Vrai si « DUPLICATA » figure sur le document." },
+      { nom: "Numéro de facture", type: "Code", desc: "Identifiant unique de la facture (facture_number)." },
+      { nom: "Date de facture", type: "Date", desc: "Date d'émission (facture_date)." },
+      { nom: "Date limite de paiement", type: "Date", desc: "Échéance de règlement (date_limite_paiement)." },
+      { nom: "Date prochain relevé", type: "Date", desc: "Date du prochain relevé de compteur (date_prochain_releve)." },
+      { nom: "Date prochaine facture", type: "Date", desc: "Date estimée de la prochaine facture (date_prochaine_facture)." },
+      { nom: "Total HT", type: "Nombre €", desc: "Montant hors taxes (total_ht)." },
+      { nom: "TVA", type: "Nombre €", desc: "Montant de TVA (tva)." },
+      { nom: "Autres taxes", type: "Nombre €", desc: "Total des autres taxes (autres_taxes)." },
+      { nom: "Total TTC", type: "Nombre €", desc: "Montant toutes taxes comprises (total_ttc)." },
+      { nom: "Catégorie", type: "Enum", desc: "batiment ou eclairage_public (categorie)." },
+      { nom: "Duplicata", type: "Booléen", desc: "Vrai si « DUPLICATA » figure sur le document (is_duplicata)." },
     ],
   },
   {
-    titre: "Client & contrat",
+    titre: "Client",
     champs: [
-      { nom: "Nom du client", type: "Texte", desc: "Raison sociale du destinataire." },
-      { nom: "Référence client / compte", type: "Code", desc: "Références sur la facture." },
-      { nom: "Numéro de contrat", type: "Code", desc: "Identifiant du contrat de fourniture." },
-      { nom: "Puissance souscrite (kVA)", type: "Nombre", desc: "Puissance du contrat." },
-      { nom: "Numéro de compteur / PDL", type: "Code", desc: "Point de livraison." },
+      { nom: "Nom du client", type: "Texte", desc: "Raison sociale du destinataire (clients.nom)." },
+      { nom: "Référence client", type: "Code", desc: "Numéro client EDF/Enedis (clients.reference_client)." },
+      { nom: "Référence compte", type: "Code", desc: "Numéro de compte (clients.reference_compte)." },
+      { nom: "Adresse", type: "Texte", desc: "Adresse postale du client (clients.adresse)." },
     ],
   },
   {
-    titre: "Lignes de consommation (répété)",
+    titre: "Contrat",
     champs: [
-      { nom: "Poste tarifaire", type: "Texte", desc: "Heures pleines / creuses / base…" },
-      { nom: "Période", type: "Date", desc: "Début et fin de période." },
-      { nom: "Index ancien / nouveau", type: "Nombre", desc: "Relevés de compteur." },
-      { nom: "Consommation (kWh)", type: "Nombre", desc: "Énergie consommée." },
-      { nom: "Prix unitaire (c€/kWh)", type: "Nombre", desc: "Tarif appliqué." },
-      { nom: "Montant (€)", type: "Nombre", desc: "Montant de la ligne." },
+      { nom: "Numéro de contrat", type: "Code", desc: "Identifiant du contrat de fourniture (contracts.contract_number)." },
+      { nom: "PDL (14 chiffres)", type: "Code", desc: "Point de Livraison — identifiant Enedis du compteur (contracts.pdl)." },
+      { nom: "Type tarifaire", type: "Enum", desc: "BASE, HPHC, TEMPO ou EJP (contracts.tarif_type)." },
+      { nom: "Offre", type: "Texte", desc: "Nom commercial de l'offre (contracts.offre)." },
+      { nom: "Service", type: "Texte", desc: "Type de service souscrit (contracts.service)." },
+      { nom: "Espace de livraison", type: "Texte", desc: "Libellé du lieu de livraison (contracts.espace_livraison)." },
+      { nom: "Puissance souscrite (kVA)", type: "Nombre", desc: "Puissance du contrat (contracts.puissance_souscrite_kva)." },
+      { nom: "Réglage protection (A)", type: "Nombre", desc: "Calibre du disjoncteur (contracts.reglage_protection_a)." },
+      { nom: "Type compteur", type: "Texte", desc: "Modèle ou type du compteur (contracts.type_compteur)." },
+      { nom: "Numéro compteur", type: "Code", desc: "Numéro de série du compteur (contracts.numero_compteur)." },
     ],
   },
   {
-    titre: "Taxes & part fixe (répété)",
+    titre: "Site / point de livraison",
     champs: [
-      { nom: "Libellé", type: "Texte", desc: "Intitulé de la taxe ou de l'abonnement." },
-      { nom: "Assiette / taux", type: "Nombre", desc: "Base et taux appliqués." },
-      { nom: "Montant (€)", type: "Nombre", desc: "Montant de la ligne." },
+      { nom: "Nom du site", type: "Texte", desc: "Nom du bâtiment ou point d'éclairage (sites.nom)." },
+      { nom: "PDL", type: "Code", desc: "Point de Livraison rattaché au site (sites.pdl)." },
+      { nom: "Puissance (kVA)", type: "Nombre", desc: "Puissance souscrite au niveau du site (sites.kva)." },
+      { nom: "Calibre (A)", type: "Nombre", desc: "Ampérage du disjoncteur (sites.ampere)." },
+      { nom: "Catégorie", type: "Enum", desc: "batiment ou eclairage_public (sites.categorie)." },
+    ],
+  },
+  {
+    titre: "Lignes de consommation (répétées)",
+    champs: [
+      { nom: "Poste tarifaire", type: "Texte", desc: "HP, HC, Base, TEMPO_HP, TEMPO_HC, EJP_HP… (consumption_periods.poste_tarifaire)." },
+      { nom: "Période début / fin", type: "Date", desc: "Dates de la période relevée (period_start / period_end)." },
+      { nom: "Numéro compteur", type: "Code", desc: "N° de compteur de la ligne (consumption_periods.numero_compteur)." },
+      { nom: "Ancien index", type: "Nombre", desc: "Index de début de période (ancien_index)." },
+      { nom: "Nouvel index", type: "Nombre", desc: "Index de fin de période (nouveau_index)." },
+      { nom: "Coefficient", type: "Nombre", desc: "Coefficient multiplicateur du compteur (coefficient)." },
+      { nom: "Consommation (kWh)", type: "Nombre", desc: "Énergie consommée sur la période (consommation_kwh)." },
+      { nom: "Prix unitaire (c€/kWh)", type: "Nombre", desc: "Tarif appliqué à la ligne (prix_unitaire_ckwh)." },
+      { nom: "Montant (€)", type: "Nombre €", desc: "Montant de la ligne de consommation (montant_eur)." },
+      { nom: "Index estimé", type: "Booléen", desc: "Vrai si l'index est une estimation EDF (index_estime)." },
+    ],
+  },
+  {
+    titre: "Taxes & part fixe (répétées)",
+    champs: [
+      { nom: "Libellé", type: "Texte", desc: "Intitulé de la taxe ou de l'abonnement (invoice_charges.libelle)." },
+      { nom: "Type", type: "Enum", desc: "fixed (abonnement/part fixe) ou tax (taxe) (invoice_charges.category)." },
+      { nom: "Période début / fin", type: "Date", desc: "Dates couvertes par la charge (period_start / period_end)." },
+      { nom: "Assiette", type: "Nombre", desc: "Base de calcul de la taxe (assiette)." },
+      { nom: "Taux", type: "Texte", desc: "Taux brut tel qu'affiché sur la facture (taux)." },
+      { nom: "Unité du taux", type: "Enum", desc: "eur_per_kwh ou percent (taux_unit)." },
+      { nom: "Tarif kVA/an", type: "Nombre €", desc: "Tarif d'abonnement en €/kVA/an pour la part fixe (tarif_kva_an)." },
+      { nom: "Montant (€)", type: "Nombre €", desc: "Montant de la ligne (montant_eur)." },
     ],
   },
 ];
@@ -53,7 +88,7 @@ export default function DocumentationChampsPage() {
         <Info className="mt-0.5 size-4 shrink-0 text-[#ea580c]" />
         <p className="text-[13px] text-[var(--kn-text)]">
           Le modèle unique « Facture d&apos;électricité » extrait automatiquement les champs ci-dessous via l&apos;<strong>OCR</strong>.
-          L&apos;édition des libellés <strong>et la personnalisation des champs</strong> sera disponible prochainement.
+          Les noms entre parenthèses correspondent aux colonnes de la base de données.
         </p>
       </div>
 

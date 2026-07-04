@@ -31,10 +31,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
     return NextResponse.json({ error: "Lien invalide ou expiré." }, { status: 404 });
   }
 
+  const ALLOWED_MIME = new Set(["application/pdf", "image/jpeg", "image/png", "image/tiff"]);
+
   const formData = await request.formData();
   const file = formData.get("file");
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "Fichier manquant." }, { status: 400 });
+  }
+  if (!ALLOWED_MIME.has(file.type)) {
+    return NextResponse.json({ error: "Type de fichier non autorisé. Formats acceptés : PDF, JPEG, PNG, TIFF." }, { status: 415 });
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    return NextResponse.json({ error: "Fichier trop volumineux (max 20 Mo)." }, { status: 413 });
   }
 
   const safeName = file.name

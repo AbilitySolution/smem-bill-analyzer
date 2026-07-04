@@ -1,16 +1,5 @@
 import { z } from "zod";
 
-// Mirrors supabase/migrations/20260624000000_init_schema.sql.
-// Claude OCR extraction must conform to this shape exactly (tool-use schema).
-
-export const consumptionHistoryItemSchema = z.object({
-  periode_label: z.string(),
-  periode_date: z.string().nullable(),
-  poste_tarifaire: z.string(),
-  valeur_kwh: z.number().nullable(),
-  is_estime: z.boolean(),
-});
-
 export const fixedChargeItemSchema = z.object({
   libelle: z.string(),
   date_debut: z.string().nullable(),
@@ -53,6 +42,8 @@ export const invoiceExtractionSchema = z.object({
   }),
   contract: z.object({
     contract_number: z.string(),
+    pdl: z.string().nullable(),
+    tarif_type: z.enum(["BASE", "HPHC", "TEMPO", "EJP"]).nullable(),
     espace_livraison: z.string().nullable(),
     offre: z.string().nullable(),
     service: z.string().nullable(),
@@ -73,22 +64,19 @@ export const invoiceExtractionSchema = z.object({
     total_ttc: z.number(),
     is_duplicata: z.boolean().default(false),
   }),
-  consumption_history: z.array(consumptionHistoryItemSchema),
+  commune_hint: z.string().nullable(),
   fixed_charges: z.array(fixedChargeItemSchema),
   consumption_lines: z.array(consumptionLineItemSchema),
   taxes: z.array(taxItemSchema),
-  // Score de confiance 0-1 par champ clé, estimé par le modèle à l'extraction.
   precision: z.record(z.string(), z.number()).nullable().optional(),
 });
 
 export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
 
-// JSON Schema passed to Claude as a tool definition (Anthropic tool-use).
-// Kept in sync manually with invoiceExtractionSchema above.
 export const invoiceExtractionToolSchema = {
   name: "extract_edf_invoice",
   description:
-    "Extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, historique consommation, charges fixes, lignes de consommation, taxes).",
+    "Extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, charges fixes, lignes de consommation, taxes).",
   input_schema: {
     type: "object" as const,
     properties: {
@@ -106,6 +94,15 @@ export const invoiceExtractionToolSchema = {
         type: "object",
         properties: {
           contract_number: { type: "string" },
+          pdl: {
+            type: ["string", "null"],
+            description: "Point De Livraison EDF — identifiant à 14 chiffres (ex: 12345678901234). Visible sur la facture, souvent libellé 'Réf. PDL' ou 'N° PDL'.",
+          },
+          tarif_type: {
+            type: ["string", "null"],
+            enum: ["BASE", "HPHC", "TEMPO", "EJP", null],
+            description: "Type tarifaire normalisé : BASE (tarif unique), HPHC (heures pleines/creuses), TEMPO (jours bleus/blancs/rouges), EJP (effacement jours de pointe). Déduit depuis le champ 'offre' ou 'service'.",
+          },
           espace_livraison: { type: ["string", "null"] },
           offre: { type: ["string", "null"] },
           service: { type: ["string", "null"] },
@@ -116,6 +113,8 @@ export const invoiceExtractionToolSchema = {
         },
         required: [
           "contract_number",
+          "pdl",
+          "tarif_type",
           "espace_livraison",
           "offre",
           "service",
@@ -152,19 +151,9 @@ export const invoiceExtractionToolSchema = {
           "is_duplicata",
         ],
       },
-      consumption_history: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            periode_label: { type: "string" },
-            periode_date: { type: ["string", "null"] },
-            poste_tarifaire: { type: "string", description: "hp | hc | base | total" },
-            valeur_kwh: { type: ["number", "null"] },
-            is_estime: { type: "boolean" },
-          },
-          required: ["periode_label", "periode_date", "poste_tarifaire", "valeur_kwh", "is_estime"],
-        },
+      commune_hint: {
+        type: ["string", "null"],
+        description: "Nom de la commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, ou entête). Copier le texte exact trouvé sur la facture — ne pas normaliser. Null si absent.",
       },
       fixed_charges: {
         type: "array",
@@ -182,10 +171,14 @@ export const invoiceExtractionToolSchema = {
       },
       consumption_lines: {
         type: "array",
+        description: "Une ligne par combinaison (poste tarifaire × période de relevé). poste_tarifaire normalisé : 'HP' (heures pleines), 'HC' (heures creuses), 'BASE' (tarif de base), 'TEMPO_HP', 'TEMPO_HC', 'EJP_HP', 'EJP_HPN'.",
         items: {
           type: "object",
           properties: {
-            poste_tarifaire: { type: "string" },
+            poste_tarifaire: {
+              type: "string",
+              description: "Valeur normalisée parmi : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN. Utiliser le libellé exact de la facture si inconnu.",
+            },
             date_debut: { type: ["string", "null"] },
             date_fin: { type: ["string", "null"] },
             numero_compteur: { type: ["string", "null"] },
@@ -241,7 +234,7 @@ export const invoiceExtractionToolSchema = {
       precision: {
         type: "object",
         description:
-          "Score de confiance de l'extraction, entre 0 et 1, pour chaque champ clé de l'en-tête (1 = certain et parfaitement lisible ; plus bas = valeur incertaine, illisible ou déduite).",
+          "Score de confiance 0-1 par champ clé (1 = certain et parfaitement lisible ; plus bas = flou, ambigu, déduit ou absent).",
         properties: {
           facture_number: { type: "number" },
           facture_date: { type: "number" },
@@ -249,15 +242,28 @@ export const invoiceExtractionToolSchema = {
           tva: { type: "number" },
           autres_taxes: { type: "number" },
           total_ttc: { type: "number" },
+          pdl: { type: "number" },
+          contract_number: { type: "number" },
+          puissance_souscrite_kva: { type: "number" },
         },
-        required: ["facture_number", "facture_date", "total_ht", "tva", "autres_taxes", "total_ttc"],
+        required: [
+          "facture_number",
+          "facture_date",
+          "total_ht",
+          "tva",
+          "autres_taxes",
+          "total_ttc",
+          "pdl",
+          "contract_number",
+          "puissance_souscrite_kva",
+        ],
       },
     },
     required: [
       "client",
       "contract",
       "invoice",
-      "consumption_history",
+      "commune_hint",
       "fixed_charges",
       "consumption_lines",
       "taxes",

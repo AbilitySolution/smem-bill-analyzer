@@ -38,16 +38,10 @@ export async function POST(request: Request) {
   }
 
   // 1. Upsert client, rattaché à la commune du site.
-  const { data: existingClient } = await supabase
-    .from("clients")
-    .select("id")
-    .or(
-      extraction.client.reference_compte
-        ? `reference_compte.eq.${extraction.client.reference_compte}`
-        : `nom.eq.${extraction.client.nom}`,
-    )
-    .limit(1)
-    .maybeSingle();
+  const clientLookup = extraction.client.reference_compte
+    ? supabase.from("clients").select("id").eq("reference_compte", extraction.client.reference_compte)
+    : supabase.from("clients").select("id").eq("nom", extraction.client.nom);
+  const { data: existingClient } = await clientLookup.limit(1).maybeSingle();
 
   let clientId = existingClient?.id as string | undefined;
   if (!clientId) {
@@ -59,6 +53,7 @@ export async function POST(request: Request) {
         reference_compte: extraction.client.reference_compte,
         adresse: extraction.client.adresse,
         commune_id: site.commune_id,
+        created_by: authData.user.id,
       })
       .select("id")
       .single();
@@ -80,7 +75,14 @@ export async function POST(request: Request) {
   if (!contractId) {
     const { data: newContract, error: contractError } = await supabase
       .from("contracts")
-      .insert({ ...extraction.contract, client_id: clientId, site_id })
+      .insert({
+        ...extraction.contract,
+        pdl: extraction.contract.pdl ?? null,
+        tarif_type: extraction.contract.tarif_type ?? null,
+        client_id: clientId,
+        site_id,
+        created_by: authData.user.id,
+      })
       .select("id")
       .single();
 
@@ -89,7 +91,14 @@ export async function POST(request: Request) {
     }
     contractId = newContract.id;
   } else {
-    await supabase.from("contracts").update({ site_id }).eq("id", contractId);
+    await supabase
+      .from("contracts")
+      .update({
+        site_id,
+        ...(extraction.contract.pdl ? { pdl: extraction.contract.pdl } : {}),
+        ...(extraction.contract.tarif_type ? { tarif_type: extraction.contract.tarif_type } : {}),
+      })
+      .eq("id", contractId);
   }
 
   // 3. Insert invoice header.

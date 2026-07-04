@@ -47,10 +47,10 @@ export function DocumentCard({ doc, selected, onToggle }: { doc: InvoiceDoc; sel
             {doc.categorie === "batiment" ? <Building2 className="size-2.5" /> : <Lightbulb className="size-2.5" />}
             {frDate(doc.date)}
           </span>
-          <span className="text-[13px] font-semibold tabular-nums text-[var(--kn-text)]">{eur(doc.totalTtc)}</span>
-        </div>
-        <div className="pointer-events-auto mt-2 empty:hidden">
-          <AnomalyTicker invoiceId={doc.id} anomalies={doc.anomalies} />
+          <span className="pointer-events-auto inline-flex items-center gap-1.5">
+            <AnomalyTicker invoiceId={doc.id} anomalies={doc.anomalies} label={false} size="size-3.5" />
+            <span className="text-[13px] font-semibold tabular-nums text-[var(--kn-text)]">{eur(doc.totalTtc)}</span>
+          </span>
         </div>
         <div className="mt-1.5 flex items-center justify-between border-t border-[var(--kn-border)] pt-1.5">
           <span className="text-[10px] uppercase tracking-wide text-[var(--kn-text-muted)]">Confiance</span>

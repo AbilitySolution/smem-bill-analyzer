@@ -142,7 +142,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
           <Link href={`/documents/extraction?id=${d.id}`} className="font-medium text-[var(--kn-text)]">
             {d.number}
           </Link>
-          <AnomalyTicker invoiceId={d.id} anomalies={d.anomalies} />
+          <AnomalyTicker invoiceId={d.id} anomalies={d.anomalies} label={false} />
           {d.archived && <span className="rounded bg-[var(--kn-value-box)] px-1.5 text-[10px] text-[var(--kn-text-muted)]">masqué</span>}
         </div>
       </td>

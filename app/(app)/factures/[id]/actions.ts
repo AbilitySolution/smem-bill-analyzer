@@ -3,16 +3,6 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 
-const EDITABLE_FIELDS = new Set([
-  "facture_date",
-  "date_limite_paiement",
-  "total_ht",
-  "tva",
-  "autres_taxes",
-  "total_ttc",
-]);
-
-// Liste blanche des champs éditables par table (sécurité : on n'écrit que ceux-ci).
 const TABLE_FIELDS: Record<string, Set<string>> = {
   invoices: new Set([
     "facture_number", "facture_date", "date_limite_paiement", "date_prochain_releve",
@@ -21,7 +11,7 @@ const TABLE_FIELDS: Record<string, Set<string>> = {
   ]),
   clients: new Set(["nom", "reference_client", "reference_compte", "adresse"]),
   contracts: new Set([
-    "contract_number", "espace_livraison", "offre", "service",
+    "contract_number", "pdl", "tarif_type", "espace_livraison", "offre", "service",
     "puissance_souscrite_kva", "reglage_protection_a", "type_compteur", "numero_compteur",
   ]),
   sites: new Set(["nom", "pdl", "kva", "ampere", "categorie"]),
@@ -36,6 +26,8 @@ const TABLE_FIELDS: Record<string, Set<string>> = {
   ]),
 };
 const BOOLEAN_FIELDS = new Set(["is_duplicata", "index_estime"]);
+
+const CHILD_TABLES = new Set(["consumption_periods", "invoice_charges"]);
 
 /** Édition générique d'un champ extrait (toutes tables), avec journalisation. */
 export async function updateExtractionField(
@@ -52,6 +44,16 @@ export async function updateExtractionField(
   const supabase = await createClient();
   const { data: authData } = await supabase.auth.getUser();
   if (!authData.user) return { error: "Unauthorized" };
+
+  // Verify child rows belong to this invoice (defence-in-depth; RLS also enforces this).
+  if (CHILD_TABLES.has(table)) {
+    const { data: row } = await supabase
+      .from(table)
+      .select("invoice_id")
+      .eq("id", rowId)
+      .maybeSingle();
+    if (!row || row.invoice_id !== invoiceId) return { error: "Ligne introuvable." };
+  }
 
   const value: string | number | boolean | null =
     newValue === "" ? null : BOOLEAN_FIELDS.has(field) ? newValue === "true" : newValue;
@@ -77,49 +79,17 @@ export async function updateExtractionField(
   return { success: true };
 }
 
-export async function updateInvoiceField(
-  invoiceId: string,
-  field: string,
-  oldValue: string | null,
-  newValue: string,
-) {
-  if (!EDITABLE_FIELDS.has(field)) {
-    return { error: "Champ non éditable." };
-  }
-  const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) return { error: "Unauthorized" };
-
-  const { error } = await supabase
-    .from("invoices")
-    .update({ [field]: newValue, status: "reviewed" })
-    .eq("id", invoiceId);
-
-  if (error) return { error: error.message };
-
-  await supabase.from("corrections_log").insert({
-    invoice_id: invoiceId,
-    table_name: "invoices",
-    row_id: invoiceId,
-    field_name: field,
-    old_value: oldValue,
-    new_value: newValue,
-    corrected_by: authData.user.id,
-  });
-
-  revalidatePath(`/factures/${invoiceId}`);
-  return { success: true };
-}
-
 export async function toggleInvoiceTag(invoiceId: string, tagId: string, checked: boolean) {
   const supabase = await createClient();
   const { data: authData } = await supabase.auth.getUser();
   if (!authData.user) return { error: "Unauthorized" };
 
   if (checked) {
-    await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: tagId });
+    const { error } = await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: tagId });
+    if (error) return { error: error.message };
   } else {
-    await supabase.from("invoice_tags").delete().eq("invoice_id", invoiceId).eq("tag_id", tagId);
+    const { error } = await supabase.from("invoice_tags").delete().eq("invoice_id", invoiceId).eq("tag_id", tagId);
+    if (error) return { error: error.message };
   }
   revalidatePath(`/factures/${invoiceId}`);
   return { success: true };

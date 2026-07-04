@@ -72,7 +72,7 @@ export function detectAnomalies(i: AnomalyInput, ctx: AnomalyContext): AnomalyLi
   }
 
   // 3. Consommation manquante sur une facture réelle
-  if (i.isDuplicata && i.kwh === 0) {
+  if (!i.isDuplicata && i.kwh === 0) {
     out.push({ type: "conso_manquante", severity: "low", message: "Aucune consommation (kWh) extraite sur une facture réelle." });
   }
 

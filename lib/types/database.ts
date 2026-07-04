@@ -9,11 +9,17 @@ export type TauxUnit = "eur_per_kwh" | "percent";
 export type Categorie = "batiment" | "eclairage_public";
 export type UserRole = "admin_smem" | "agent_commune";
 export type ChargeCategory = "fixed" | "tax";
+export type TarifType = "BASE" | "HPHC" | "TEMPO" | "EJP";
 
 export interface Commune {
   id: string;
   nom: string;
   code_insee: string | null;
+  points_lumineux: number | null;
+  armoires: number | null;
+  travaux_debut: string | null;
+  travaux_fin: string | null;
+  travaux_estimes: boolean | null;
   created_at: string;
 }
 
@@ -35,6 +41,7 @@ export interface Client {
   reference_compte: string | null;
   adresse: string | null;
   commune_id: string | null;
+  created_by: string | null;
   created_at: string;
 }
 
@@ -43,6 +50,8 @@ export interface Contract {
   client_id: string | null;
   site_id: string | null;
   contract_number: string;
+  pdl: string | null;
+  tarif_type: TarifType | null;
   espace_livraison: string | null;
   offre: string | null;
   service: string | null;
@@ -50,6 +59,7 @@ export interface Contract {
   reglage_protection_a: number | null;
   type_compteur: string | null;
   numero_compteur: string | null;
+  created_by: string | null;
   created_at: string;
 }
 
@@ -73,6 +83,8 @@ export interface Invoice {
   raw_ocr_json: unknown;
   file_path: string;
   status: InvoiceStatus;
+  archived: boolean;
+  precision: Record<string, number> | null;
   created_by: string | null;
   created_at: string;
 }

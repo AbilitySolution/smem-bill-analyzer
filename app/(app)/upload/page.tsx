@@ -27,6 +27,7 @@ function UploadPageInner() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ extraction: InvoiceExtraction; file_path: string } | null>(null);
+  const [communeAutoDetected, setCommuneAutoDetected] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -46,7 +47,15 @@ function UploadPageInner() {
       const res = await fetch("/api/extract", { method: "POST", body: formData });
       const json = await res.json();
       if (!res.ok || json.error) { setError(json.error ?? "Erreur d'extraction OCR."); return; }
-      setResult(json);
+      setResult({ extraction: json.extraction, file_path: json.file_path });
+      if (json.suggested_commune_id) {
+        if (!communeId) {
+          setCommuneId(json.suggested_commune_id);
+          setCommuneAutoDetected(json.suggested_commune_nom);
+        } else if (communeId !== json.suggested_commune_id) {
+          setCommuneAutoDetected(`⚠ La facture indique "${json.suggested_commune_nom}" — vérifiez la commune sélectionnée.`);
+        }
+      }
     } catch { setError("Erreur réseau lors de l'extraction."); }
     finally { setLoading(false); }
   }, []);
@@ -151,6 +160,12 @@ function UploadPageInner() {
 
       <input ref={inputRef} type="file" accept="application/pdf,image/png,image/jpeg,image/webp" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+
+      {communeAutoDetected && (
+        <p className={`mt-3 text-sm ${communeAutoDetected.startsWith("⚠") ? "text-amber-600" : "text-[#0f6e56]"}`}>
+          {communeAutoDetected.startsWith("⚠") ? communeAutoDetected : `Commune détectée depuis la facture : ${communeAutoDetected}`}
+        </p>
+      )}
 
       {error && <p className="mt-3 text-sm text-[#d33]">{error}</p>}
 

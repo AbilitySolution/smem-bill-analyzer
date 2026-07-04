@@ -9,6 +9,13 @@ const CAT_OPTS = [
   { value: "batiment", label: "Bâtiment" },
   { value: "eclairage_public", label: "Éclairage public" },
 ];
+const TARIF_TYPE_OPTS = [
+  { value: "BASE", label: "BASE" },
+  { value: "HPHC", label: "HPHC" },
+  { value: "TEMPO", label: "TEMPO" },
+  { value: "EJP", label: "EJP" },
+];
+
 const CHARGE_OPTS = [
   { value: "fixed", label: "Part fixe" },
   { value: "tax", label: "Taxe" },
@@ -92,6 +99,8 @@ export function ExtractionPanel({ data }: { data: ExtractionData }) {
             <Section title="Contrat">
               {data.contract ? <>
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="contract_number" label="N° de contrat" />
+                <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="pdl" label="PDL (14 chiffres)" />
+                <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="tarif_type" label="Type tarifaire" kind="select" options={TARIF_TYPE_OPTS} />
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="offre" label="Offre" />
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="service" label="Service" />
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="espace_livraison" label="Espace livraison" />

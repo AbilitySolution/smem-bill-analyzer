@@ -108,10 +108,12 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
 
   if (!invoices || invoices.length === 0) return null;
 
+  const invoiceIds = invoices.map((i) => i.id);
   const lines = await selectAll<RawLine>((from, to) =>
     supabase
       .from("consumption_periods")
       .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, prix_unitaire_ckwh, montant_eur")
+      .in("invoice_id", invoiceIds)
       .range(from, to),
   );
 

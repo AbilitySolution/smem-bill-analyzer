@@ -6,18 +6,20 @@ import {
   invoiceExtractionToolSchema,
 } from "@/lib/anthropic/invoice-schema";
 
-const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité) d'un bâtiment public ou d'un point d'éclairage public. Extrait toutes les données structurées de cette facture en utilisant l'outil extract_edf_invoice.
+const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité) d'un bâtiment public ou d'un point d'éclairage public. Extrait toutes les données structurées en utilisant l'outil extract_edf_invoice.
 
 Règles importantes :
 - Toutes les dates au format ISO 8601 (YYYY-MM-DD).
-- Les montants en nombres (pas de texte, pas de symbole €), avec le point comme séparateur décimal.
-- "historique de consommation" (tableau en-tête, plusieurs colonnes de périodes type "févr 22") va dans consumption_history. is_estime = true si la valeur est en italique sur la facture.
+- Les montants en nombres (pas de texte, pas de symbole €), point comme séparateur décimal.
+- PDL (Point De Livraison) : identifiant à 14 chiffres sur la facture, libellé "Réf. PDL", "N° PDL" ou similaire. Extraire dans contract.pdl. Si absent, null.
+- tarif_type : normaliser en "BASE" (tarif unique), "HPHC" (heures pleines/creuses), "TEMPO" (bleu/blanc/rouge), "EJP". Déduire depuis l'offre ou le service. Si indéterminable, null.
 - Les lignes "part fixe / abonnement" vont dans fixed_charges.
-- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines. Une ligne par période de barème si plusieurs barèmes existent pour la même période de relevé.
-- Toutes les lignes de la section "Taxes et contributions" vont dans taxes, une ligne par taxe/période. taux_unit = "eur_per_kwh" si le taux est exprimé en €/kWh, "percent" si en %.
-- Si une valeur n'est pas présente sur la facture, mets null (jamais d'invention de données).
-- is_duplicata = true si le mot "DUPLICATA" apparaît sur le document.
-- precision : pour chaque champ clé de l'en-tête (facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc), donne un score de confiance entre 0 et 1 (1 = valeur parfaitement lisible et certaine ; valeurs plus basses si le champ est flou, ambigu, déduit ou absent).`;
+- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines. Une ligne par combinaison (poste tarifaire × période). poste_tarifaire normalisé : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN — utiliser le libellé exact si inconnu.
+- Toutes les lignes "Taxes et contributions" vont dans taxes, une par taxe/période. taux_unit = "eur_per_kwh" si en €/kWh, "percent" si en %.
+- Si une valeur absente : null (jamais d'invention).
+- is_duplicata = true si le mot "DUPLICATA" apparaît.
+- commune_hint : nom de la commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, ou en-tête). Copier le texte brut trouvé sur la facture sans normaliser. Null si absent.
+- precision : score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent). Couvrir : facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, pdl, contract_number, puissance_souscrite_kva.`;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -92,7 +94,26 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ extraction: parsed.data, file_path: storagePath });
+    // Fuzzy-match commune_hint against canonical list
+    let suggested_commune_id: string | null = null;
+    let suggested_commune_nom: string | null = null;
+    const hint = parsed.data.commune_hint;
+    if (hint) {
+      const { data: match } = await supabase
+        .rpc("match_commune", { input_text: hint })
+        .maybeSingle() as { data: { commune_id: string; commune_nom: string; score: number } | null };
+      if (match) {
+        suggested_commune_id = match.commune_id;
+        suggested_commune_nom = match.commune_nom;
+      }
+    }
+
+    return NextResponse.json({
+      extraction: parsed.data,
+      file_path: storagePath,
+      suggested_commune_id,
+      suggested_commune_nom,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erreur OCR inconnue.";
     return NextResponse.json({ error: message }, { status: 500 });

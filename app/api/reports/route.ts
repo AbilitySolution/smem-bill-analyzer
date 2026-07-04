@@ -36,14 +36,32 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Choisissez une commune." }, { status: 400 });
   }
 
+  // Enforce commune scoping for agent_commune users.
+  const { data: roleRow } = await supabase
+    .from("user_roles")
+    .select("role, commune_id")
+    .eq("user_id", authData.user.id)
+    .maybeSingle();
+  const isAgent = roleRow?.role === "agent_commune";
+  if (isAgent && !roleRow?.commune_id) {
+    return NextResponse.json({ error: "Compte non rattaché à une commune." }, { status: 403 });
+  }
+  const forcedCommuneId = isAgent ? roleRow!.commune_id : null;
+
   const params: Record<string, unknown> = { report, dataLogger: !!body.dataLogger };
-  if (UUID.test(String(body.communeId ?? ""))) params.communeId = body.communeId;
+  const requestedCommuneId = UUID.test(String(body.communeId ?? "")) ? String(body.communeId) : null;
+  const effectiveCommuneId = forcedCommuneId ?? requestedCommuneId;
+  if (effectiveCommuneId) params.communeId = effectiveCommuneId;
   const ids = uuidList(body.ids, 1200);
   if (ids.length) params.ids = ids;
   const siteIds = uuidList(body.siteIds, 200);
   if (siteIds.length) params.siteIds = siteIds;
   if (DATE.test(String(body.from ?? ""))) params.from = body.from;
   if (DATE.test(String(body.to ?? ""))) params.to = body.to;
+
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    return NextResponse.json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant dans les variables d'environnement." }, { status: 500 });
+  }
 
   const script = join(process.cwd(), "scripts", "reports", "generate_report.py");
   const outPath = join(tmpdir(), `ability-report-${randomUUID()}.xlsx`);

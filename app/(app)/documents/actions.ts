@@ -76,12 +76,17 @@ export async function getSignedUrls(ids: string[]): Promise<{ files: SignedFile[
     .select("id, facture_number, file_path")
     .in("id", ids);
 
+  const withPath = (rows ?? []).filter((r): r is typeof r & { file_path: string } => !!r.file_path);
   const files: SignedFile[] = [];
-  for (const r of rows ?? []) {
-    if (!r.file_path) continue;
-    const { data: signed } = await supabase.storage.from(BUCKET).createSignedUrl(r.file_path, 3600);
-    if (signed?.signedUrl) {
-      files.push({ id: r.id, url: signed.signedUrl, filename: `${r.facture_number || r.id}.pdf` });
+  if (withPath.length) {
+    const { data: signed } = await supabase.storage
+      .from(BUCKET)
+      .createSignedUrls(withPath.map((r) => r.file_path), 3600);
+    for (const s of signed ?? []) {
+      const row = withPath.find((r) => r.file_path === s.path);
+      if (row && s.signedUrl) {
+        files.push({ id: row.id, url: s.signedUrl, filename: `${row.facture_number || row.id}.pdf` });
+      }
     }
   }
   return { files };
