@@ -6,16 +6,18 @@ import {
   invoiceExtractionToolSchema,
 } from "@/lib/anthropic/invoice-schema";
 
-const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité). Extrait toutes les données structurées de cette facture en utilisant l'outil extract_edf_invoice.
+const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité) d'un bâtiment public ou d'un point d'éclairage public. Extrait toutes les données structurées de cette facture en utilisant l'outil extract_edf_invoice.
 
 Règles importantes :
 - Toutes les dates au format ISO 8601 (YYYY-MM-DD).
 - Les montants en nombres (pas de texte, pas de symbole €), avec le point comme séparateur décimal.
-- N'extrait PAS le tableau d'aperçu/historique en première page (ex: "févr 22 / août 22 / févr 23") — ce sont des résumés d'autres factures déjà capturées ailleurs, source de doublons.
-- consumption_periods : uniquement les lignes "part variable" au verso avec index ancien/nouveau de compteur réels. Une ligne par période de barème si plusieurs barèmes existent pour la même période de relevé.
-- charges : toutes les lignes "part fixe / abonnement" (category="fixed") ET toutes les lignes de la section "Taxes et contributions" (category="tax"), une ligne par taxe/période (ex: CSPE peut apparaître plusieurs fois pour des sous-périodes différentes — garder chaque occurrence séparée). taux_unit = "eur_per_kwh" si le taux est exprimé en €/kWh, "percent" si en %.
+- "historique de consommation" (tableau en-tête, plusieurs colonnes de périodes type "févr 22") va dans consumption_history. is_estime = true si la valeur est en italique sur la facture.
+- Les lignes "part fixe / abonnement" vont dans fixed_charges.
+- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines. Une ligne par période de barème si plusieurs barèmes existent pour la même période de relevé.
+- Toutes les lignes de la section "Taxes et contributions" vont dans taxes, une ligne par taxe/période. taux_unit = "eur_per_kwh" si le taux est exprimé en €/kWh, "percent" si en %.
 - Si une valeur n'est pas présente sur la facture, mets null (jamais d'invention de données).
-- is_duplicata = true si le mot "DUPLICATA" apparaît sur le document.`;
+- is_duplicata = true si le mot "DUPLICATA" apparaît sur le document.
+- precision : pour chaque champ clé de l'en-tête (facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc), donne un score de confiance entre 0 et 1 (1 = valeur parfaitement lisible et certaine ; valeurs plus basses si le champ est flou, ambigu, déduit ou absent).`;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -43,7 +45,7 @@ export async function POST(request: Request) {
 
   const safeName = file.name
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[̀-ͯ]/g, "")
     .replace(/[^a-zA-Z0-9.-]/g, "_");
   const storagePath = `${authData.user.id}/${Date.now()}-${safeName}`;
   const { error: uploadError } = await supabase.storage

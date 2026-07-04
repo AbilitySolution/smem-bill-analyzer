@@ -18,5 +18,11 @@ export async function login(_prevState: unknown, formData: FormData) {
     return { error: "Identifiants invalides." };
   }
 
-  redirect("/upload");
+  redirect("/");
+}
+
+export async function logout() {
+  const supabase = await createClient();
+  await supabase.auth.signOut();
+  redirect("/login");
 }

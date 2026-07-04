@@ -1,17 +1,28 @@
 import { z } from "zod";
 
-// Mirrors supabase/migrations/20260624030000_schema_v2_analytics.sql.
+// Mirrors supabase/migrations/20260624000000_init_schema.sql.
 // Claude OCR extraction must conform to this shape exactly (tool-use schema).
-//
-// consumption_periods is the analytics fact table: one row per billed
-// period with real kwh + cost. charges holds fixed-subscription and tax
-// lines (category distinguishes them) — billing detail only, not used for
-// time-series analysis.
 
-export const consumptionPeriodItemSchema = z.object({
+export const consumptionHistoryItemSchema = z.object({
+  periode_label: z.string(),
+  periode_date: z.string().nullable(),
   poste_tarifaire: z.string(),
-  period_start: z.string().nullable(),
-  period_end: z.string().nullable(),
+  valeur_kwh: z.number().nullable(),
+  is_estime: z.boolean(),
+});
+
+export const fixedChargeItemSchema = z.object({
+  libelle: z.string(),
+  date_debut: z.string().nullable(),
+  date_fin: z.string().nullable(),
+  tarif_kva_an: z.number().nullable(),
+  montant_eur: z.number(),
+});
+
+export const consumptionLineItemSchema = z.object({
+  poste_tarifaire: z.string(),
+  date_debut: z.string().nullable(),
+  date_fin: z.string().nullable(),
   numero_compteur: z.string().nullable(),
   ancien_index: z.number().nullable(),
   nouveau_index: z.number().nullable(),
@@ -22,11 +33,10 @@ export const consumptionPeriodItemSchema = z.object({
   index_estime: z.boolean().default(false),
 });
 
-export const chargeItemSchema = z.object({
-  category: z.enum(["fixed", "tax"]),
+export const taxItemSchema = z.object({
   libelle: z.string(),
-  period_start: z.string().nullable(),
-  period_end: z.string().nullable(),
+  date_debut: z.string().nullable(),
+  date_fin: z.string().nullable(),
   assiette: z.number().nullable(),
   taux: z.string().nullable(),
   taux_numeric: z.number().nullable(),
@@ -63,8 +73,12 @@ export const invoiceExtractionSchema = z.object({
     total_ttc: z.number(),
     is_duplicata: z.boolean().default(false),
   }),
-  consumption_periods: z.array(consumptionPeriodItemSchema),
-  charges: z.array(chargeItemSchema),
+  consumption_history: z.array(consumptionHistoryItemSchema),
+  fixed_charges: z.array(fixedChargeItemSchema),
+  consumption_lines: z.array(consumptionLineItemSchema),
+  taxes: z.array(taxItemSchema),
+  // Score de confiance 0-1 par champ clé, estimé par le modèle à l'extraction.
+  precision: z.record(z.string(), z.number()).nullable().optional(),
 });
 
 export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
@@ -74,7 +88,7 @@ export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
 export const invoiceExtractionToolSchema = {
   name: "extract_edf_invoice",
   description:
-    "Extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, périodes de consommation facturées, charges fixes et taxes).",
+    "Extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, historique consommation, charges fixes, lignes de consommation, taxes).",
   input_schema: {
     type: "object" as const,
     properties: {
@@ -138,16 +152,42 @@ export const invoiceExtractionToolSchema = {
           "is_duplicata",
         ],
       },
-      consumption_periods: {
+      consumption_history: {
         type: "array",
-        description:
-          "Une ligne par période de barème facturée, avec index de compteur réels (section 'part variable' au verso de la facture). Ne pas inclure les tableaux d'historique/aperçu qui résument d'autres factures.",
         items: {
           type: "object",
           properties: {
-            poste_tarifaire: { type: "string", description: "hp | hc | base" },
-            period_start: { type: ["string", "null"] },
-            period_end: { type: ["string", "null"] },
+            periode_label: { type: "string" },
+            periode_date: { type: ["string", "null"] },
+            poste_tarifaire: { type: "string", description: "hp | hc | base | total" },
+            valeur_kwh: { type: ["number", "null"] },
+            is_estime: { type: "boolean" },
+          },
+          required: ["periode_label", "periode_date", "poste_tarifaire", "valeur_kwh", "is_estime"],
+        },
+      },
+      fixed_charges: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            libelle: { type: "string" },
+            date_debut: { type: ["string", "null"] },
+            date_fin: { type: ["string", "null"] },
+            tarif_kva_an: { type: ["number", "null"] },
+            montant_eur: { type: "number" },
+          },
+          required: ["libelle", "date_debut", "date_fin", "tarif_kva_an", "montant_eur"],
+        },
+      },
+      consumption_lines: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            poste_tarifaire: { type: "string" },
+            date_debut: { type: ["string", "null"] },
+            date_fin: { type: ["string", "null"] },
             numero_compteur: { type: ["string", "null"] },
             ancien_index: { type: ["number", "null"] },
             nouveau_index: { type: ["number", "null"] },
@@ -159,8 +199,8 @@ export const invoiceExtractionToolSchema = {
           },
           required: [
             "poste_tarifaire",
-            "period_start",
-            "period_end",
+            "date_debut",
+            "date_fin",
             "numero_compteur",
             "ancien_index",
             "nouveau_index",
@@ -172,17 +212,14 @@ export const invoiceExtractionToolSchema = {
           ],
         },
       },
-      charges: {
+      taxes: {
         type: "array",
-        description:
-          "Toutes les lignes 'part fixe / abonnement' (category=fixed) et 'taxes et contributions' (category=tax).",
         items: {
           type: "object",
           properties: {
-            category: { type: "string", enum: ["fixed", "tax"] },
             libelle: { type: "string" },
-            period_start: { type: ["string", "null"] },
-            period_end: { type: ["string", "null"] },
+            date_debut: { type: ["string", "null"] },
+            date_fin: { type: ["string", "null"] },
             assiette: { type: ["number", "null"] },
             taux: { type: ["string", "null"] },
             taux_numeric: { type: ["number", "null"] },
@@ -190,10 +227,9 @@ export const invoiceExtractionToolSchema = {
             montant_eur: { type: "number" },
           },
           required: [
-            "category",
             "libelle",
-            "period_start",
-            "period_end",
+            "date_debut",
+            "date_fin",
             "assiette",
             "taux",
             "taux_numeric",
@@ -202,7 +238,30 @@ export const invoiceExtractionToolSchema = {
           ],
         },
       },
+      precision: {
+        type: "object",
+        description:
+          "Score de confiance de l'extraction, entre 0 et 1, pour chaque champ clé de l'en-tête (1 = certain et parfaitement lisible ; plus bas = valeur incertaine, illisible ou déduite).",
+        properties: {
+          facture_number: { type: "number" },
+          facture_date: { type: "number" },
+          total_ht: { type: "number" },
+          tva: { type: "number" },
+          autres_taxes: { type: "number" },
+          total_ttc: { type: "number" },
+        },
+        required: ["facture_number", "facture_date", "total_ht", "tva", "autres_taxes", "total_ttc"],
+      },
     },
-    required: ["client", "contract", "invoice", "consumption_periods", "charges"],
+    required: [
+      "client",
+      "contract",
+      "invoice",
+      "consumption_history",
+      "fixed_charges",
+      "consumption_lines",
+      "taxes",
+      "precision",
+    ],
   },
 };

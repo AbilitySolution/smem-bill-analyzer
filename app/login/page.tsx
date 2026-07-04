@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useActionState } from "react";
 import { login } from "./actions";
 
@@ -7,17 +8,26 @@ export default function LoginPage() {
   const [state, formAction, pending] = useActionState(login, undefined);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#F8FAFC] px-4">
+    <main className="flex min-h-screen items-center justify-center bg-[var(--kn-card)] px-4">
       <form
         action={formAction}
-        className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-8 shadow-sm"
+        className="w-full max-w-[360px] rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-8 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
       >
-        <h1 className="mb-1 text-xl font-semibold text-[#1E3A8A]">
-          EDF Invoice Analyzer
-        </h1>
-        <p className="mb-6 text-sm text-slate-600">Connexion à votre compte.</p>
+        <div className="mb-1 flex justify-center">
+          <Image
+            src="/ability-logo-dark.png"
+            alt="Ability"
+            width={479}
+            height={483}
+            className="h-14 w-auto"
+            priority
+          />
+        </div>
+        <p className="mb-7 text-center text-[12px] text-[#9ca3af]">
+          Gestion documentaire &amp; factures d&apos;énergie
+        </p>
 
-        <label htmlFor="email" className="mb-1 block text-sm font-medium text-slate-700">
+        <label htmlFor="email" className="mb-1.5 block text-[13px] font-medium text-[#374151]">
           Email
         </label>
         <input
@@ -26,10 +36,10 @@ export default function LoginPage() {
           type="email"
           required
           autoComplete="email"
-          className="mb-4 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-[#1E40AF] focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/30"
+          className="mb-4 w-full rounded-md border border-[var(--kn-border)] px-3 py-2 text-[14px] outline-none focus:border-[#111] focus:ring-2 focus:ring-[#111]/10"
         />
 
-        <label htmlFor="password" className="mb-1 block text-sm font-medium text-slate-700">
+        <label htmlFor="password" className="mb-1.5 block text-[13px] font-medium text-[#374151]">
           Mot de passe
         </label>
         <input
@@ -38,11 +48,11 @@ export default function LoginPage() {
           type="password"
           required
           autoComplete="current-password"
-          className="mb-4 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-[#1E40AF] focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/30"
+          className="mb-5 w-full rounded-md border border-[var(--kn-border)] px-3 py-2 text-[14px] outline-none focus:border-[#111] focus:ring-2 focus:ring-[#111]/10"
         />
 
         {state?.error && (
-          <p className="mb-4 text-sm text-red-600" role="alert">
+          <p className="mb-4 text-[13px] text-[#b42318]" role="alert">
             {state.error}
           </p>
         )}
@@ -50,9 +60,9 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={pending}
-          className="w-full cursor-pointer rounded-md bg-[#1E40AF] px-4 py-2 text-sm font-medium text-white transition-colors duration-200 hover:bg-[#1E3A8A] disabled:cursor-not-allowed disabled:opacity-60"
+          className="w-full cursor-pointer rounded-md bg-[#111] px-4 py-2.5 text-[14px] font-medium text-white transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {pending ? "Connexion..." : "Se connecter"}
+          {pending ? "Connexion…" : "Se connecter"}
         </button>
       </form>
     </main>

@@ -6,7 +6,27 @@ export type AnomalyType =
   | "tariff_change";
 export type AnomalySeverity = "low" | "medium" | "high";
 export type TauxUnit = "eur_per_kwh" | "percent";
+export type Categorie = "batiment" | "eclairage_public";
+export type UserRole = "admin_smem" | "agent_commune";
 export type ChargeCategory = "fixed" | "tax";
+
+export interface Commune {
+  id: string;
+  nom: string;
+  code_insee: string | null;
+  created_at: string;
+}
+
+export interface Site {
+  id: string;
+  commune_id: string;
+  categorie: Categorie;
+  nom: string;
+  pdl: string | null;
+  kva: number | null;
+  ampere: number | null;
+  created_at: string;
+}
 
 export interface Client {
   id: string;
@@ -14,12 +34,14 @@ export interface Client {
   reference_client: string | null;
   reference_compte: string | null;
   adresse: string | null;
+  commune_id: string | null;
   created_at: string;
 }
 
 export interface Contract {
   id: string;
   client_id: string | null;
+  site_id: string | null;
   contract_number: string;
   espace_livraison: string | null;
   offre: string | null;
@@ -35,6 +57,9 @@ export interface Invoice {
   id: string;
   contract_id: string | null;
   client_id: string | null;
+  commune_id: string | null;
+  site_id: string | null;
+  categorie: Categorie | null;
   facture_number: string;
   facture_date: string;
   date_limite_paiement: string | null;
@@ -52,9 +77,6 @@ export interface Invoice {
   created_at: string;
 }
 
-// Fact table: one row per billed consumption period. This is the single
-// source for time-series charts and anomaly detection — query by
-// contract_id + period_start, no joins needed.
 export interface ConsumptionPeriod {
   id: string;
   invoice_id: string;
@@ -72,8 +94,6 @@ export interface ConsumptionPeriod {
   index_estime: boolean;
 }
 
-// Billing detail: fixed charges + taxes, same shape (labeled line, period,
-// amount). Used for invoice display/audit, not for analytics.
 export interface InvoiceCharge {
   id: string;
   invoice_id: string;
@@ -85,6 +105,7 @@ export interface InvoiceCharge {
   taux: string | null;
   taux_numeric: number | null;
   taux_unit: TauxUnit | null;
+  tarif_kva_an: number | null;
   montant_eur: number;
 }
 
@@ -102,9 +123,9 @@ export interface CorrectionLog {
 
 export interface Anomaly {
   id: string;
+  invoice_id: string;
   contract_id: string | null;
   consumption_period_id: string | null;
-  invoice_id: string | null;
   type: AnomalyType;
   severity: AnomalySeverity;
   description: string | null;
@@ -113,4 +134,37 @@ export interface Anomaly {
   expected_range_max: number | null;
   detected_at: string;
   resolved: boolean;
+}
+
+export interface Tag {
+  id: string;
+  label: string;
+  color: string;
+  created_at: string;
+}
+
+export interface Activity {
+  id: string;
+  entity_type: "invoice" | "contract" | "site" | "commune";
+  entity_id: string;
+  author_id: string | null;
+  body: string;
+  created_at: string;
+}
+
+export interface FileRequestLink {
+  id: string;
+  commune_id: string;
+  token: string;
+  label: string | null;
+  created_by: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface UserRoleRow {
+  user_id: string;
+  role: UserRole;
+  commune_id: string | null;
+  created_at: string;
 }
