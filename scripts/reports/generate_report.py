@@ -36,7 +36,7 @@ from datetime import date, datetime, timedelta
 from collections import defaultdict
 
 from openpyxl import Workbook
-from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart import AreaChart, BarChart, LineChart, Reference
 from openpyxl.chart.series import SeriesLabel
 from openpyxl.drawing.fill import PatternFillProperties
 from openpyxl.drawing.image import Image as XLImage
@@ -245,29 +245,34 @@ def alloc_windows(invoices, periods, charges, debut: date, fin: date, keyf):
                 "eur_avant": v["eb"] / yb, "eur_apres": v["ea"] / ya} for k, v in out.items()}
 
 # ── Graphiques (séries temporelles, axes titrés) ─────────────────────────────
+def _grey_area_band(cats_ref, band_ref):
+    """Zone grise remplie (aire) marquant une période — rendu bien plus fiable qu'un
+    barChart superposé (qui, en graphe combiné, ne s'affiche pas dans plusieurs lecteurs)."""
+    area = AreaChart()
+    area.grouping = "standard"
+    area.add_data(band_ref, titles_from_data=True)
+    s = area.series[0]
+    s.graphicalProperties.solidFill = "D9D9D9"
+    s.graphicalProperties.line.noFill = True
+    area.set_categories(cats_ref)
+    return area
+
 def make_banded_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref, band_ref=None):
-    """Courbe temporelle ; bande de repère optionnelle via barres superposées."""
+    """Courbe temporelle monochrome + zone grise de repère optionnelle (aire remplie)."""
     line = LineChart()
     line.varyColors = False
     line.add_data(data_ref, titles_from_data=True)
-    line.set_categories(cats_ref)  # catégories sur la COURBE (sinon axe 1,2,3 en graphe combiné)
+    line.set_categories(cats_ref)
     for cs in line.series:  # une seule couleur, trait plein (fini la courbe « divisée »)
         cs.graphicalProperties.line.solidFill = ORANGE
         cs.graphicalProperties.line.width = 28000  # EMU ≈ 2,2 pt
         cs.smooth = False
     if band_ref is not None:
-        chart = BarChart()
-        chart.type = "col"
-        chart.gapWidth = 0
-        chart.add_data(band_ref, titles_from_data=True)
-        s = chart.series[0]
-        s.graphicalProperties.solidFill = "D9D9D9"
-        s.graphicalProperties.line.noFill = True
-        chart.set_categories(cats_ref)
-        chart += line  # la bande garde ses catégories, la courbe aussi
+        chart = _grey_area_band(cats_ref, band_ref)  # zone grise dessous
+        chart += line                                # courbe au-dessus
     else:
         chart = line
-    chart.legend = None  # pas de label : la bande est expliquée par la note sous le graphe
+    chart.legend = None  # pas de label : la zone grise est expliquée par la note sous le graphe
     chart.title = title
     chart.height, chart.width = 9, 21
     chart.x_axis.title = x_title
@@ -295,16 +300,22 @@ def make_bar_chart(ws, anchor, title, x_title, y_title, cats_ref, data_ref):
     ws.add_chart(ch, anchor)
     return ch
 
-def make_multi_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_refs):
-    ch = LineChart()
+def make_multi_line_chart(ws, anchor, title, x_title, y_title, cats_ref, data_refs, band_ref=None):
+    lines = LineChart()
+    for ref in data_refs:
+        lines.add_data(ref, titles_from_data=True)
+    lines.set_categories(cats_ref)
+    if band_ref is not None:
+        ch = _grey_area_band(cats_ref, band_ref)  # zone grise (ex. après travaux)
+        ch += lines
+    else:
+        ch = lines
     ch.title = title
     ch.height, ch.width = 9, 21
     ch.x_axis.title = x_title
     ch.y_axis.title = y_title
     ch.x_axis.delete = False
     ch.y_axis.delete = False
-    for ref in data_refs:
-        ch.add_data(ref, titles_from_data=True)
     ch.set_categories(cats_ref)
     ws.add_chart(ch, anchor)
     return ch
@@ -453,8 +464,8 @@ def sheet_evolution(wb, rows, ci=None, title_suffix=""):
         ws.cell(row=hr, column=7, value="Repère travaux €")
         for row_idx, period in enumerate(pers, start=hr + 1):
             band = in_works_window(period, ci)
-            ws.cell(row=row_idx, column=6, value=round(kmax * 1.05) if band else None)
-            ws.cell(row=row_idx, column=7, value=round(emax * 1.05) if band else None)
+            ws.cell(row=row_idx, column=6, value=round(kmax * 1.05) if band else 0)
+            ws.cell(row=row_idx, column=7, value=round(emax * 1.05) if band else 0)
         ws.column_dimensions["F"].hidden = True
         ws.column_dimensions["G"].hidden = True
     band_k = Reference(ws, min_col=6, min_row=hr, max_row=last) if with_band else None
@@ -599,8 +610,8 @@ def sheet_avant_apres(wb, rows, alloc_site, ci, commune_nom):
         ws.cell(row=hr + 1 + i, column=base_col, value=p)
         ws.cell(row=hr + 1 + i, column=base_col + 1, value=round(kwh_by[p]))
         ws.cell(row=hr + 1 + i, column=base_col + 2, value=round(eur_by[p], 2))
-        ws.cell(row=hr + 1 + i, column=base_col + 3, value=round(kmax * 1.05) if band else None)
-        ws.cell(row=hr + 1 + i, column=base_col + 4, value=round(emax * 1.05) if band else None)
+        ws.cell(row=hr + 1 + i, column=base_col + 3, value=round(kmax * 1.05) if band else 0)
+        ws.cell(row=hr + 1 + i, column=base_col + 4, value=round(emax * 1.05) if band else 0)
     lastp = hr + len(pers)
     cats_t = Reference(ws, min_col=base_col, min_row=hr + 1, max_row=lastp)
     make_timeseries_chart(ws, f"J{a_row}", f"Consommation semestrielle — {commune_nom}", "Consommation (kWh)",
@@ -670,9 +681,10 @@ def each_day(start: date, end: date):
         yield cur
         cur += timedelta(days=1)
 
-def pick_datalogger_example(invoices, rows):
+def pick_datalogger_example(invoices, rows, communes_info=None):
+    communes_info = communes_info or {}
     site_year = defaultdict(lambda: {"s1": 0.0, "s2": 0.0, "total": 0.0, "sems": set()})
-    site_kva = {}
+    site_kva, site_fin, site_ep = {}, {}, {}
     for inv in invoices:
         site = (inv.get("sites") or {}).get("nom") or "—"
         kva = (inv.get("sites") or {}).get("kva")
@@ -681,6 +693,11 @@ def pick_datalogger_example(invoices, rows):
                 site_kva[site] = max(float(kva), site_kva.get(site, 0))
             except Exception:
                 pass
+        ci = communes_info.get(inv.get("commune_id"))
+        if ci and ci.get("travaux_fin"):
+            site_fin[site] = ci["travaux_fin"]
+        if inv.get("categorie") == "eclairage_public":
+            site_ep[site] = True
     for r in rows:
         if r["type"] != "Consommation" or not r["kwh"]:
             continue
@@ -690,13 +707,38 @@ def pick_datalogger_example(invoices, rows):
         bucket["sems"].add(r["sem"])
     if not site_year:
         return None
-    (site, year), bucket = max(site_year.items(), key=lambda item: (item[0][1], len(item[1]["sems"]), item[1]["total"]))
+    # On privilégie un site d'ÉCLAIRAGE PUBLIC d'une commune rénovée, sur l'année de fin de
+    # travaux : le logger illustre alors la baisse post-travaux (courbe de charge + pics).
+    def score(item):
+        (site, year), b = item
+        fin = d(site_fin[site]) if site in site_fin else None
+        ep_reno = 1 if (site_ep.get(site) and fin) else 0
+        near = 1 if (fin and year == fin.year) else 0
+        return (ep_reno, near, len(b["sems"]), b["total"])
+    (site, year), bucket = max(site_year.items(), key=score)
     return {
         "site": site,
         "year": year,
         "invoice_sem": {1: bucket["s1"], 2: bucket["s2"]},
         "subscribed_kva": site_kva.get(site) or 36.0,
+        "travaux_fin": d(site_fin[site]) if site in site_fin else None,
     }
+
+def simulate_logger_window(fin: date, subscribed_kva: float):
+    """Courbe de charge quotidienne sur ~18 mois autour de la fin de travaux : niveau plein
+    AVANT, réduit (~ −38 %) APRÈS (rénovation LED), avec pics de puissance abaissés en conséquence."""
+    start, end = fin - timedelta(days=270), fin + timedelta(days=270)
+    base = max(20.0, subscribed_kva * 3.6)  # kWh/jour EP (nocturne)
+    daily_energy, daily_power = [], []
+    for idx, day in enumerate(each_day(start, end)):
+        post = day > fin
+        lvl = 0.62 if post else 1.0
+        season = 1 + 0.10 * math.sin((day.timetuple().tm_yday / 365) * 2 * math.pi)
+        noise = 1 + 0.05 * math.sin(idx * 0.7) + (0.05 if day.day in (5, 14, 23) else 0.0)
+        daily_energy.append((day, max(1.0, base * lvl * season * noise)))
+        pk = subscribed_kva * ((0.55 if post else 0.86) + 0.05 * math.sin(idx * 0.3) + (0.06 if idx % 29 == 0 else 0.0))
+        daily_power.append((day, round(max(subscribed_kva * 0.3, min(subscribed_kva * 0.98, pk)), 2)))
+    return daily_energy, daily_power
 
 def simulate_logger_targets(invoice_sem):
     factors = {1: 0.991, 2: 1.028}
@@ -738,7 +780,7 @@ def aggregate_weekly(daily_energy):
         out.append((week_start, round(weekly[week_start], 1), sem))
     return out
 
-def sheet_datalogger(wb, p, scope_label, invoices, rows):
+def sheet_datalogger(wb, p, scope_label, invoices, rows, communes_info=None):
     if not p.get("dataLogger"):
         ws = wb.create_sheet("Data loggers")
         ws["A1"] = "Données complémentaires — data loggers d'armoires"
@@ -751,7 +793,7 @@ def sheet_datalogger(wb, p, scope_label, invoices, rows):
         ws.column_dimensions["A"].width = 100
         return ws
 
-    example = pick_datalogger_example(invoices, rows)
+    example = pick_datalogger_example(invoices, rows, communes_info)
     ws = wb.create_sheet("Data logger (démo)")
     ws["A1"] = "Data logger — analyse agrégée (données fictives de démonstration)"
     ws["A1"].font = Font(bold=True, size=13, color="B91C1C")
@@ -770,11 +812,20 @@ def sheet_datalogger(wb, p, scope_label, invoices, rows):
     subscribed_kva = float(example["subscribed_kva"] or 36.0)
     invoice_sem = example["invoice_sem"]
     logger_sem = simulate_logger_targets(invoice_sem)
-    daily_energy, daily_power = simulate_logger_daily(year, logger_sem, subscribed_kva)
+    fin = example.get("travaux_fin")
+    if fin:  # fenêtre autour de la fin de travaux → baisse post-travaux visible
+        daily_energy, daily_power = simulate_logger_window(fin, subscribed_kva)
+    else:
+        daily_energy, daily_power = simulate_logger_daily(year, logger_sem, subscribed_kva)
     weekly_energy = aggregate_weekly(daily_energy)
 
     ws["A4"] = "Site exemple"
-    ws["B4"] = f"{site} · année {year} · abonnement {subscribed_kva:.0f} kVA"
+    period_lbl = (f"fenêtre travaux {daily_energy[0][0].strftime('%m/%Y')} → {daily_energy[-1][0].strftime('%m/%Y')}"
+                  if fin else f"année {year}")
+    ws["B4"] = f"{site} · {period_lbl} · abonnement {subscribed_kva:.0f} kVA"
+    if fin:
+        ws["C4"] = f"Fin de travaux : {fin.strftime('%d/%m/%Y')} — la zone grise marque la période APRÈS travaux (baisse LED)."
+        ws["C4"].font = SUB_FONT
     ws["A5"] = "Le logger fictif représente une mesure horaire / infra-horaire agrégée pour éviter les milliers de lignes brutes."
     ws["A5"].font = SUB_FONT
 
@@ -808,43 +859,49 @@ def sheet_datalogger(wb, p, scope_label, invoices, rows):
     src = wb.create_sheet("Data logger source")
     src.sheet_state = "hidden"
 
+    band_lbl = "Après travaux" if fin else "Repère Semestre 2"
     src["A1"] = "Semaine"
     src["B1"] = "Énergie logger (kWh/semaine)"
-    src["C1"] = "Repère Semestre 2"
+    src["C1"] = band_lbl
     style_header_row(src, 1, 3)
     max_weekly = max([v for _, v, _ in weekly_energy] or [0])
     for row_idx, (week_start, weekly_kwh, sem) in enumerate(weekly_energy, start=2):
+        post = (week_start > fin) if fin else (sem == 2)
         src.cell(row=row_idx, column=1, value=week_start.strftime("%d/%m/%Y"))
         src.cell(row=row_idx, column=2, value=weekly_kwh)
-        src.cell(row=row_idx, column=3, value=round(max_weekly * 1.05, 1) if sem == 2 else None)
+        src.cell(row=row_idx, column=3, value=round(max_weekly * 1.08, 1) if post else 0)
 
     src["E1"] = "Date"
     src["F1"] = "Puissance max quotidienne (kVA)"
     src["G1"] = "Abonnement (kVA)"
-    style_header_row(src, 1, 7)
+    src["H1"] = band_lbl
+    style_header_row(src, 1, 8)
+    max_peak = max([pk for _, pk in daily_power] + [subscribed_kva])
     for row_idx, ((day, peak), (_, _kwh)) in enumerate(zip(daily_power, daily_energy), start=2):
         src.cell(row=row_idx, column=5, value=day.strftime("%d/%m/%Y"))
         src.cell(row=row_idx, column=6, value=peak)
         src.cell(row=row_idx, column=7, value=round(subscribed_kva, 2))
+        src.cell(row=row_idx, column=8, value=round(max_peak * 1.08, 2) if (fin and day > fin) else 0)
 
-    ws["A14"] = "Graphique 1 — Courbe de charge globale et périodes de facturation"
+    ws["A14"] = "Graphique 1 — Courbe de charge (baisse après travaux)"
     ws["A14"].font = Font(bold=True, size=12, color=ORANGE_DARK)
     ws["A33"] = "Graphique 2 — Histogramme comparatif Facture vs Logger"
     ws["A33"].font = Font(bold=True, size=12, color=ORANGE_DARK)
-    ws["A52"] = "Graphique 3 — Analyse des pics de puissance vs abonnement"
+    ws["A52"] = "Graphique 3 — Pics de puissance vs abonnement (baisse après travaux)"
     ws["A52"].font = Font(bold=True, size=12, color=ORANGE_DARK)
 
     weekly_last = 1 + len(weekly_energy)
     make_banded_line_chart(
         ws, "A15",
-        f"Courbe de charge globale agrégée à la semaine — {site} ({year})",
+        f"Courbe de charge agrégée à la semaine — {site}",
         "Semaine",
         "Énergie logger (kWh / semaine)",
         Reference(src, min_col=1, min_row=2, max_row=weekly_last),
         Reference(src, min_col=2, min_row=1, max_row=weekly_last),
         Reference(src, min_col=3, min_row=1, max_row=weekly_last),
     )
-    ws["A31"] = "Bande grisée = Semestre 2 ; la série hebdomadaire agrège la mesure horaire / infra-horaire du logger."
+    ws["A31"] = ("Zone grise = APRÈS fin de travaux : la charge hebdomadaire chute nettement (rénovation LED)."
+                 if fin else "Bande grisée = Semestre 2 ; série hebdomadaire agrégée du logger.")
     ws["A31"].font = SUB_FONT
 
     make_bar_chart(
@@ -867,7 +924,11 @@ def sheet_datalogger(wb, p, scope_label, invoices, rows):
             Reference(src, min_col=6, min_row=1, max_row=daily_last),
             Reference(src, min_col=7, min_row=1, max_row=daily_last),
         ],
+        band_ref=Reference(src, min_col=8, min_row=1, max_row=daily_last) if fin else None,
     )
+    ws["A70"] = ("Zone grise = APRÈS fin de travaux : le pic de puissance appelé baisse (moindre puissance installée)."
+                 if fin else "")
+    ws["A70"].font = SUB_FONT
 
     for i, w in enumerate([18, 24, 24, 18, 12, 14], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -1034,7 +1095,7 @@ def build(p: dict, out_path: str):
     tcd = wb.create_sheet("TCD")
     tcd["A1"] = "Tableau croisé dynamique (€ et kWh) — actualisé automatiquement à l'ouverture dans Excel."
     tcd["A1"].font = SUB_FONT
-    sheet_datalogger(wb, p, scope, invoices, rows)
+    sheet_datalogger(wb, p, scope, invoices, rows, communes_info)
     ws_data = sheet_donnees(wb, rows)  # dernière position + masquée
     wb.save(out_path)
 
