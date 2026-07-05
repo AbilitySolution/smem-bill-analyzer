@@ -58,6 +58,50 @@ function compositeNoArith(self: number, fmt: number): number {
   return clamp01(0.3 * self + 0.7 * fmt);
 }
 
+/**
+ * Normalise les libellés de postes tarifaires EDF vers des codes canoniques.
+ * Ex : "Heure P", "Heures Pleines", "H.P." → "HP"
+ *      "Heure Creuse", "H.C." → "HC"
+ *      "HP Bleu" → "HPB"  (TEMPO)
+ * Retourne la valeur d'origine si aucun pattern ne correspond.
+ */
+export function normalizePosteTarifaire(raw: string | null | undefined): string {
+  if (!raw) return raw ?? "";
+  // Minuscules + sans accents + ponctuation → espace pour simplifier le matching
+  const s = raw.trim()
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{Mn}/gu, "")
+    .replace(/[.\-_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // TEMPO couleurs — doit passer AVANT hp/hc génériques
+  // Gère aussi les anciens codes "tempo hp/hc" retournés avant standardisation du prompt
+  if (/^hpb$|hp.*(bleu|blue)|^tempo.?hp.*b/.test(s)) return "HPB";
+  if (/^hcb$|hc.*(bleu|blue)|^tempo.?hc.*b/.test(s)) return "HCB";
+  if (/^(hpw|hpbn|hpbl)$|hp.*(blanc|white)|^tempo.?hp.*bl/.test(s)) return "HPW";
+  if (/^(hcw|hcbn|hcbl)$|hc.*(blanc|white)|^tempo.?hc.*bl/.test(s)) return "HCW";
+  if (/^hpr$|hp.*(rouge|red)|^tempo.?hp.*r/.test(s)) return "HPR";
+  if (/^hcr$|hc.*(rouge|red)|^tempo.?hc.*r/.test(s)) return "HCR";
+  // "TEMPO_HP" sans couleur → garder HP générique (fallback)
+  if (/^tempo.?hp$/.test(s)) return "HP";
+  if (/^tempo.?hc$/.test(s)) return "HC";
+
+  // EJP
+  if (/^ejpn$|ejp.*norm/.test(s)) return "EJPN";
+  if (/^ejpp$|ejp.*point/.test(s)) return "EJPP";
+  if (/^ejp$/.test(s)) return "EJP";
+
+  // HP / HC génériques (après TEMPO pour éviter HPB → HP)
+  if (/^h ?\.?p\.?$|heure?s? p(lein)?/.test(s)) return "HP";
+  if (/^h ?\.?c\.?$|heure?s? c(reus)?/.test(s)) return "HC";
+
+  // BASE
+  if (/^base?$/.test(s)) return "BASE";
+
+  return raw.trim();
+}
+
 const FIELD_WEIGHTS: Record<string, number> = {
   facture_number: 3,
   facture_date: 2,
@@ -70,7 +114,7 @@ const FIELD_WEIGHTS: Record<string, number> = {
 };
 
 function computeFieldConfidences(data: InvoiceExtraction): Record<string, number> {
-  const { invoice, fixed_charges, consumption_lines, precision, contract } = data;
+  const { invoice, precision, contract } = data;
   const p = precision ?? {};
 
   // --- Arithmetic signals ---
@@ -80,30 +124,21 @@ function computeFieldConfidences(data: InvoiceExtraction): Record<string, number
   const ttcDelta = Math.abs(computedTTC - invoice.total_ttc);
   const ttcArith = arithScore(ttcDelta, 0.05, 1.5);
 
-  const hasLines = fixed_charges.length > 0 || consumption_lines.length > 0;
-  const sumFixed = fixed_charges.reduce((s, c) => s + c.montant_eur, 0);
-  const sumConso = consumption_lines.reduce((s, c) => s + c.montant_eur, 0);
-  const htDelta = Math.abs(sumFixed + sumConso - invoice.total_ht);
-  const htArith = hasLines ? arithScore(htDelta, 0.1, 2.0) : 0.5;
-
-  // total_ht gets boost from both TTC check and lines check
-  const htArithCombined = hasLines ? (ttcArith + htArith) / 2 : ttcArith;
-
   // EDF contract_number: typically 10–14 digits
   const contractFmt = /^\d{8,16}$/.test(contract.contract_number ?? "")
     ? 1.0
     : fmtStr(contract.contract_number, 4);
 
   return {
-    facture_number: compositeNoArith(p.facture_number ?? 0.7, fmtStr(invoice.facture_number, 4)),
-    facture_date: compositeNoArith(p.facture_date ?? 0.7, fmtDate(invoice.facture_date)),
-    total_ht: composite(p.total_ht ?? 0.7, htArithCombined, fmtPosNum(invoice.total_ht)),
-    tva: composite(p.tva ?? 0.7, ttcArith, fmtNonNeg(tva)),
-    autres_taxes: composite(p.autres_taxes ?? 0.7, ttcArith, fmtNonNeg(autresTaxes)),
-    total_ttc: composite(p.total_ttc ?? 0.7, ttcArith, fmtPosNum(invoice.total_ttc)),
-    contract_number: compositeNoArith(p.contract_number ?? 0.7, contractFmt),
+    facture_number: compositeNoArith(p.facture_number ?? 0, fmtStr(invoice.facture_number, 4)),
+    facture_date: compositeNoArith(p.facture_date ?? 0, fmtDate(invoice.facture_date)),
+    total_ht: composite(p.total_ht ?? 0, ttcArith, fmtPosNum(invoice.total_ht)),
+    tva: composite(p.tva ?? 0, ttcArith, fmtNonNeg(tva)),
+    autres_taxes: composite(p.autres_taxes ?? 0, ttcArith, fmtNonNeg(autresTaxes)),
+    total_ttc: composite(p.total_ttc ?? 0, ttcArith, fmtPosNum(invoice.total_ttc)),
+    contract_number: compositeNoArith(p.contract_number ?? 0, contractFmt),
     puissance_souscrite_kva: compositeNoArith(
-      p.puissance_souscrite_kva ?? 0.7,
+      p.puissance_souscrite_kva ?? 0,
       contract.puissance_souscrite_kva != null ? 0.9 : 0.35,
     ),
   };
@@ -122,11 +157,21 @@ function globalConfidence(fieldConfidence: Record<string, number>): number {
 
 export function validateInvoice(data: InvoiceExtraction): ValidationResult {
   const issues: ValidationIssue[] = [];
-  const { invoice, fixed_charges, consumption_lines } = data;
+  const { invoice, consumption_lines, contract } = data;
 
   // --- Field-level composite confidence (replaces raw Claude self-score) ---
   const fieldConfidence = computeFieldConfidences(data);
   const confidence = globalConfidence(fieldConfidence);
+
+  // 0. Montants négatifs — facture avoir légitime ou erreur OCR indiscernable → error
+  if (invoice.total_ht < 0 || invoice.total_ttc < 0) {
+    issues.push({
+      code: "NEGATIVE_AMOUNT",
+      severity: "error",
+      message: `Montant négatif : HT = ${invoice.total_ht} €, TTC = ${invoice.total_ttc} € — facture avoir ou erreur d'extraction ?`,
+      field: invoice.total_ht < 0 ? "invoice.total_ht" : "invoice.total_ttc",
+    });
+  }
 
   // 1. TTC = HT + TVA + autres_taxes
   const tva = invoice.tva ?? 0;
@@ -145,48 +190,7 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
     });
   }
 
-  // 2. HT = sum(fixed) + sum(consumption)
-  const hasLines = fixed_charges.length > 0 || consumption_lines.length > 0;
-  if (hasLines) {
-    const sumFixed = fixed_charges.reduce((s, c) => s + c.montant_eur, 0);
-    const sumConsumption = consumption_lines.reduce((s, c) => s + c.montant_eur, 0);
-    const computedHT = sumFixed + sumConsumption;
-    const htDelta = Math.abs(computedHT - invoice.total_ht);
-    if (!approxEqual(computedHT, invoice.total_ht, 0.10)) {
-      const hint =
-        computedHT > invoice.total_ht
-          ? ` — une charge fixe (ex. CTA) est peut-être hors HT et devrait aller dans Taxes`
-          : ` — une taxe (ex. CTA) est peut-être dans HT et devrait aller dans Charges fixes`;
-      issues.push({
-        code: "HT_LINES_MISMATCH",
-        severity: htDelta > 2 ? "error" : "warning",
-        message: `Lignes fixes (${sumFixed.toFixed(2)}) + conso (${sumConsumption.toFixed(2)}) = ${computedHT.toFixed(2)} ≠ HT (${invoice.total_ht}) — écart ${htDelta.toFixed(2)} €${hint}`,
-        field: "invoice.total_ht",
-        expected: computedHT,
-        actual: invoice.total_ht,
-        delta: computedHT - invoice.total_ht,
-      });
-    }
-  }
-
-  // 3. Per consumption line checks
-  // Pre-build index groups: lines sharing (compteur|ancien|nouveau) are barème sub-splits —
-  // their kWh must be checked as a group sum, not individually.
-  const indexGroupMap = new Map<string, number[]>();
-  for (let i = 0; i < consumption_lines.length; i++) {
-    const l = consumption_lines[i];
-    if (l.ancien_index != null && l.nouveau_index != null) {
-      const key = `${l.numero_compteur ?? ""}|${l.ancien_index}|${l.nouveau_index}`;
-      if (!indexGroupMap.has(key)) indexGroupMap.set(key, []);
-      indexGroupMap.get(key)!.push(i);
-    }
-  }
-  // Lines that belong to a multi-line group (barème split) — skip individual kWh check
-  const inSharedGroup = new Set<number>();
-  for (const indices of indexGroupMap.values()) {
-    if (indices.length > 1) indices.forEach((i) => inSharedGroup.add(i));
-  }
-
+  // 2. Per consumption line checks
   for (let i = 0; i < consumption_lines.length; i++) {
     const line = consumption_lines[i];
     const tag = `[${line.poste_tarifaire} #${i + 1}]`;
@@ -215,21 +219,6 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
           message: `${tag} ancien index (${line.ancien_index}) > nouveau index (${line.nouveau_index}) — compteur réinitialisé ?`,
           field: `consumption_lines[${i}].ancien_index`,
         });
-      } else if (!inSharedGroup.has(i) && line.coefficient != null && line.consommation_kwh > 0) {
-        // Single-line group: check individual kWh
-        const expectedKwh = (line.nouveau_index - line.ancien_index) * line.coefficient;
-        const kwhTol = Math.max(1, line.consommation_kwh * 0.01);
-        if (expectedKwh >= 0 && !approxEqual(expectedKwh, line.consommation_kwh, kwhTol)) {
-          issues.push({
-            code: "INDEX_KWH_MISMATCH",
-            severity: "warning",
-            message: `${tag} (${line.nouveau_index} - ${line.ancien_index}) × ${line.coefficient} = ${expectedKwh.toFixed(0)} kWh ≠ ${line.consommation_kwh} kWh`,
-            field: `consumption_lines[${i}].consommation_kwh`,
-            expected: expectedKwh,
-            actual: line.consommation_kwh,
-            delta: expectedKwh - line.consommation_kwh,
-          });
-        }
       }
     }
 
@@ -241,27 +230,68 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
         field: `consumption_lines[${i}].date_debut`,
       });
     }
+
+    if (line.montant_eur < 0) {
+      issues.push({
+        code: "NEGATIVE_LINE_AMOUNT",
+        severity: "warning",
+        message: `${tag} montant négatif (${line.montant_eur} €)`,
+        field: `consumption_lines[${i}].montant_eur`,
+        actual: line.montant_eur,
+      });
+    }
   }
 
-  // Group kWh check for barème-split lines (shared index groups)
-  for (const [, indices] of indexGroupMap) {
-    if (indices.length <= 1) continue;
-    const first = consumption_lines[indices[0]];
-    if (first.ancien_index == null || first.nouveau_index == null) continue;
-    const coeff = first.coefficient ?? 1;
-    const expectedKwh = (first.nouveau_index - first.ancien_index) * coeff;
-    const sumKwh = indices.reduce((s, i) => s + consumption_lines[i].consommation_kwh, 0);
-    const kwhTol = Math.max(1, expectedKwh * 0.01);
-    if (expectedKwh >= 0 && !approxEqual(expectedKwh, sumKwh, kwhTol)) {
-      const postes = indices.map((i) => consumption_lines[i].poste_tarifaire).join("+");
+  // 2b. Cohérence tarif_type ↔ postes tarifaires extraits.
+  // HP/HC implique HPHC ; HPB/HCB/… implique TEMPO.
+  {
+    const HPHC_POSTES = new Set(["HP", "HC"]);
+    const TEMPO_POSTES = new Set(["HPB", "HCB", "HPW", "HCW", "HPR", "HCR"]);
+    const hasHPHC = consumption_lines.some((l) => HPHC_POSTES.has(normalizePosteTarifaire(l.poste_tarifaire)));
+    const hasTEMPO = consumption_lines.some((l) => TEMPO_POSTES.has(normalizePosteTarifaire(l.poste_tarifaire)));
+    if (hasHPHC && contract.tarif_type !== "HPHC") {
       issues.push({
-        code: "INDEX_KWH_MISMATCH",
+        code: "TARIF_TYPE_MISMATCH",
         severity: "warning",
-        message: `[${postes}] somme sous-périodes (${sumKwh.toFixed(0)} kWh) ≠ (${first.nouveau_index} − ${first.ancien_index}) × ${coeff} = ${expectedKwh.toFixed(0)} kWh`,
-        expected: expectedKwh,
-        actual: sumKwh,
-        delta: expectedKwh - sumKwh,
+        message: `Lignes HP/HC présentes mais tarif_type = "${contract.tarif_type ?? "null"}" — devrait être "HPHC"`,
+        field: "contract.tarif_type",
       });
+    }
+    if (hasTEMPO && contract.tarif_type !== "TEMPO") {
+      issues.push({
+        code: "TARIF_TYPE_MISMATCH",
+        severity: "warning",
+        message: `Lignes TEMPO (HPB/HCB/…) présentes mais tarif_type = "${contract.tarif_type ?? "null"}" — devrait être "TEMPO"`,
+        field: "contract.tarif_type",
+      });
+    }
+  }
+
+  // 3. HP/HC même prix unitaire dans une même période.
+  // Sur contrat HPHC EDF, HP est toujours plus cher que HC.
+  // Même tarif pour les deux postes = l'OCR a probablement extrait le même prix pour HP et HC.
+  {
+    const pairMap = new Map<string, { hp?: number; hc?: number }>();
+    for (const line of consumption_lines) {
+      if (line.prix_unitaire_ckwh == null) continue;
+      // Normaliser avant comparaison : "Heure P", "H.P.", etc. → "HP"
+      const poste = normalizePosteTarifaire(line.poste_tarifaire);
+      if (poste !== "HP" && poste !== "HC") continue;
+      const key = `${line.date_debut ?? ""}|${line.date_fin ?? ""}`;
+      const pair = pairMap.get(key) ?? {};
+      if (poste === "HP") pair.hp = line.prix_unitaire_ckwh;
+      else pair.hc = line.prix_unitaire_ckwh;
+      pairMap.set(key, pair);
+    }
+    for (const [, pair] of pairMap) {
+      if (pair.hp != null && pair.hc != null && Math.abs(pair.hp - pair.hc) < 0.001) {
+        issues.push({
+          code: "HPHC_SAME_PRICE",
+          severity: "warning",
+          message: `HP et HC ont le même prix unitaire (${pair.hp} c€/kWh) — l'OCR a peut-être extrait le même tarif pour les deux postes`,
+        });
+        break; // un seul avertissement par facture suffit
+      }
     }
   }
 

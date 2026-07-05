@@ -72,7 +72,7 @@ async function Detail({ id }: { id: string }) {
   const supabase = await createClient();
 
   const [{ data: invoice }, { data: communes }] = await Promise.all([
-    supabase.from("invoices").select("*, clients(*), contracts(*), sites(*)").eq("id", id).single(),
+    supabase.from("invoices").select("*, clients(*), contracts(*), sites(*), invoice_tags(tags(id, label, color))").eq("id", id).single(),
     supabase.from("communes").select("id, nom").order("nom"),
   ]);
 
@@ -95,12 +95,25 @@ async function Detail({ id }: { id: string }) {
 
   const filename = `${(inv.facture_number as string) || "facture"}.pdf`;
 
+  // Extract override comment from raw_ocr_json._override
+  const rawJson = inv.raw_ocr_json as Record<string, unknown> | null;
+  const overrideData = rawJson?._override as { comment: string; flag_anomaly: boolean } | undefined;
+
+  // Extract tags from invoice_tags join
+  type TagRow = { tags: { id: string; label: string; color: string } | null };
+  const tagRows = (inv.invoice_tags as TagRow[] | null) ?? [];
+  const invoiceTags = tagRows
+    .map((r) => r.tags)
+    .filter((t): t is { id: string; label: string; color: string } => t != null);
+
   const editData: InvoiceEditData = {
     invoiceId: id,
     communeId: (inv.commune_id as string) ?? "",
     categorie: ((inv.categorie as string) ?? "batiment") as "batiment" | "eclairage_public",
     clientId: (inv.client_id as string) ?? "",
     contractId: (inv.contract_id as string) ?? "",
+    override: overrideData,
+    tags: invoiceTags,
     invoice: {
       facture_number: (inv.facture_number as string) ?? "",
       facture_date: (inv.facture_date as string) ?? "",

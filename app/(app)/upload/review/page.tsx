@@ -69,6 +69,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const inputCls = "rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-3 py-1.5 text-[13px] text-[var(--kn-text)] outline-none focus:border-[#f97316] transition-colors";
 
+// Retourne une classe de bordure selon le score de confiance du champ
+function confidenceBorder(score: number | undefined): string {
+  if (score == null) return "";
+  if (score < 0.6) return "border-red-400";
+  if (score < 0.8) return "border-yellow-400";
+  return "";
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-6">
@@ -185,10 +193,22 @@ export default function ReviewPage() {
   const [communesLoading, setCommunesLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
+  const [savedBanner, setSavedBanner] = useState(false);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileUrlError, setFileUrlError] = useState(false);
   const [overrideComment, setOverrideComment] = useState("");
   const [overrideFlagAnomaly, setOverrideFlagAnomaly] = useState<boolean | null>(null);
+
+  // Garde "modifications non sauvegardées" sur navigation navigateur (fermer onglet, recharger)
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!isDirty) return;
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
 
   useEffect(() => {
     const raw = sessionStorage.getItem("upload_ocr_result");
@@ -222,13 +242,11 @@ export default function ReviewPage() {
   }, [ext]);
 
   const hasErrors = validation != null && !validation.isValid;
-  const overrideReady = overrideComment.trim().length > 0 && overrideFlagAnomaly !== null;
-  const canSave = !hasErrors || overrideReady;
+  const hasOverrideComment = overrideComment.trim().length > 0;
 
   async function handleSave() {
     if (!ext || !ocr) return;
     if (!communeId) { setError("Sélectionnez une commune."); return; }
-    if (!canSave) { setError("Remplissez le commentaire et choisissez si la facture doit être flaguée."); return; }
     setSaving(true);
     setError(null);
     try {
@@ -239,9 +257,9 @@ export default function ReviewPage() {
         new_site_categorie: categorie,
       };
       if (ocr.suggested_site_id) body.site_id = ocr.suggested_site_id;
-      if (hasErrors && overrideReady) {
+      if (hasOverrideComment) {
         body.override_comment = overrideComment.trim();
-        body.override_flag_anomaly = overrideFlagAnomaly;
+        body.override_flag_anomaly = overrideFlagAnomaly ?? false;
       }
       const res = await fetch("/api/invoices", {
         method: "POST",
@@ -251,7 +269,10 @@ export default function ReviewPage() {
       const json = await res.json();
       if (!res.ok || json.error) { setError(json.error ?? "Erreur enregistrement."); setSaving(false); return; }
       sessionStorage.removeItem("upload_ocr_result");
-      router.push("/documents");
+      setIsDirty(false);
+      setSavedBanner(true);
+      // Laisser le banner visible 1.5s avant redirect
+      setTimeout(() => router.push("/documents"), 1500);
     } catch {
       setError("Erreur réseau.");
       setSaving(false);
@@ -260,12 +281,15 @@ export default function ReviewPage() {
 
   // Helpers for updating nested state
   function setClient(k: keyof Extraction["client"], v: string) {
+    setIsDirty(true);
     setExt((e) => e ? { ...e, client: { ...e.client, [k]: v || null } } : e);
   }
   function setContract(k: keyof Extraction["contract"], v: string | number | null) {
+    setIsDirty(true);
     setExt((e) => e ? { ...e, contract: { ...e.contract, [k]: v } } : e);
   }
   function setInvoice(k: keyof Extraction["invoice"], v: string | number | boolean | null) {
+    setIsDirty(true);
     setExt((e) => e ? { ...e, invoice: { ...e.invoice, [k]: v } } : e);
   }
 
@@ -329,13 +353,19 @@ export default function ReviewPage() {
             </div>
             <button
               onClick={handleSave}
-              disabled={saving || !canSave}
+              disabled={saving}
               className="flex shrink-0 items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
               Enregistrer
             </button>
           </div>
+
+          {savedBanner && (
+            <div role="status" className="mb-4 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 font-semibold">
+              <CheckCircle2 className="size-4 shrink-0" /> Facture enregistrée — redirection…
+            </div>
+          )}
 
           {error && (
             <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -358,7 +388,7 @@ export default function ReviewPage() {
                 rows={3}
                 className="w-full rounded-lg border border-orange-300 bg-white px-3 py-2 text-[13px] text-[var(--kn-text)] outline-none focus:border-orange-500 placeholder:text-[var(--kn-text-muted)] resize-none"
               />
-              <p className="mt-3 mb-2 text-[12px] font-semibold text-orange-800">Flaguer cette facture comme anomalie ?</p>
+              <p className="mt-3 mb-2 text-[12px] font-semibold text-orange-800">Détecter cette facture comme anomalie ?</p>
               <div className="flex gap-4">
                 <label className="flex cursor-pointer items-center gap-2 text-[13px] text-orange-900">
                   <input
@@ -368,7 +398,7 @@ export default function ReviewPage() {
                     onChange={() => setOverrideFlagAnomaly(true)}
                     className="accent-orange-500"
                   />
-                  Oui — marquer comme anomalie
+                  Oui — détecter comme anomalie
                 </label>
                 <label className="flex cursor-pointer items-center gap-2 text-[13px] text-orange-900">
                   <input
@@ -381,8 +411,8 @@ export default function ReviewPage() {
                   Non — facture acceptée telle quelle
                 </label>
               </div>
-              {overrideReady && (
-                <p className="mt-2 text-[12px] text-green-700 font-medium">✓ Prêt à enregistrer avec justification</p>
+              {hasOverrideComment && overrideFlagAnomaly !== null && (
+                <p className="mt-2 text-[12px] text-green-700 font-medium">✓ Justification enregistrée</p>
               )}
             </div>
           )}
@@ -430,22 +460,22 @@ export default function ReviewPage() {
       <Section title="En-tête de facture">
         <div className="grid grid-cols-2 gap-4">
           <Field label="N° Facture">
-            <input className={inputCls} value={ext.invoice.facture_number} onChange={(e) => setInvoice("facture_number", e.target.value)} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.facture_number)}`} value={ext.invoice.facture_number} onChange={(e) => setInvoice("facture_number", e.target.value)} />
           </Field>
           <Field label="Date facture">
-            <input className={inputCls} type="date" value={ext.invoice.facture_date} onChange={(e) => setInvoice("facture_date", e.target.value)} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.facture_date)}`} type="date" value={ext.invoice.facture_date} onChange={(e) => setInvoice("facture_date", e.target.value)} />
           </Field>
           <Field label="Total HT (€)">
-            <input className={inputCls} type="number" step="0.01" value={ext.invoice.total_ht} onChange={(e) => setInvoice("total_ht", parseFloat(e.target.value))} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.total_ht)}`} type="number" step="0.01" value={ext.invoice.total_ht} onChange={(e) => setInvoice("total_ht", parseFloat(e.target.value))} />
           </Field>
           <Field label="TVA (€)">
-            <input className={inputCls} type="number" step="0.01" value={ext.invoice.tva ?? ""} onChange={(e) => setInvoice("tva", e.target.value ? parseFloat(e.target.value) : null)} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.tva)}`} type="number" step="0.01" value={ext.invoice.tva ?? ""} onChange={(e) => setInvoice("tva", e.target.value ? parseFloat(e.target.value) : null)} />
           </Field>
           <Field label="Autres taxes (€)">
-            <input className={inputCls} type="number" step="0.01" value={ext.invoice.autres_taxes ?? ""} onChange={(e) => setInvoice("autres_taxes", e.target.value ? parseFloat(e.target.value) : null)} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.autres_taxes)}`} type="number" step="0.01" value={ext.invoice.autres_taxes ?? ""} onChange={(e) => setInvoice("autres_taxes", e.target.value ? parseFloat(e.target.value) : null)} />
           </Field>
           <Field label="Total TTC (€)">
-            <input className={inputCls} type="number" step="0.01" value={ext.invoice.total_ttc} onChange={(e) => setInvoice("total_ttc", parseFloat(e.target.value))} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.total_ttc)}`} type="number" step="0.01" value={ext.invoice.total_ttc} onChange={(e) => setInvoice("total_ttc", parseFloat(e.target.value))} />
           </Field>
           <Field label="Date limite paiement">
             <input className={inputCls} type="date" value={ext.invoice.date_limite_paiement ?? ""} onChange={(e) => setInvoice("date_limite_paiement", e.target.value || null)} />
@@ -624,33 +654,6 @@ export default function ReviewPage() {
         </Section>
       )}
 
-      {/* HT reconciliation summary — visible when both sections present */}
-      {(ext.fixed_charges.length > 0 || ext.consumption_lines.length > 0) && (() => {
-        const sumFixed = ext.fixed_charges.reduce((s, r) => s + r.montant_eur, 0);
-        const sumConso = ext.consumption_lines.reduce((s, r) => s + r.montant_eur, 0);
-        const computed = sumFixed + sumConso;
-        const delta = Math.abs(computed - ext.invoice.total_ht);
-        const ok = delta <= 0.10;
-        return (
-          <div className={`mb-6 rounded-lg border px-4 py-3 text-[12px] ${ok ? "border-green-200 bg-green-50" : "border-orange-200 bg-orange-50"}`}>
-            <div className="flex items-center justify-between gap-2 font-semibold">
-              <span className={ok ? "text-green-700" : "text-orange-700"}>Réconciliation HT</span>
-              {!ok && <span className="text-orange-600">écart {delta.toFixed(2)} €</span>}
-            </div>
-            <div className="mt-1.5 space-y-0.5 tabular-nums text-[var(--kn-text-muted)]">
-              <div className="flex justify-between"><span>Charges fixes</span><span>{sumFixed.toFixed(2)} €</span></div>
-              <div className="flex justify-between"><span>Consommation</span><span>{sumConso.toFixed(2)} €</span></div>
-              <div className={`flex justify-between border-t pt-0.5 font-semibold ${ok ? "text-green-700" : "text-orange-700"}`}>
-                <span>Sous-total lignes</span><span>{computed.toFixed(2)} €</span>
-              </div>
-              <div className={`flex justify-between ${ok ? "text-green-700" : "text-orange-700"}`}>
-                <span>HT déclaré</span><span>{ext.invoice.total_ht.toFixed(2)} €</span>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
       {/* Taxes */}
       {ext.taxes.length > 0 && (
         <Section title={`Taxes (${ext.taxes.length})`}>
@@ -693,11 +696,15 @@ export default function ReviewPage() {
 
           {/* Bottom save */}
           <div className="flex justify-end gap-3 pb-8">
-            <button onClick={() => router.push("/upload")}
+            <button
+              onClick={() => {
+                if (isDirty && !confirm("Des modifications non sauvegardées seront perdues. Continuer ?")) return;
+                router.push("/upload");
+              }}
               className="rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]">
               Annuler
             </button>
-            <button onClick={handleSave} disabled={saving || !canSave}
+            <button onClick={handleSave} disabled={saving}
               className="flex items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
               {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
               {hasErrors ? "Enregistrer avec justification" : "Enregistrer"}

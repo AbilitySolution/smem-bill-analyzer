@@ -58,9 +58,10 @@ interface RawInvoice {
   communes: { nom: string } | null;
 }
 
-/** Moyenne (0-100) des scores de précision modèle, ou null si absente. */
+/** Confiance globale (0-100). Lit _global (score composite pondéré) si présent, sinon moyenne simple. */
 function avgConfidence(precision: Record<string, number> | null): number | null {
   if (!precision) return null;
+  if (typeof precision._global === "number") return Math.round(precision._global * 100);
   const vals = Object.values(precision).filter((v) => typeof v === "number");
   if (!vals.length) return null;
   return Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 100);
@@ -109,13 +110,33 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   if (!invoices || invoices.length === 0) return null;
 
   const invoiceIds = invoices.map((i) => i.id);
-  const lines = await selectAll<RawLine>((from, to) =>
-    supabase
-      .from("consumption_periods")
-      .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, prix_unitaire_ckwh, montant_eur")
-      .in("invoice_id", invoiceIds)
-      .range(from, to),
-  );
+
+  const [lines, dbAnomalies] = await Promise.all([
+    selectAll<RawLine>((from, to) =>
+      supabase
+        .from("consumption_periods")
+        .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, prix_unitaire_ckwh, montant_eur")
+        .in("invoice_id", invoiceIds)
+        .range(from, to),
+    ),
+    selectAll<{ invoice_id: string; type: string; severity: string; description: string }>((from, to) =>
+      supabase
+        .from("anomalies")
+        .select("invoice_id, type, severity, description")
+        .in("invoice_id", invoiceIds)
+        .range(from, to),
+    ),
+  ]);
+
+  // Index DB anomalies by invoice_id
+  type RawAnomaly = { invoice_id: string; type: string; severity: string; description: string };
+  const dbAnomaliesByInvoice = new Map<string, AnomalyLite[]>();
+  for (const a of (dbAnomalies ?? []) as RawAnomaly[]) {
+    const sev: Severity = a.severity === "high" ? "high" : a.severity === "medium" ? "medium" : "low";
+    const arr = dbAnomaliesByInvoice.get(a.invoice_id) ?? [];
+    arr.push({ type: a.type, severity: sev, message: a.description });
+    dbAnomaliesByInvoice.set(a.invoice_id, arr);
+  }
 
   const linesByInvoice = new Map<string, InvoiceLine[]>();
   for (const l of (lines ?? []) as RawLine[]) {
@@ -165,10 +186,16 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   const medianByYear = new Map<string, number | null>();
   for (const [y, vals] of byYear) medianByYear.set(y, median(vals));
   for (const d of docs) {
-    d.anomalies = detectAnomalies(
+    const computed = detectAnomalies(
       { totalHt: d.totalHt, tva: d.tva, autresTaxes: d.autresTaxes ?? 0, totalTtc: d.totalTtc, kwh: d.kwh, isDuplicata: d.isDuplicata },
       { medianCostPerKwh: medianByYear.get(d.date.slice(0, 4)) ?? null },
     );
+    const persisted = dbAnomaliesByInvoice.get(d.id) ?? [];
+    // Merge: DB anomalies first (IDP + override), then computed business rules
+    // Dedupe by type: DB wins over computed for the same type
+    const seenTypes = new Set(persisted.map((a) => a.type));
+    const newComputed = computed.filter((a) => !seenTypes.has(a.type));
+    d.anomalies = [...persisted, ...newComputed];
     d.anomalySeverity = topSeverity(d.anomalies);
   }
 

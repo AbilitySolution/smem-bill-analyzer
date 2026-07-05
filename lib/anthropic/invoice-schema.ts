@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+// numRequired: montants critiques — reject si null (évite factures €0 silencieuses)
+const numRequired = z.number();
+// num: montants de lignes — null → 0 acceptable (ligne optionnelle ou à €0)
 const num = z.number().nullable().transform((v) => v ?? 0);
 
 export const fixedChargeItemSchema = z.object({
@@ -59,10 +62,10 @@ export const invoiceExtractionSchema = z.object({
     date_limite_paiement: z.string().nullable(),
     date_prochain_releve: z.string().nullable(),
     date_prochaine_facture: z.string().nullable(),
-    total_ht: num,
+    total_ht: numRequired,
     tva: z.number().nullable(),
     autres_taxes: z.number().nullable(),
-    total_ttc: num,
+    total_ttc: numRequired,
     is_duplicata: z.boolean().nullable().transform((v) => v ?? false),
   }),
   commune_hint: z.string().nullable(),
@@ -70,7 +73,8 @@ export const invoiceExtractionSchema = z.object({
   fixed_charges: z.array(fixedChargeItemSchema),
   consumption_lines: z.array(consumptionLineItemSchema),
   taxes: z.array(taxItemSchema),
-  precision: z.record(z.string(), z.number()).nullable().optional(),
+  // precision requis : fallback 0.7 silencieux masquait les extractions de mauvaise qualité
+  precision: z.record(z.string(), z.number()),
 });
 
 export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
@@ -175,17 +179,21 @@ export const invoiceExtractionToolSchema = {
         type: "array",
         description: `Lignes de consommation de la PÉRIODE COURANTE uniquement (section 'part variable'). NE PAS inclure l'historique de consommation (tableau récapitulatif hp/hc/base des périodes passées).
 
-RÈGLES poste_tarifaire :
-- Si la facture distingue 'HP'/'heures pleines' et 'HC'/'heures creuses' → une ligne HP et une ligne HC.
-- Si la facture n'a qu'un seul poste ('consommations', 'base', ou aucun libellé HP/HC) → une seule ligne BASE.
-- Si la consommation BASE est découpée par barème tarifaire (ex. 'consommations - barème du 01/07 au 31/07' et 'barème du 01/08 au ...') → créer UNE ligne par sous-période, poste_tarifaire='BASE', avec les dates et prix du barème.
-- Tarifs normalisés : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN.`,
+RÈGLES poste_tarifaire — codes canoniques à utiliser :
+- "HP" (Heures Pleines / Heure P / H.P. / Heures pleines / peak hours)
+- "HC" (Heures Creuses / Heure C / H.C. / Heures creuses / off-peak)
+- "BASE" (tarif unique, 'consommations', pas de distinction HP/HC)
+- TEMPO : "HPB"/"HCB" (jours bleus), "HPW"/"HCW" (jours blancs), "HPR"/"HCR" (jours rouges)
+- EJP : "EJPN" (jours normaux), "EJPP" (jours de pointe)
+- Si la consommation BASE est découpée par barème tarifaire (ex. 'barème du 01/07 au 31/07' et 'barème du 01/08 au ...') → créer UNE ligne par sous-période, poste_tarifaire='BASE', avec les dates et prix du barème.
+
+IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu trouves le même prix pour HP et HC dans la même période, relis attentivement la facture — chaque poste a son propre prix.`,
         items: {
           type: "object",
           properties: {
             poste_tarifaire: {
               type: "string",
-              description: "HP | HC | BASE | TEMPO_HP | TEMPO_HC | EJP_HP | EJP_HPN. 'consommations' sans distinction HP/HC = BASE. Libellé exact si valeur inconnue.",
+              description: "Code canonique : HP | HC | BASE | HPB | HCB | HPW | HCW | HPR | HCR | EJPN | EJPP. Utiliser le code même si la facture écrit 'Heure P', 'Heures Pleines', 'H.P.', etc. Libellé exact uniquement si aucun code ne correspond.",
             },
             date_debut: { type: ["string", "null"] },
             date_fin: { type: ["string", "null"] },
@@ -194,7 +202,10 @@ RÈGLES poste_tarifaire :
             nouveau_index: { type: ["number", "null"] },
             coefficient: { type: "number" },
             consommation_kwh: { type: "number" },
-            prix_unitaire_ckwh: { type: ["number", "null"] },
+            prix_unitaire_ckwh: {
+              type: ["number", "null"],
+              description: "Prix en centimes d'euro par kWh. Sur contrat HPHC, HP et HC ont des prix DIFFÉRENTS (HP > HC). Si tu lis le même prix pour HP et HC dans la même période, relis — chaque ligne a son propre tarif sur la facture.",
+            },
             montant_eur: { type: "number" },
             index_estime: { type: "boolean" },
           },

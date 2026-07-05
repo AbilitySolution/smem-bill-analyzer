@@ -38,6 +38,8 @@ export interface InvoiceEditData {
   categorie: "batiment" | "eclairage_public";
   clientId: string;
   contractId: string;
+  override?: { comment: string; flag_anomaly: boolean };
+  tags?: { id: string; label: string; color: string }[];
   invoice: {
     facture_number: string;
     facture_date: string;
@@ -172,6 +174,32 @@ export function InvoiceEditPanel({ data }: { data: InvoiceEditData }) {
 
       {/* Scrollable form */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+
+        {/* Tags */}
+        {data.tags && data.tags.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {data.tags.map((tag) => (
+              <span
+                key={tag.id}
+                style={{ backgroundColor: tag.color + "22", color: tag.color, borderColor: tag.color + "55" }}
+                className="rounded-full border px-2.5 py-0.5 text-[11px] font-semibold"
+              >
+                {tag.label}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Override justification */}
+        {data.override && (
+          <div className="mb-4 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2.5 text-[12px]">
+            <p className="mb-1 font-semibold text-orange-800">
+              Validation ignorée manuellement —{" "}
+              {data.override.flag_anomaly ? "détectée comme anomalie" : "acceptée sans détection"}
+            </p>
+            <p className="text-orange-700 whitespace-pre-wrap">{data.override.comment}</p>
+          </div>
+        )}
 
         {/* Localisation */}
         <SectionTitle title="Localisation" />

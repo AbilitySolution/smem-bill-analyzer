@@ -1,30 +1,42 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { createAnthropicClient, OCR_MODEL } from "@/lib/anthropic/client";
+import { createAnthropicClient, OCR_MODEL, retryWithBackoff } from "@/lib/anthropic/client";
 import {
   invoiceExtractionSchema,
   invoiceExtractionToolSchema,
 } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice } from "@/lib/anthropic/invoice-validation";
 
-const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité) d'un bâtiment public ou d'un point d'éclairage public. Extrait toutes les données structurées en utilisant l'outil extract_edf_invoice.
+// Règles générales déplacées en system prompt : plus stables, moins sensibles aux variations de mise en page.
+const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF (électricité) pour des bâtiments publics et points d'éclairage public en France.
 
-Règles importantes :
+Règles générales :
 - Toutes les dates au format ISO 8601 (YYYY-MM-DD).
-- Les montants en nombres (pas de texte, pas de symbole €), point comme séparateur décimal.
-- tarif_type : normaliser en "BASE" (tarif unique), "HPHC" (heures pleines/creuses), "TEMPO" (bleu/blanc/rouge), "EJP". Déduire depuis l'offre ou le service. Si indéterminable, null.
-- Les lignes "part fixe / abonnement" vont dans fixed_charges.
-- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines.
-- NE PAS inclure le tableau "historique de consommation" (résumé hp/hc/base sur plusieurs années/périodes passées).
-- poste_tarifaire normalisé : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN.
-- Si la période courante n'a qu'un seul poste sans distinction HP/HC (libellé "consommations", "base" ou vide) → poste_tarifaire = "BASE".
-- Si la consommation BASE est découpée en sous-périodes par changement de barème (ex. "consommations - barème du 07/05/2023 au 31/07/2023" et "consommations - barème du 01/08/2023 au 07/11/2023") → créer UNE ligne par sous-période : poste_tarifaire="BASE", dates de la sous-période, prix unitaire et montant de chaque sous-période. Ignorer la ligne de total "consommations" globale si les sous-lignes barème sont présentes.
-- Si HP et HC coexistent dans la partie variable → une ligne par poste.
-- Toutes les lignes "Taxes et contributions" vont dans taxes, une par taxe/période. taux_unit = "eur_per_kwh" si en €/kWh, "percent" si en %.
-- Si une valeur absente : null (jamais d'invention).
+- Les montants en nombre décimal avec point comme séparateur (ex. 123.45), sans symbole €.
+- Si une valeur est absente ou illisible : null — ne jamais inventer.
+- Codes poste_tarifaire canoniques : HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN, EJPP.
+  Même si la facture écrit "Heure P", "Heures Pleines", "H.P." → utiliser "HP". Idem pour HC et les variantes TEMPO.
+- Sur contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu lis le même prix pour HP et HC dans la même période, relis attentivement la facture.
+- precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).`;
+
+// Instructions structurelles EDF dans le message user (contexte document spécifique à chaque facture).
+const EXTRACTION_PROMPT = `Extrait toutes les données structurées de cette facture EDF en utilisant l'outil extract_edf_invoice.
+
+Structure EDF :
+- "Part fixe / abonnement" → fixed_charges (une ligne par poste).
+- "Part variable / consommation" avec anciens/nouveaux index → consumption_lines (PÉRIODE COURANTE uniquement).
+- NE PAS inclure le tableau "historique de consommation" (résumé hp/hc/base sur plusieurs années passées).
+- "Taxes et contributions" → taxes, une ligne par taxe/période. taux_unit = "eur_per_kwh" si en €/kWh, "percent" si en %.
+
+Règles consommation :
+- Un seul poste sans HP/HC → poste_tarifaire = "BASE".
+- HP et HC coexistent → une ligne par poste.
+- Consommation BASE découpée par barème (ex. "barème du 01/07 au 31/07" et "barème du 01/08 au…") → UNE ligne par sous-période, poste_tarifaire="BASE", dates et prix du barème. Ignorer la ligne totale globale.
+- tarif_type : "BASE", "HPHC", "TEMPO", "EJP" déduit depuis l'offre ou le service. Null si indéterminable.
+
+Autres :
 - is_duplicata = true si le mot "DUPLICATA" apparaît.
-- commune_hint : nom de la commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, ou en-tête). Copier le texte brut trouvé sur la facture sans normaliser. Null si absent.
-- precision : score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent). Couvrir : facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, contract_number, puissance_souscrite_kva.`;
+- commune_hint : nom de commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, en-tête). Texte brut sans normaliser. Null si absent.`;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -73,18 +85,22 @@ export async function POST(request: Request) {
 
   try {
     const anthropic = createAnthropicClient();
-    const response = await anthropic.messages.create({
-      model: OCR_MODEL,
-      max_tokens: 4096,
-      tools: [invoiceExtractionToolSchema],
-      tool_choice: { type: "tool", name: "extract_edf_invoice" },
-      messages: [
-        {
-          role: "user",
-          content: [documentBlock, { type: "text", text: EXTRACTION_PROMPT }],
-        },
-      ],
-    });
+    // retryWithBackoff gère les 429 (rate limit) et 529 (overload) transitoires — 3 tentatives.
+    const response = await retryWithBackoff(() =>
+      anthropic.messages.create({
+        model: OCR_MODEL,
+        max_tokens: 8192, // 4096 tronquait les factures multi-périodes complexes
+        system: SYSTEM_PROMPT,
+        tools: [invoiceExtractionToolSchema],
+        tool_choice: { type: "tool", name: "extract_edf_invoice" },
+        messages: [
+          {
+            role: "user",
+            content: [documentBlock, { type: "text", text: EXTRACTION_PROMPT }],
+          },
+        ],
+      })
+    );
 
     const toolUse = response.content.find((block) => block.type === "tool_use");
     if (!toolUse || toolUse.type !== "tool_use") {
