@@ -25,8 +25,9 @@ export interface AnalysisFilters {
 
 export function classifyTarif(poste: string): Tarif {
   const p = poste.toLowerCase().trim();
-  if (p.includes("heures pleines") || p === "hp" || p === "tempo_hp" || p === "ejp_hp" || p === "ejp_hpn") return "HP";
-  if (p.includes("heures creuses") || p === "hc" || p === "tempo_hc") return "HC";
+  // startsWith("hp") → hp/hpn/hph/hpjb; includes("_hp") → ejp_hp/ejp_hpn/tempo_hp
+  if (p.includes("heures pleines") || p.startsWith("hp") || p.includes("_hp")) return "HP";
+  if (p.includes("heures creuses") || p.startsWith("hc") || p.includes("_hc")) return "HC";
   return "Base";
 }
 

@@ -14,7 +14,12 @@ Règles importantes :
 - PDL (Point De Livraison) : identifiant à 14 chiffres sur la facture, libellé "Réf. PDL", "N° PDL" ou similaire. Extraire dans contract.pdl. Si absent, null.
 - tarif_type : normaliser en "BASE" (tarif unique), "HPHC" (heures pleines/creuses), "TEMPO" (bleu/blanc/rouge), "EJP". Déduire depuis l'offre ou le service. Si indéterminable, null.
 - Les lignes "part fixe / abonnement" vont dans fixed_charges.
-- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines. Une ligne par combinaison (poste tarifaire × période). poste_tarifaire normalisé : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN — utiliser le libellé exact si inconnu.
+- Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines.
+- NE PAS inclure le tableau "historique de consommation" (résumé hp/hc/base sur plusieurs années/périodes passées).
+- poste_tarifaire normalisé : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN.
+- Si la période courante n'a qu'un seul poste sans distinction HP/HC (libellé "consommations", "base" ou vide) → poste_tarifaire = "BASE".
+- Si la consommation BASE est découpée en sous-périodes par changement de barème (ex. "consommations - barème du 07/05/2023 au 31/07/2023" et "consommations - barème du 01/08/2023 au 07/11/2023") → créer UNE ligne par sous-période : poste_tarifaire="BASE", dates de la sous-période, prix unitaire et montant de chaque sous-période. Ignorer la ligne de total "consommations" globale si les sous-lignes barème sont présentes.
+- Si HP et HC coexistent dans la partie variable → une ligne par poste.
 - Toutes les lignes "Taxes et contributions" vont dans taxes, une par taxe/période. taux_unit = "eur_per_kwh" si en €/kWh, "percent" si en %.
 - Si une valeur absente : null (jamais d'invention).
 - is_duplicata = true si le mot "DUPLICATA" apparaît.

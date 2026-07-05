@@ -179,13 +179,19 @@ export const invoiceExtractionToolSchema = {
       },
       consumption_lines: {
         type: "array",
-        description: "Une ligne par combinaison (poste tarifaire × période de relevé). poste_tarifaire normalisé : 'HP' (heures pleines), 'HC' (heures creuses), 'BASE' (tarif de base), 'TEMPO_HP', 'TEMPO_HC', 'EJP_HP', 'EJP_HPN'.",
+        description: `Lignes de consommation de la PÉRIODE COURANTE uniquement (section 'part variable'). NE PAS inclure l'historique de consommation (tableau récapitulatif hp/hc/base des périodes passées).
+
+RÈGLES poste_tarifaire :
+- Si la facture distingue 'HP'/'heures pleines' et 'HC'/'heures creuses' → une ligne HP et une ligne HC.
+- Si la facture n'a qu'un seul poste ('consommations', 'base', ou aucun libellé HP/HC) → une seule ligne BASE.
+- Si la consommation BASE est découpée par barème tarifaire (ex. 'consommations - barème du 01/07 au 31/07' et 'barème du 01/08 au ...') → créer UNE ligne par sous-période, poste_tarifaire='BASE', avec les dates et prix du barème.
+- Tarifs normalisés : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN.`,
         items: {
           type: "object",
           properties: {
             poste_tarifaire: {
               type: "string",
-              description: "Valeur normalisée parmi : HP, HC, BASE, TEMPO_HP, TEMPO_HC, EJP_HP, EJP_HPN. Utiliser le libellé exact de la facture si inconnu.",
+              description: "HP | HC | BASE | TEMPO_HP | TEMPO_HC | EJP_HP | EJP_HPN. 'consommations' sans distinction HP/HC = BASE. Libellé exact si valeur inconnue.",
             },
             date_debut: { type: ["string", "null"] },
             date_fin: { type: ["string", "null"] },
