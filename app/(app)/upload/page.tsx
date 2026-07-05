@@ -56,7 +56,7 @@ function UploadPageInner() {
     <div className="mx-auto max-w-lg px-8 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer une facture</h1>
       <p className="mb-8 text-[13px] text-[var(--kn-text-muted)]">
-        L'OCR extrait les données automatiquement. Vous pourrez les vérifier et corriger avant l'enregistrement.
+        Extraire les données automatiquement. Vous pourrez les vérifier et corriger avant l'enregistrement.
       </p>
 
       <div
@@ -77,7 +77,7 @@ function UploadPageInner() {
         {busy ? (
           <>
             <Loader2 className="size-7 animate-spin text-[#f97316]" />
-            <p className="text-sm font-medium text-[var(--kn-text)]">Analyse OCR en cours…</p>
+            <p className="text-sm font-medium text-[var(--kn-text)]">Extraction des données en cours…</p>
           </>
         ) : (
           <>
