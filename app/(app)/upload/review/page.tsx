@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, AlertCircle, Save } from "lucide-react";
+import { Loader2, AlertCircle, Save, CheckCircle2, AlertTriangle } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { validateInvoice } from "@/lib/anthropic/invoice-validation";
+import type { ValidationResult } from "@/lib/anthropic/invoice-validation";
+import { createClient } from "@/lib/supabase/client";
 
 interface Commune { id: string; nom: string }
 
@@ -28,7 +31,7 @@ type TaxItem = {
 type Extraction = {
   client: { nom: string; reference_client: string | null; reference_compte: string | null; adresse: string | null };
   contract: {
-    contract_number: string; pdl: string | null; tarif_type: string | null;
+    contract_number: string; tarif_type: string | null;
     espace_livraison: string | null; offre: string | null; service: string | null;
     puissance_souscrite_kva: number | null; reglage_protection_a: number | null;
     type_compteur: string | null; numero_compteur: string | null;
@@ -52,6 +55,7 @@ type OcrResult = {
   file_path: string;
   suggested_commune_id: string | null;
   suggested_site_id: string | null;
+  validation?: ValidationResult;
 };
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -76,6 +80,101 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+const FIELD_LABELS: Record<string, string> = {
+  facture_number: "N° Facture",
+  facture_date: "Date",
+  total_ht: "HT",
+  tva: "TVA",
+  autres_taxes: "Autres taxes",
+  total_ttc: "TTC",
+  contract_number: "N° Contrat",
+  puissance_souscrite_kva: "Puissance",
+};
+
+function ConfidenceBadge({ score }: { score: number }) {
+  const pct = Math.round(score * 100);
+  const cls =
+    score >= 0.8
+      ? "bg-green-100 text-green-700 border-green-200"
+      : score >= 0.6
+        ? "bg-yellow-100 text-yellow-700 border-yellow-200"
+        : "bg-red-100 text-red-700 border-red-200";
+  return (
+    <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${cls}`}>
+      {pct}%
+    </span>
+  );
+}
+
+function FieldConfidenceGrid({ fieldConfidence }: { fieldConfidence: Record<string, number> }) {
+  const entries = Object.entries(FIELD_LABELS).map(([k, label]) => ({
+    key: k,
+    label,
+    score: fieldConfidence[k] ?? null,
+  }));
+  return (
+    <div className="mt-3 grid grid-cols-4 gap-1.5">
+      {entries.map(({ key, label, score }) =>
+        score == null ? null : (
+          <div key={key} className="flex items-center justify-between gap-1 rounded bg-white/60 px-2 py-1">
+            <span className="truncate text-[10px] text-[var(--kn-text-muted)]">{label}</span>
+            <ConfidenceBadge score={score} />
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
+function ValidationPanel({ result }: { result: ValidationResult }) {
+  const errors = result.issues.filter((i) => i.severity === "error");
+  const warnings = result.issues.filter((i) => i.severity === "warning");
+
+  if (result.issues.length === 0 && result.confidence >= 0.8) {
+    return (
+      <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+        <div className="flex items-center gap-2 font-semibold">
+          <CheckCircle2 className="size-4 shrink-0" />
+          Données cohérentes — confiance globale {Math.round(result.confidence * 100)}%
+        </div>
+        {result.fieldConfidence && (
+          <FieldConfidenceGrid fieldConfidence={result.fieldConfidence} />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`mb-4 rounded-lg border px-3 py-3 text-[13px] ${errors.length > 0 ? "border-red-200 bg-red-50" : "border-yellow-200 bg-yellow-50"}`}>
+      <div className="mb-2 flex items-center gap-2 font-semibold">
+        <AlertTriangle className={`size-4 shrink-0 ${errors.length > 0 ? "text-red-600" : "text-yellow-600"}`} />
+        <span className={errors.length > 0 ? "text-red-700" : "text-yellow-700"}>
+          {errors.length > 0 ? `${errors.length} erreur${errors.length > 1 ? "s" : ""} bloquante${errors.length > 1 ? "s" : ""}` : "Avertissements"}
+          {warnings.length > 0 && errors.length > 0 ? `, ${warnings.length} avertissement${warnings.length > 1 ? "s" : ""}` : ""}
+          {" — "}confiance globale {Math.round(result.confidence * 100)}%
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {errors.map((issue, i) => (
+          <li key={i} className="flex items-start gap-2 text-red-700">
+            <span className="mt-0.5 shrink-0 rounded bg-red-100 px-1 py-0 text-[10px] font-bold uppercase">ERR</span>
+            {issue.message}
+          </li>
+        ))}
+        {warnings.map((issue, i) => (
+          <li key={i} className="flex items-start gap-2 text-yellow-700">
+            <span className="mt-0.5 shrink-0 rounded bg-yellow-100 px-1 py-0 text-[10px] font-bold uppercase">WARN</span>
+            {issue.message}
+          </li>
+        ))}
+      </ul>
+      {result.fieldConfidence && (
+        <FieldConfidenceGrid fieldConfidence={result.fieldConfidence} />
+      )}
+    </div>
+  );
+}
+
 export default function ReviewPage() {
   const router = useRouter();
   const [ocr, setOcr] = useState<OcrResult | null>(null);
@@ -86,6 +185,10 @@ export default function ReviewPage() {
   const [communesLoading, setCommunesLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [fileUrlError, setFileUrlError] = useState(false);
+  const [overrideComment, setOverrideComment] = useState("");
+  const [overrideFlagAnomaly, setOverrideFlagAnomaly] = useState<boolean | null>(null);
 
   useEffect(() => {
     const raw = sessionStorage.getItem("upload_ocr_result");
@@ -99,11 +202,33 @@ export default function ReviewPage() {
       .then((r) => r.json())
       .then((j) => { setCommunes(j.communes ?? []); setCommunesLoading(false); })
       .catch(() => setCommunesLoading(false));
+
+    // Fetch signed URL for document preview
+    const supabase = createClient();
+    supabase.storage
+      .from("invoice-files")
+      .createSignedUrl(result.file_path, 3600)
+      .then(({ data, error }) => {
+        if (error || !data?.signedUrl) { setFileUrlError(true); return; }
+        setFileUrl(data.signedUrl);
+      })
+      .catch(() => setFileUrlError(true));
   }, [router]);
+
+  // Real-time validation re-run whenever ext changes
+  const validation = useMemo<ValidationResult | null>(() => {
+    if (!ext) return null;
+    return validateInvoice(ext as Parameters<typeof validateInvoice>[0]);
+  }, [ext]);
+
+  const hasErrors = validation != null && !validation.isValid;
+  const overrideReady = overrideComment.trim().length > 0 && overrideFlagAnomaly !== null;
+  const canSave = !hasErrors || overrideReady;
 
   async function handleSave() {
     if (!ext || !ocr) return;
     if (!communeId) { setError("Sélectionnez une commune."); return; }
+    if (!canSave) { setError("Remplissez le commentaire et choisissez si la facture doit être flaguée."); return; }
     setSaving(true);
     setError(null);
     try {
@@ -114,6 +239,10 @@ export default function ReviewPage() {
         new_site_categorie: categorie,
       };
       if (ocr.suggested_site_id) body.site_id = ocr.suggested_site_id;
+      if (hasErrors && overrideReady) {
+        body.override_comment = overrideComment.trim();
+        body.override_flag_anomaly = overrideFlagAnomaly;
+      }
       const res = await fetch("/api/invoices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -140,31 +269,123 @@ export default function ReviewPage() {
     setExt((e) => e ? { ...e, invoice: { ...e.invoice, [k]: v } } : e);
   }
 
+  const isPdf = !ocr?.file_path || ocr.file_path.toLowerCase().endsWith(".pdf")
+    || (!ocr.file_path.match(/\.(png|jpe?g|webp)$/i));
+
   if (!ext) return null;
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-8">
-      {/* Header */}
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Vérification de la facture</h1>
-          <p className="mt-1 text-[13px] text-[var(--kn-text-muted)]">Vérifiez et corrigez les données extraites par l'OCR avant d'enregistrer.</p>
+    <div className="flex h-full">
+      {/* ── Left: Document viewer ── */}
+      <div className="flex w-[46%] min-w-[360px] flex-col border-r border-[var(--kn-border)] bg-[var(--kn-page)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-[var(--kn-border)] px-4 py-2.5">
+          <span className="text-[11px] font-bold uppercase tracking-widest text-[var(--kn-text-muted)]">
+            Document original
+          </span>
+          {fileUrl && (
+            <a
+              href={fileUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-[#f97316] hover:underline"
+            >
+              Ouvrir ↗
+            </a>
+          )}
         </div>
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex shrink-0 items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
-        >
-          {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-          Enregistrer
-        </button>
+        <div className="min-h-0 flex-1">
+          {fileUrlError ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--kn-text-muted)]">
+              <AlertCircle className="size-6" />
+              <span className="text-[13px]">Aperçu indisponible</span>
+            </div>
+          ) : !fileUrl ? (
+            <div className="flex h-full items-center justify-center">
+              <Loader2 className="size-6 animate-spin text-[var(--kn-text-muted)]" />
+            </div>
+          ) : isPdf ? (
+            <iframe
+              src={`${fileUrl}#toolbar=1&view=FitH`}
+              className="h-full w-full border-0"
+              title="Facture PDF"
+            />
+          ) : (
+            <div className="h-full overflow-y-auto p-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={fileUrl} alt="Facture" className="w-full rounded-lg" />
+            </div>
+          )}
+        </div>
       </div>
 
-      {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          <AlertCircle className="size-4 shrink-0" /> {error}
-        </div>
-      )}
+      {/* ── Right: Form ── */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-2xl px-6 py-8">
+          {/* Header */}
+          <div className="mb-6 flex items-start justify-between gap-4">
+            <div>
+              <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Vérification de la facture</h1>
+              <p className="mt-1 text-[13px] text-[var(--kn-text-muted)]">Vérifiez et corrigez les données extraites par l'OCR avant d'enregistrer.</p>
+            </div>
+            <button
+              onClick={handleSave}
+              disabled={saving || !canSave}
+              className="flex shrink-0 items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              Enregistrer
+            </button>
+          </div>
+
+          {error && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              <AlertCircle className="size-4 shrink-0" /> {error}
+            </div>
+          )}
+
+          {validation && <ValidationPanel result={validation} />}
+
+          {/* Override section — shown only when blocking errors exist */}
+          {hasErrors && (
+            <div className="mb-6 rounded-xl border-2 border-orange-300 bg-orange-50 p-4">
+              <p className="mb-3 text-[13px] font-semibold text-orange-800">
+                Passer outre les erreurs — justification requise
+              </p>
+              <textarea
+                value={overrideComment}
+                onChange={(e) => setOverrideComment(e.target.value)}
+                placeholder="Expliquez pourquoi vous acceptez ces écarts (ex. facture correcte, erreur d'extraction connue…)"
+                rows={3}
+                className="w-full rounded-lg border border-orange-300 bg-white px-3 py-2 text-[13px] text-[var(--kn-text)] outline-none focus:border-orange-500 placeholder:text-[var(--kn-text-muted)] resize-none"
+              />
+              <p className="mt-3 mb-2 text-[12px] font-semibold text-orange-800">Flaguer cette facture comme anomalie ?</p>
+              <div className="flex gap-4">
+                <label className="flex cursor-pointer items-center gap-2 text-[13px] text-orange-900">
+                  <input
+                    type="radio"
+                    name="override_flag"
+                    checked={overrideFlagAnomaly === true}
+                    onChange={() => setOverrideFlagAnomaly(true)}
+                    className="accent-orange-500"
+                  />
+                  Oui — marquer comme anomalie
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-[13px] text-orange-900">
+                  <input
+                    type="radio"
+                    name="override_flag"
+                    checked={overrideFlagAnomaly === false}
+                    onChange={() => setOverrideFlagAnomaly(false)}
+                    className="accent-orange-500"
+                  />
+                  Non — facture acceptée telle quelle
+                </label>
+              </div>
+              {overrideReady && (
+                <p className="mt-2 text-[12px] text-green-700 font-medium">✓ Prêt à enregistrer avec justification</p>
+              )}
+            </div>
+          )}
 
       {/* Commune + Catégorie */}
       <Section title="Localisation">
@@ -262,9 +483,6 @@ export default function ReviewPage() {
           <Field label="N° Contrat">
             <input className={inputCls} value={ext.contract.contract_number} onChange={(e) => setContract("contract_number", e.target.value)} />
           </Field>
-          <Field label="PDL (14 chiffres)">
-            <input className={inputCls} value={ext.contract.pdl ?? ""} onChange={(e) => setContract("pdl", e.target.value || null)} />
-          </Field>
           <Field label="Type tarifaire">
             <Select value={ext.contract.tarif_type ?? ""} onValueChange={(v) => setContract("tarif_type", v || null)}>
               <SelectTrigger className="h-8 text-[13px]">
@@ -341,6 +559,18 @@ export default function ReviewPage() {
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-[var(--kn-border)]">
+                  <td colSpan={3} className="pt-2 text-[11px] font-bold uppercase tracking-wide text-[var(--kn-text-muted)]">Total consommation</td>
+                  <td className="pt-2 pr-3 text-right font-bold tabular-nums text-[var(--kn-text)]">
+                    {ext.consumption_lines.reduce((s, r) => s + r.consommation_kwh, 0).toFixed(0)} kWh
+                  </td>
+                  <td />
+                  <td className="pt-2 text-right font-bold tabular-nums text-[var(--kn-text)]">
+                    {ext.consumption_lines.reduce((s, r) => s + r.montant_eur, 0).toFixed(2)} €
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         </Section>
@@ -381,10 +611,45 @@ export default function ReviewPage() {
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-[var(--kn-border)]">
+                  <td colSpan={3} className="pt-2 text-[11px] font-bold uppercase tracking-wide text-[var(--kn-text-muted)]">Total charges fixes</td>
+                  <td className="pt-2 text-right font-bold tabular-nums text-[var(--kn-text)]">
+                    {ext.fixed_charges.reduce((s, r) => s + r.montant_eur, 0).toFixed(2)} €
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         </Section>
       )}
+
+      {/* HT reconciliation summary — visible when both sections present */}
+      {(ext.fixed_charges.length > 0 || ext.consumption_lines.length > 0) && (() => {
+        const sumFixed = ext.fixed_charges.reduce((s, r) => s + r.montant_eur, 0);
+        const sumConso = ext.consumption_lines.reduce((s, r) => s + r.montant_eur, 0);
+        const computed = sumFixed + sumConso;
+        const delta = Math.abs(computed - ext.invoice.total_ht);
+        const ok = delta <= 0.10;
+        return (
+          <div className={`mb-6 rounded-lg border px-4 py-3 text-[12px] ${ok ? "border-green-200 bg-green-50" : "border-orange-200 bg-orange-50"}`}>
+            <div className="flex items-center justify-between gap-2 font-semibold">
+              <span className={ok ? "text-green-700" : "text-orange-700"}>Réconciliation HT</span>
+              {!ok && <span className="text-orange-600">écart {delta.toFixed(2)} €</span>}
+            </div>
+            <div className="mt-1.5 space-y-0.5 tabular-nums text-[var(--kn-text-muted)]">
+              <div className="flex justify-between"><span>Charges fixes</span><span>{sumFixed.toFixed(2)} €</span></div>
+              <div className="flex justify-between"><span>Consommation</span><span>{sumConso.toFixed(2)} €</span></div>
+              <div className={`flex justify-between border-t pt-0.5 font-semibold ${ok ? "text-green-700" : "text-orange-700"}`}>
+                <span>Sous-total lignes</span><span>{computed.toFixed(2)} €</span>
+              </div>
+              <div className={`flex justify-between ${ok ? "text-green-700" : "text-orange-700"}`}>
+                <span>HT déclaré</span><span>{ext.invoice.total_ht.toFixed(2)} €</span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Taxes */}
       {ext.taxes.length > 0 && (
@@ -413,22 +678,32 @@ export default function ReviewPage() {
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-[var(--kn-border)]">
+                  <td colSpan={2} className="pt-2 text-[11px] font-bold uppercase tracking-wide text-[var(--kn-text-muted)]">Total taxes</td>
+                  <td className="pt-2 text-right font-bold tabular-nums text-[var(--kn-text)]">
+                    {ext.taxes.reduce((s, r) => s + r.montant_eur, 0).toFixed(2)} €
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         </Section>
       )}
 
-      {/* Bottom save */}
-      <div className="flex justify-end gap-3 pb-8">
-        <button onClick={() => router.push("/upload")}
-          className="rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]">
-          Annuler
-        </button>
-        <button onClick={handleSave} disabled={saving}
-          className="flex items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50">
-          {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-          Enregistrer
-        </button>
+          {/* Bottom save */}
+          <div className="flex justify-end gap-3 pb-8">
+            <button onClick={() => router.push("/upload")}
+              className="rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]">
+              Annuler
+            </button>
+            <button onClick={handleSave} disabled={saving || !canSave}
+              className="flex items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              {hasErrors ? "Enregistrer avec justification" : "Enregistrer"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

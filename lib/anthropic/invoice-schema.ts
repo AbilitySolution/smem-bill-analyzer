@@ -44,7 +44,6 @@ export const invoiceExtractionSchema = z.object({
   }),
   contract: z.object({
     contract_number: z.string(),
-    pdl: z.string().nullable(),
     tarif_type: z.enum(["BASE", "HPHC", "TEMPO", "EJP"]).nullable(),
     espace_livraison: z.string().nullable(),
     offre: z.string().nullable(),
@@ -97,10 +96,6 @@ export const invoiceExtractionToolSchema = {
         type: "object",
         properties: {
           contract_number: { type: "string" },
-          pdl: {
-            type: ["string", "null"],
-            description: "Point De Livraison EDF — identifiant à 14 chiffres (ex: 12345678901234). Visible sur la facture, souvent libellé 'Réf. PDL' ou 'N° PDL'.",
-          },
           tarif_type: {
             type: ["string", "null"],
             enum: ["BASE", "HPHC", "TEMPO", "EJP", null],
@@ -116,7 +111,6 @@ export const invoiceExtractionToolSchema = {
         },
         required: [
           "contract_number",
-          "pdl",
           "tarif_type",
           "espace_livraison",
           "offre",
@@ -256,7 +250,6 @@ RÈGLES poste_tarifaire :
           tva: { type: "number" },
           autres_taxes: { type: "number" },
           total_ttc: { type: "number" },
-          pdl: { type: "number" },
           contract_number: { type: "number" },
           puissance_souscrite_kva: { type: "number" },
         },
@@ -267,7 +260,6 @@ RÈGLES poste_tarifaire :
           "tva",
           "autres_taxes",
           "total_ttc",
-          "pdl",
           "contract_number",
           "puissance_souscrite_kva",
         ],

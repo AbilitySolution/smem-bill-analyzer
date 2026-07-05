@@ -5,13 +5,13 @@ import {
   invoiceExtractionSchema,
   invoiceExtractionToolSchema,
 } from "@/lib/anthropic/invoice-schema";
+import { validateInvoice } from "@/lib/anthropic/invoice-validation";
 
 const EXTRACTION_PROMPT = `Tu analyses une facture EDF (électricité) d'un bâtiment public ou d'un point d'éclairage public. Extrait toutes les données structurées en utilisant l'outil extract_edf_invoice.
 
 Règles importantes :
 - Toutes les dates au format ISO 8601 (YYYY-MM-DD).
 - Les montants en nombres (pas de texte, pas de symbole €), point comme séparateur décimal.
-- PDL (Point De Livraison) : identifiant à 14 chiffres sur la facture, libellé "Réf. PDL", "N° PDL" ou similaire. Extraire dans contract.pdl. Si absent, null.
 - tarif_type : normaliser en "BASE" (tarif unique), "HPHC" (heures pleines/creuses), "TEMPO" (bleu/blanc/rouge), "EJP". Déduire depuis l'offre ou le service. Si indéterminable, null.
 - Les lignes "part fixe / abonnement" vont dans fixed_charges.
 - Les lignes "part variable" avec index ancien/nouveau de compteur vont dans consumption_lines.
@@ -24,7 +24,7 @@ Règles importantes :
 - Si une valeur absente : null (jamais d'invention).
 - is_duplicata = true si le mot "DUPLICATA" apparaît.
 - commune_hint : nom de la commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, ou en-tête). Copier le texte brut trouvé sur la facture sans normaliser. Null si absent.
-- precision : score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent). Couvrir : facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, pdl, contract_number, puissance_souscrite_kva.`;
+- precision : score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent). Couvrir : facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, contract_number, puissance_souscrite_kva.`;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -155,22 +155,25 @@ export async function POST(request: Request) {
       }
     }
 
-    // Lookup existing site by PDL within the matched commune
+    // Lookup existing site by contract_number within the matched commune
     let suggested_site_id: string | null = null;
     let suggested_site_nom: string | null = null;
-    const pdl = parsed.data.contract.pdl;
-    if (suggested_commune_id && pdl) {
-      const { data: site } = await supabase
-        .from("sites")
-        .select("id, nom")
-        .eq("commune_id", suggested_commune_id)
-        .eq("pdl", pdl)
+    const contractNumber = parsed.data.contract.contract_number;
+    if (suggested_commune_id && contractNumber) {
+      const { data: existingContract } = await supabase
+        .from("contracts")
+        .select("site_id, sites(id, nom, commune_id)")
+        .eq("contract_number", contractNumber)
         .maybeSingle();
-      if (site) {
-        suggested_site_id = site.id;
-        suggested_site_nom = site.nom;
+      const rawSite = existingContract?.sites;
+      const contractSite = Array.isArray(rawSite) ? rawSite[0] : rawSite;
+      if (contractSite && (contractSite as { commune_id: string }).commune_id === suggested_commune_id) {
+        suggested_site_id = (contractSite as { id: string }).id;
+        suggested_site_nom = (contractSite as { nom: string }).nom;
       }
     }
+
+    const validation = validateInvoice(parsed.data);
 
     return NextResponse.json({
       extraction: parsed.data,
@@ -179,6 +182,7 @@ export async function POST(request: Request) {
       suggested_commune_nom,
       suggested_site_id,
       suggested_site_nom,
+      validation,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erreur OCR inconnue.";

@@ -9,6 +9,8 @@ const saveRequestSchema = z.object({
   site_id: z.string().uuid().optional(),
   commune_id: z.string().uuid().optional(),
   new_site_categorie: z.enum(["batiment", "eclairage_public"]).optional(),
+  override_comment: z.string().min(1).optional(),
+  override_flag_anomaly: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
@@ -27,7 +29,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { extraction, file_path, site_id, commune_id, new_site_categorie } = parsed.data;
+  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly } = parsed.data;
 
   if (!site_id && !commune_id) {
     return NextResponse.json({ error: "Commune non détectée — sélectionnez-la manuellement." }, { status: 400 });
@@ -41,25 +43,8 @@ export async function POST(request: Request) {
     if (error || !data) return NextResponse.json({ error: "Site introuvable." }, { status: 400 });
     site = data;
   } else {
-    const pdl = extraction.contract.pdl;
-    // Try to find existing site by PDL
-    if (pdl) {
-      const { data: byPdl } = await supabase.from("sites").select("id, commune_id, categorie")
-        .eq("commune_id", commune_id!).eq("pdl", pdl).maybeSingle();
-      if (byPdl) {
-        site = byPdl;
-      } else {
-        // Auto-create site
-        const categorie = (new_site_categorie ?? extraction.categorie_hint ?? "batiment") as "batiment" | "eclairage_public";
-        const nom = extraction.contract.espace_livraison?.trim() || `PDL ${pdl}`;
-        const { data: newSite, error: siteErr } = await supabase.from("sites")
-          .insert({ commune_id: commune_id!, categorie, nom, pdl })
-          .select("id, commune_id, categorie").single();
-        if (siteErr || !newSite) return NextResponse.json({ error: `Création site: ${siteErr?.message}` }, { status: 500 });
-        site = newSite;
-      }
-    } else {
-      // No PDL — fuzzy match against existing sites in the commune by normalized meaningful keywords
+    {
+      // Fuzzy match against existing sites in the commune by normalized meaningful keywords
       const categorie = (new_site_categorie ?? extraction.categorie_hint ?? "batiment") as "batiment" | "eclairage_public";
       const nom = extraction.contract.espace_livraison?.trim() || extraction.client.nom || "Nouveau site";
 
@@ -153,7 +138,7 @@ export async function POST(request: Request) {
       .from("contracts")
       .insert({
         ...extraction.contract,
-        pdl: extraction.contract.pdl ?? null,
+        pdl: null,
         tarif_type: extraction.contract.tarif_type ?? null,
         client_id: clientId,
         site_id: site.id,
@@ -171,7 +156,6 @@ export async function POST(request: Request) {
       .from("contracts")
       .update({
         site_id: site.id,
-        ...(extraction.contract.pdl ? { pdl: extraction.contract.pdl } : {}),
         ...(extraction.contract.tarif_type ? { tarif_type: extraction.contract.tarif_type } : {}),
       })
       .eq("id", contractId);
@@ -191,6 +175,9 @@ export async function POST(request: Request) {
     );
   }
 
+  const isOverride = !!override_comment;
+  const initialStatus = isOverride && override_flag_anomaly ? "anomaly_flagged" : "reviewed";
+
   const { data: invoice, error: invoiceError } = await supabase
     .from("invoices")
     .insert({
@@ -201,9 +188,11 @@ export async function POST(request: Request) {
       site_id: site.id,
       categorie: site.categorie,
       file_path,
-      status: "reviewed",
+      status: initialStatus,
       created_by: authData.user.id,
-      raw_ocr_json: extraction,
+      raw_ocr_json: isOverride
+        ? { ...extraction, _override: { comment: override_comment, flag_anomaly: override_flag_anomaly } }
+        : extraction,
       precision: extraction.precision ?? null,
     })
     .select("id")
@@ -281,6 +270,21 @@ export async function POST(request: Request) {
     .maybeSingle();
   if (defaultTag) {
     await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: defaultTag.id });
+  }
+
+  // 5b. Override validation — créer anomalie manuelle si l'utilisateur a choisi de flaguer.
+  if (isOverride && override_flag_anomaly) {
+    await supabase.from("anomalies").insert({
+      invoice_id: invoiceId,
+      contract_id: contractId,
+      type: "validation_override",
+      severity: "medium",
+      description: `Validation ignorée manuellement. Justification : ${override_comment}`,
+    });
+    const { data: anomalyTag } = await supabase.from("tags").select("id").eq("label", "Anomalie").maybeSingle();
+    if (anomalyTag) {
+      await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: anomalyTag.id });
+    }
   }
 
   // 6. Détection simple d'anomalie : écart de consommation > 40% vs historique du site.
