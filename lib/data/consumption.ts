@@ -37,6 +37,7 @@ interface RawPeriod {
   consommation_kwh: number | null;
   prix_unitaire_ckwh: number | null;
   montant_eur: number | null;
+  invoices?: { total_ttc?: number | null } | null;
 }
 
 function aggregate(rows: RawPeriod[]): AnalysisData {
@@ -49,10 +50,14 @@ function aggregate(rows: RawPeriod[]): AnalysisData {
     pxw: { HP: { sum: 0, w: 0 }, HC: { sum: 0, w: 0 }, Base: { sum: 0, w: 0 } } as Record<Tarif, { sum: number; w: number }>,
   };
   const invoiceIds = new Set<string>();
+  const invoiceTotals = new Map<string, number>();
 
   for (const r of rows) {
     if (!r.period_start) continue;
     invoiceIds.add(r.invoice_id);
+    if (!invoiceTotals.has(r.invoice_id)) {
+      invoiceTotals.set(r.invoice_id, Number(r.invoices?.total_ttc ?? 0));
+    }
     const yr = new Date(r.period_start).getFullYear();
     const cat = classifyTarif(r.poste_tarifaire ?? "");
     const kwh = Number(r.consommation_kwh ?? 0);
@@ -86,7 +91,7 @@ function aggregate(rows: RawPeriod[]): AnalysisData {
   }));
 
   const totalKwh = tot.kwh.HP + tot.kwh.HC + tot.kwh.Base;
-  const totalCost = tot.eur.HP + tot.eur.HC + tot.eur.Base;
+  const totalCost = Array.from(invoiceTotals.values()).reduce((s, v) => s + v, 0);
 
   return {
     byYear,
@@ -109,7 +114,7 @@ export async function getConsumptionAnalysis(filters?: AnalysisFilters): Promise
   const supabase = await createClient();
   let q = supabase
     .from("consumption_periods")
-    .select("invoice_id, poste_tarifaire, period_start, consommation_kwh, prix_unitaire_ckwh, montant_eur, invoices!inner(site_id, commune_id, categorie)");
+    .select("invoice_id, poste_tarifaire, period_start, consommation_kwh, prix_unitaire_ckwh, montant_eur, invoices!inner(site_id, commune_id, categorie, total_ttc)");
 
   if (filters?.communeId) q = q.eq("invoices.commune_id", filters.communeId);
   if (filters?.siteId) q = q.eq("invoices.site_id", filters.siteId);

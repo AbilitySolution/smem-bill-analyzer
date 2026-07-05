@@ -94,17 +94,76 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fuzzy-match commune_hint against canonical list
+    // Match commune_hint against canonical list with abbreviation normalization
     let suggested_commune_id: string | null = null;
     let suggested_commune_nom: string | null = null;
-    const hint = parsed.data.commune_hint;
-    if (hint) {
-      const { data: match } = await supabase
-        .rpc("match_commune", { input_text: hint })
-        .maybeSingle() as { data: { commune_id: string; commune_nom: string; score: number } | null };
-      if (match) {
-        suggested_commune_id = match.commune_id;
-        suggested_commune_nom = match.commune_nom;
+    // Build candidate texts to search for commune: hint → espace_livraison → adresse
+    const hintCandidates = [
+      parsed.data.commune_hint,
+      parsed.data.contract.espace_livraison,
+      parsed.data.client.adresse,
+      parsed.data.client.nom,
+    ].filter(Boolean) as string[];
+
+    if (hintCandidates.length) {
+      const { data: allCommunes } = await supabase.from("communes").select("id, nom");
+      if (allCommunes?.length) {
+        // Normalize: expand abbrevs, neutralize saint/sainte gender, strip accents/punct
+        const COMM_STOP = new Set(["de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au"]);
+        const normalizeComm = (s: string) =>
+          s.toLowerCase()
+            .normalize("NFD").replace(/\p{Mn}/gu, "")
+            .replace(/\bste\b/g, "sainte")
+            .replace(/\bst\b/g, "saint")
+            .replace(/\bsainte\b/g, "saint") // neutralize gender: saint == sainte
+            .replace(/\bgde?\b/g, "grand")
+            .replace(/\bgrande\b/g, "grand")
+            .replace(/[^a-z0-9 ]/g, " ")
+            .replace(/\s+/g, " ").trim();
+
+        const meaningfulWords = (normalized: string) =>
+          normalized.split(" ").filter((w) => w.length > 1 && !COMM_STOP.has(w));
+
+        const scoreOne = (candidate: string, communeNom: string) => {
+          const nc = normalizeComm(candidate);
+          const nn = normalizeComm(communeNom);
+          // Exact / substring match
+          if (nc === nn || nc.includes(nn) || nn.includes(nc)) return 100;
+          // Word-overlap on meaningful words only (ignore stop words)
+          const cWords = new Set(meaningfulWords(nc));
+          const nWords = meaningfulWords(nn);
+          if (nWords.length === 0) return 0;
+          const matches = nWords.filter((w) => cWords.has(w)).length;
+          return matches / nWords.length;
+        };
+
+        let bestScore = 0;
+        let best: { id: string; nom: string } | null = null;
+        for (const c of allCommunes) {
+          const s = Math.max(...hintCandidates.map((h) => scoreOne(h, c.nom)));
+          if (s > bestScore) { bestScore = s; best = c; }
+        }
+        if (best && bestScore >= 0.5) {
+          suggested_commune_id = best.id;
+          suggested_commune_nom = best.nom;
+        }
+      }
+    }
+
+    // Lookup existing site by PDL within the matched commune
+    let suggested_site_id: string | null = null;
+    let suggested_site_nom: string | null = null;
+    const pdl = parsed.data.contract.pdl;
+    if (suggested_commune_id && pdl) {
+      const { data: site } = await supabase
+        .from("sites")
+        .select("id, nom")
+        .eq("commune_id", suggested_commune_id)
+        .eq("pdl", pdl)
+        .maybeSingle();
+      if (site) {
+        suggested_site_id = site.id;
+        suggested_site_nom = site.nom;
       }
     }
 
@@ -113,6 +172,8 @@ export async function POST(request: Request) {
       file_path: storagePath,
       suggested_commune_id,
       suggested_commune_nom,
+      suggested_site_id,
+      suggested_site_nom,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erreur OCR inconnue.";

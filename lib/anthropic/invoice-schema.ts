@@ -1,11 +1,13 @@
 import { z } from "zod";
 
+const num = z.number().nullable().transform((v) => v ?? 0);
+
 export const fixedChargeItemSchema = z.object({
   libelle: z.string(),
   date_debut: z.string().nullable(),
   date_fin: z.string().nullable(),
   tarif_kva_an: z.number().nullable(),
-  montant_eur: z.number(),
+  montant_eur: num,
 });
 
 export const consumptionLineItemSchema = z.object({
@@ -15,11 +17,11 @@ export const consumptionLineItemSchema = z.object({
   numero_compteur: z.string().nullable(),
   ancien_index: z.number().nullable(),
   nouveau_index: z.number().nullable(),
-  coefficient: z.number().default(1),
-  consommation_kwh: z.number(),
+  coefficient: z.number().nullable().transform((v) => v ?? 1),
+  consommation_kwh: num,
   prix_unitaire_ckwh: z.number().nullable(),
-  montant_eur: z.number(),
-  index_estime: z.boolean().default(false),
+  montant_eur: num,
+  index_estime: z.boolean().nullable().transform((v) => v ?? false),
 });
 
 export const taxItemSchema = z.object({
@@ -30,7 +32,7 @@ export const taxItemSchema = z.object({
   taux: z.string().nullable(),
   taux_numeric: z.number().nullable(),
   taux_unit: z.enum(["eur_per_kwh", "percent"]).nullable(),
-  montant_eur: z.number(),
+  montant_eur: num,
 });
 
 export const invoiceExtractionSchema = z.object({
@@ -58,13 +60,14 @@ export const invoiceExtractionSchema = z.object({
     date_limite_paiement: z.string().nullable(),
     date_prochain_releve: z.string().nullable(),
     date_prochaine_facture: z.string().nullable(),
-    total_ht: z.number(),
+    total_ht: num,
     tva: z.number().nullable(),
     autres_taxes: z.number().nullable(),
-    total_ttc: z.number(),
-    is_duplicata: z.boolean().default(false),
+    total_ttc: num,
+    is_duplicata: z.boolean().nullable().transform((v) => v ?? false),
   }),
   commune_hint: z.string().nullable(),
+  categorie_hint: z.enum(["batiment", "eclairage_public"]).nullable().optional(),
   fixed_charges: z.array(fixedChargeItemSchema),
   consumption_lines: z.array(consumptionLineItemSchema),
   taxes: z.array(taxItemSchema),
@@ -154,6 +157,11 @@ export const invoiceExtractionToolSchema = {
       commune_hint: {
         type: ["string", "null"],
         description: "Nom de la commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, ou entête). Copier le texte exact trouvé sur la facture — ne pas normaliser. Null si absent.",
+      },
+      categorie_hint: {
+        type: ["string", "null"],
+        enum: ["batiment", "eclairage_public", null],
+        description: "Type du point de livraison : 'eclairage_public' si la facture mentionne éclairage public, armoire, candélabre, luminaire, voirie ; 'batiment' sinon (mairie, salle, école, bâtiment administratif…). Null si impossible à déterminer.",
       },
       fixed_charges: {
         type: "array",
@@ -264,6 +272,7 @@ export const invoiceExtractionToolSchema = {
       "contract",
       "invoice",
       "commune_hint",
+      "categorie_hint",
       "fixed_charges",
       "consumption_lines",
       "taxes",

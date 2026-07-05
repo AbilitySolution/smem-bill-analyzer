@@ -8,10 +8,15 @@ export default async function RapportsPage({ searchParams }: { searchParams: Pro
   const preIds = ids ? ids.split(",").filter(Boolean) : [];
 
   const supabase = await createClient();
-  const [communesRes, sitesRes] = await Promise.all([
+  const [communesRes, invoiceSiteIds] = await Promise.all([
     supabase.from("communes").select("id, nom, travaux_debut, travaux_estimes").order("nom"),
-    supabase.from("sites").select("id, nom, commune_id").order("nom"),
+    supabase.from("invoices").select("site_id").not("site_id", "is", null),
   ]);
+
+  const siteIds = [...new Set((invoiceSiteIds.data ?? []).map((r) => r.site_id as string))];
+  const sitesRes = siteIds.length
+    ? await supabase.from("sites").select("id, nom, commune_id").in("id", siteIds).order("nom")
+    : { data: [] };
 
   // Communes réellement présentes dans la sélection (pour restreindre le choix du modal).
   let selectionCommuneIds = new Set<string>();

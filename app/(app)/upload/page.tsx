@@ -1,16 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, Suspense } from "react";
+import { useRef, useState, useCallback, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
-import { UploadCloud, Loader2, CheckCircle2, Building2, Lightbulb } from "lucide-react";
-import { formatEur, formatDate } from "@/lib/format";
-import type { InvoiceExtraction } from "@/lib/anthropic/invoice-schema";
-
-interface Commune { id: string; nom: string }
-interface Site { id: string; nom: string; categorie: "batiment" | "eclairage_public"; pdl: string | null }
+import { UploadCloud, Loader2, AlertCircle } from "lucide-react";
 
 export default function UploadPage() {
   return <Suspense><UploadPageInner /></Suspense>;
@@ -18,49 +10,36 @@ export default function UploadPage() {
 
 function UploadPageInner() {
   const router = useRouter();
-  const [communes, setCommunes] = useState<Commune[]>([]);
-  const [sites, setSites] = useState<Site[]>([]);
-  const [communeId, setCommuneId] = useState("");
-  const [siteId, setSiteId] = useState("");
+  const searchParams = useSearchParams();
+
   const [dragOver, setDragOver] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ extraction: InvoiceExtraction; file_path: string } | null>(null);
-  const [communeAutoDetected, setCommuneAutoDetected] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    fetch("/api/communes").then((r) => r.json()).then((j) => setCommunes(j.communes ?? []));
-  }, []);
-
-  useEffect(() => {
-    if (!communeId) { setSites([]); setSiteId(""); return; }
-    fetch(`/api/sites?commune_id=${communeId}`).then((r) => r.json()).then((j) => setSites(j.sites ?? []));
-  }, [communeId]);
-
   const handleFile = useCallback(async (file: File) => {
-    setLoading(true); setError(null); setResult(null);
+    setBusy(true);
+    setError(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
       const res = await fetch("/api/extract", { method: "POST", body: formData });
       const json = await res.json();
-      if (!res.ok || json.error) { setError(json.error ?? "Erreur d'extraction OCR."); return; }
-      setResult({ extraction: json.extraction, file_path: json.file_path });
-      if (json.suggested_commune_id) {
-        if (!communeId) {
-          setCommuneId(json.suggested_commune_id);
-          setCommuneAutoDetected(json.suggested_commune_nom);
-        } else if (communeId !== json.suggested_commune_id) {
-          setCommuneAutoDetected(`⚠ La facture indique "${json.suggested_commune_nom}" — vérifiez la commune sélectionnée.`);
-        }
+      if (!res.ok || json.error) {
+        setError(json.error ?? "Erreur d'extraction OCR.");
+        setBusy(false);
+        return;
       }
-    } catch { setError("Erreur réseau lors de l'extraction."); }
-    finally { setLoading(false); }
-  }, []);
+      // Store full OCR result, redirect to review form
+      sessionStorage.setItem("upload_ocr_result", JSON.stringify(json));
+      router.push("/upload/review");
+    } catch {
+      setError("Erreur réseau.");
+      setBusy(false);
+    }
+  }, [router]);
 
-  const searchParams = useSearchParams();
+  // Handle pending upload from external link
   const pendingId = searchParams.get("pending");
   useEffect(() => {
     if (!pendingId) return;
@@ -68,129 +47,56 @@ function UploadPageInner() {
       const res = await fetch(`/api/pending/${pendingId}`);
       const json = await res.json();
       if (!res.ok || !json.signedUrl) { setError(json.error ?? "Dépôt introuvable."); return; }
-      setCommuneId(json.pending.commune_id);
       const blob = await fetch(json.signedUrl).then((r) => r.blob());
       handleFile(new File([blob], json.pending.original_name ?? "facture.pdf", { type: blob.type || "application/pdf" }));
     })();
   }, [pendingId, handleFile]);
 
-  async function handleSave() {
-    if (!result || !siteId) return;
-    setSaving(true); setError(null);
-    try {
-      const res = await fetch("/api/invoices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ extraction: result.extraction, file_path: result.file_path, site_id: siteId }),
-      });
-      const json = await res.json();
-      if (!res.ok || json.error) { setError(json.error ?? "Erreur d'enregistrement."); return; }
-      if (pendingId) {
-        await fetch(`/api/pending/${pendingId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ processed: true }) });
-      }
-      router.push(`/documents/extraction?id=${json.invoice_id}`);
-    } catch { setError("Erreur réseau lors de l'enregistrement."); }
-    finally { setSaving(false); }
-  }
-
-  const canUpload = Boolean(siteId);
-  const prec = result?.extraction.precision ?? null;
-  const precBadge = (k: string) => prec && prec[k] != null
-    ? <span className="ml-2 rounded-full bg-[var(--kn-yellow-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[#9a3412]">{Math.round(prec[k] * 100)}%</span>
-    : null;
-
   return (
-    <div className="mx-auto max-w-2xl px-8 py-6">
+    <div className="mx-auto max-w-lg px-8 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer une facture</h1>
-      <p className="mb-6 text-[13px] text-[var(--kn-text-muted)]">PDF, PNG, JPEG ou WEBP — extraction automatique par l&apos;IA.</p>
+      <p className="mb-8 text-[13px] text-[var(--kn-text-muted)]">
+        L'OCR extrait les données automatiquement. Vous pourrez les vérifier et corriger avant l'enregistrement.
+      </p>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-panel)] p-3">
-        <div>
-          <label className="mb-1 block text-[11px] font-medium text-[var(--kn-text-muted)]">Commune</label>
-          <Select value={communeId} onValueChange={(v) => setCommuneId(v ?? "")}>
-            <SelectTrigger className="w-full"><SelectValue placeholder="Choisir une commune" /></SelectTrigger>
-            <SelectContent>{communes.map((c) => <SelectItem key={c.id} value={c.id}>{c.nom}</SelectItem>)}</SelectContent>
-          </Select>
-        </div>
-        <div>
-          <label className="mb-1 block text-[11px] font-medium text-[var(--kn-text-muted)]">Site / point de livraison</label>
-          <Select value={siteId} onValueChange={(v) => setSiteId(v ?? "")} disabled={!communeId}>
-            <SelectTrigger className="w-full"><SelectValue placeholder="Choisir un site" /></SelectTrigger>
-            <SelectContent>
-              {sites.map((s) => (
-                <SelectItem key={s.id} value={s.id}>
-                  <span className="flex items-center gap-1.5">
-                    {s.categorie === "batiment" ? <Building2 className="size-3.5" /> : <Lightbulb className="size-3.5" />}
-                    {s.nom} {s.pdl ? `(${s.pdl})` : ""}
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+      <div
+        onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault(); setDragOver(false);
+          if (busy) return;
+          const f = e.dataTransfer.files[0]; if (f) handleFile(f);
+        }}
+        onClick={() => { if (!busy) inputRef.current?.click(); }}
+        className={`flex h-56 w-full flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed transition-colors ${
+          busy ? "cursor-default border-[var(--kn-border)] bg-[var(--kn-panel)]"
+          : dragOver ? "cursor-pointer border-[#f97316] bg-[var(--kn-yellow-soft)]"
+          : "cursor-pointer border-[#c8ccd2] bg-[var(--kn-card)] hover:border-[#f97316]"
+        }`}
+      >
+        {busy ? (
+          <>
+            <Loader2 className="size-7 animate-spin text-[#f97316]" />
+            <p className="text-sm font-medium text-[var(--kn-text)]">Analyse OCR en cours…</p>
+          </>
+        ) : (
+          <>
+            <UploadCloud className="size-8 text-[var(--kn-text-muted)]" />
+            <div className="text-center">
+              <p className="text-sm font-medium text-[var(--kn-text)]">Glissez la facture ici ou cliquez</p>
+              <p className="text-xs text-[var(--kn-text-muted)]">PDF, PNG, JPEG, WEBP</p>
+            </div>
+          </>
+        )}
       </div>
 
-      {!result && (
-        <div
-          onDragOver={(e) => { e.preventDefault(); if (canUpload) setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => { e.preventDefault(); setDragOver(false); if (!canUpload) return; const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
-          onClick={() => canUpload && inputRef.current?.click()}
-          className={`flex h-52 w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed transition-colors ${
-            !canUpload ? "cursor-not-allowed border-[var(--kn-border)] bg-[var(--kn-panel)]"
-            : dragOver ? "cursor-pointer border-[#f97316] bg-[var(--kn-yellow-soft)]"
-            : "cursor-pointer border-[#c8ccd2] bg-[var(--kn-card)] hover:border-[#f97316]"}`}
-        >
-          {loading ? (
-            <>
-              <Loader2 className="size-6 animate-spin text-[#f97316]" />
-              <p className="text-sm text-[var(--kn-text)]">Extraction en cours…</p>
-            </>
-          ) : (
-            <>
-              <UploadCloud className="size-7 text-[var(--kn-text-muted)]" />
-              <p className="text-sm font-medium text-[var(--kn-text)]">
-                {canUpload ? "Glissez-déposez la facture ici, ou cliquez pour sélectionner" : "Choisissez d'abord une commune et un site"}
-              </p>
-              <p className="text-xs text-[var(--kn-text-muted)]">PDF, PNG, JPEG, WEBP</p>
-            </>
-          )}
-        </div>
-      )}
-
       <input ref={inputRef} type="file" accept="application/pdf,image/png,image/jpeg,image/webp" className="hidden"
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
 
-      {communeAutoDetected && (
-        <p className={`mt-3 text-sm ${communeAutoDetected.startsWith("⚠") ? "text-amber-600" : "text-[#0f6e56]"}`}>
-          {communeAutoDetected.startsWith("⚠") ? communeAutoDetected : `Commune détectée depuis la facture : ${communeAutoDetected}`}
-        </p>
-      )}
-
-      {error && <p className="mt-3 text-sm text-[#d33]">{error}</p>}
-
-      {result && (
-        <div className="rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
-          <div className="mb-3 flex items-center gap-2 text-[#0f6e56]">
-            <CheckCircle2 className="size-4" />
-            <span className="text-sm font-medium">Extraction réussie — vérifiez avant d&apos;enregistrer</span>
-          </div>
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div><span className="text-[var(--kn-text-muted)]">N° facture{precBadge("facture_number")}</span><p className="font-medium text-[var(--kn-text)]">{result.extraction.invoice.facture_number}</p></div>
-            <div><span className="text-[var(--kn-text-muted)]">Date{precBadge("facture_date")}</span><p className="font-medium text-[var(--kn-text)]">{formatDate(result.extraction.invoice.facture_date)}</p></div>
-            <div><span className="text-[var(--kn-text-muted)]">Total HT{precBadge("total_ht")}</span><p className="font-medium text-[var(--kn-text)]">{formatEur(result.extraction.invoice.total_ht)}</p></div>
-            <div><span className="text-[var(--kn-text-muted)]">Total TTC{precBadge("total_ttc")}</span><p className="font-medium text-[var(--kn-text)]">{formatEur(result.extraction.invoice.total_ttc)}</p></div>
-          </div>
-          <div className="mt-4 flex gap-2">
-            <button onClick={handleSave} disabled={saving}
-              className="rounded-lg bg-[var(--kn-solid)] px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-50">
-              {saving ? "Enregistrement…" : "Enregistrer la facture"}
-            </button>
-            <button onClick={() => setResult(null)} disabled={saving}
-              className="rounded-lg border border-[var(--kn-border)] px-4 py-2 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)] disabled:opacity-50">
-              Annuler
-            </button>
-          </div>
+      {error && (
+        <div className="mt-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <AlertCircle className="size-4 shrink-0" />
+          {error}
         </div>
       )}
     </div>

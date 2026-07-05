@@ -1,11 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { PdfViewer } from "@/components/factures/pdf-viewer";
 import { SplitPane } from "@/components/factures/split-pane";
-import { ExtractionPanel, type ExtractionData } from "@/components/factures/extraction-panel";
+import { InvoiceEditPanel, type InvoiceEditData } from "@/components/factures/invoice-edit-panel";
 import { InvoicePicker, type PickerInvoice } from "@/components/documents/invoice-picker";
 import { ScanText } from "lucide-react";
 
-type Row = Record<string, string | number | boolean | null>;
+type Row = Record<string, unknown>;
 
 async function selectAllInvoices(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -71,11 +71,10 @@ function EmptyState() {
 async function Detail({ id }: { id: string }) {
   const supabase = await createClient();
 
-  const { data: invoice } = await supabase
-    .from("invoices")
-    .select("*, clients(*), contracts(*), sites(*), communes(nom)")
-    .eq("id", id)
-    .single();
+  const [{ data: invoice }, { data: communes }] = await Promise.all([
+    supabase.from("invoices").select("*, clients(*), contracts(*), sites(*)").eq("id", id).single(),
+    supabase.from("communes").select("id, nom").order("nom"),
+  ]);
 
   if (!invoice) {
     return <div className="flex h-full items-center justify-center text-[13px] text-[var(--kn-text-muted)]">Facture introuvable.</div>;
@@ -87,31 +86,81 @@ async function Detail({ id }: { id: string }) {
   ]);
 
   const { data: signed } = invoice.file_path
-    ? await supabase.storage.from("invoice-files").createSignedUrl(invoice.file_path, 3600)
+    ? await supabase.storage.from("invoice-files").createSignedUrl(invoice.file_path as string, 3600)
     : { data: null };
 
-  const inv = invoice as unknown as Row & {
-    id: string; facture_number: string; precision: Record<string, number> | null;
-    clients: (Row & { id: string }) | null;
-    contracts: (Row & { id: string }) | null;
-    sites: (Row & { id: string; nom: string }) | null;
-  };
+  const inv = invoice as Row;
+  const client = (inv.clients as Row | null);
+  const contract = (inv.contracts as Row | null);
 
-  const filename = `${inv.facture_number || "facture"}.pdf`;
+  const filename = `${(inv.facture_number as string) || "facture"}.pdf`;
 
-  const extraction: ExtractionData = {
-    invoice: inv as ExtractionData["invoice"],
-    client: inv.clients,
-    contract: inv.contracts,
-    site: inv.sites,
-    consumption: (consumption ?? []) as (Row & { id: string })[],
-    charges: (charges ?? []) as (Row & { id: string })[],
+  const editData: InvoiceEditData = {
+    invoiceId: id,
+    communeId: (inv.commune_id as string) ?? "",
+    categorie: ((inv.categorie as string) ?? "batiment") as "batiment" | "eclairage_public",
+    clientId: (inv.client_id as string) ?? "",
+    contractId: (inv.contract_id as string) ?? "",
+    invoice: {
+      facture_number: (inv.facture_number as string) ?? "",
+      facture_date: (inv.facture_date as string) ?? "",
+      date_limite_paiement: (inv.date_limite_paiement as string | null) ?? null,
+      total_ht: (inv.total_ht as number) ?? 0,
+      tva: (inv.tva as number | null) ?? null,
+      autres_taxes: (inv.autres_taxes as number | null) ?? null,
+      total_ttc: (inv.total_ttc as number) ?? 0,
+      is_duplicata: !!(inv.is_duplicata as boolean),
+    },
+    client: {
+      nom: (client?.nom as string) ?? "",
+      reference_client: (client?.reference_client as string | null) ?? null,
+      reference_compte: (client?.reference_compte as string | null) ?? null,
+      adresse: (client?.adresse as string | null) ?? null,
+    },
+    contract: {
+      contract_number: (contract?.contract_number as string) ?? "",
+      pdl: (contract?.pdl as string | null) ?? null,
+      tarif_type: (contract?.tarif_type as string | null) ?? null,
+      espace_livraison: (contract?.espace_livraison as string | null) ?? null,
+      offre: (contract?.offre as string | null) ?? null,
+      service: (contract?.service as string | null) ?? null,
+      puissance_souscrite_kva: (contract?.puissance_souscrite_kva as number | null) ?? null,
+      reglage_protection_a: (contract?.reglage_protection_a as number | null) ?? null,
+      type_compteur: (contract?.type_compteur as string | null) ?? null,
+      numero_compteur: (contract?.numero_compteur as string | null) ?? null,
+    },
+    consumption: (consumption ?? []).map((r) => ({
+      poste_tarifaire: (r.poste_tarifaire as string) ?? "",
+      period_start: (r.period_start as string | null) ?? null,
+      period_end: (r.period_end as string | null) ?? null,
+      numero_compteur: (r.numero_compteur as string | null) ?? null,
+      ancien_index: (r.ancien_index as number | null) ?? null,
+      nouveau_index: (r.nouveau_index as number | null) ?? null,
+      coefficient: (r.coefficient as number) ?? 1,
+      consommation_kwh: (r.consommation_kwh as number) ?? 0,
+      prix_unitaire_ckwh: (r.prix_unitaire_ckwh as number | null) ?? null,
+      montant_eur: (r.montant_eur as number) ?? 0,
+      index_estime: !!(r.index_estime as boolean),
+    })),
+    charges: (charges ?? []).map((r) => ({
+      category: (r.category as "fixed" | "tax") ?? "fixed",
+      libelle: (r.libelle as string) ?? "",
+      period_start: (r.period_start as string | null) ?? null,
+      period_end: (r.period_end as string | null) ?? null,
+      assiette: (r.assiette as number | null) ?? null,
+      taux: (r.taux as string | null) ?? null,
+      taux_numeric: (r.taux_numeric as number | null) ?? null,
+      taux_unit: (r.taux_unit as string | null) ?? null,
+      tarif_kva_an: (r.tarif_kva_an as number | null) ?? null,
+      montant_eur: (r.montant_eur as number) ?? 0,
+    })),
+    communes: (communes ?? []) as { id: string; nom: string }[],
   };
 
   return (
     <SplitPane
       left={<PdfViewer url={signed?.signedUrl ?? null} filename={filename} />}
-      right={<ExtractionPanel data={extraction} />}
+      right={<InvoiceEditPanel key={id} data={editData} />}
     />
   );
 }

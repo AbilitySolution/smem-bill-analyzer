@@ -18,10 +18,15 @@ export default async function AnalysesPage({
   const hasFilters = !!(sp.commune || sp.site || sp.cat);
 
   const supabase = await createClient();
-  const [communesRes, sitesRes] = await Promise.all([
+  const [communesRes, invoiceSiteIds] = await Promise.all([
     supabase.from("communes").select("id, nom").order("nom"),
-    supabase.from("sites").select("id, nom, commune_id, categorie").order("nom"),
+    supabase.from("invoices").select("site_id").not("site_id", "is", null),
   ]);
+
+  const siteIds = [...new Set((invoiceSiteIds.data ?? []).map((r) => r.site_id as string))];
+  const sitesRes = siteIds.length
+    ? await supabase.from("sites").select("id, nom, commune_id, categorie").in("id", siteIds).order("nom")
+    : { data: [] };
 
   let analysis: AnalysisData | null = null;
   try {

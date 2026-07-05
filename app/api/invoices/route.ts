@@ -6,7 +6,9 @@ import { z } from "zod";
 const saveRequestSchema = z.object({
   extraction: invoiceExtractionSchema,
   file_path: z.string(),
-  site_id: z.string().uuid(),
+  site_id: z.string().uuid().optional(),
+  commune_id: z.string().uuid().optional(),
+  new_site_categorie: z.enum(["batiment", "eclairage_public"]).optional(),
 });
 
 export async function POST(request: Request) {
@@ -25,16 +27,90 @@ export async function POST(request: Request) {
     );
   }
 
-  const { extraction, file_path, site_id } = parsed.data;
+  const { extraction, file_path, site_id, commune_id, new_site_categorie } = parsed.data;
 
-  const { data: site, error: siteError } = await supabase
-    .from("sites")
-    .select("id, commune_id, categorie")
-    .eq("id", site_id)
-    .single();
+  if (!site_id && !commune_id) {
+    return NextResponse.json({ error: "Commune non détectée — sélectionnez-la manuellement." }, { status: 400 });
+  }
 
-  if (siteError || !site) {
-    return NextResponse.json({ error: "Site introuvable ou inaccessible." }, { status: 400 });
+  // Resolve site: existing by id, or by PDL in commune, or auto-create
+  let site: { id: string; commune_id: string; categorie: string };
+
+  if (site_id) {
+    const { data, error } = await supabase.from("sites").select("id, commune_id, categorie").eq("id", site_id).single();
+    if (error || !data) return NextResponse.json({ error: "Site introuvable." }, { status: 400 });
+    site = data;
+  } else {
+    const pdl = extraction.contract.pdl;
+    // Try to find existing site by PDL
+    if (pdl) {
+      const { data: byPdl } = await supabase.from("sites").select("id, commune_id, categorie")
+        .eq("commune_id", commune_id!).eq("pdl", pdl).maybeSingle();
+      if (byPdl) {
+        site = byPdl;
+      } else {
+        // Auto-create site
+        const categorie = (new_site_categorie ?? extraction.categorie_hint ?? "batiment") as "batiment" | "eclairage_public";
+        const nom = extraction.contract.espace_livraison?.trim() || `PDL ${pdl}`;
+        const { data: newSite, error: siteErr } = await supabase.from("sites")
+          .insert({ commune_id: commune_id!, categorie, nom, pdl })
+          .select("id, commune_id, categorie").single();
+        if (siteErr || !newSite) return NextResponse.json({ error: `Création site: ${siteErr?.message}` }, { status: 500 });
+        site = newSite;
+      }
+    } else {
+      // No PDL — fuzzy match against existing sites in the commune by normalized meaningful keywords
+      const categorie = (new_site_categorie ?? extraction.categorie_hint ?? "batiment") as "batiment" | "eclairage_public";
+      const nom = extraction.contract.espace_livraison?.trim() || extraction.client.nom || "Nouveau site";
+
+      // Words that appear in almost every site name — useless for deduplication
+      const SITE_STOP = new Set([
+        "eclairage", "public", "ep", "armoire", "candelabre", "luminaire", "voirie",
+        "route", "rue", "impasse", "chemin", "allee", "boulevard", "avenue", "rte", "av",
+        "quartier", "qtr", "section", "lot", "lotissement", "residence", "cite",
+        "de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au", "aux",
+        "par", "sur", "sous", "chez",
+      ]);
+
+      const normalizeSite = (s: string) =>
+        s.toLowerCase()
+          .normalize("NFD").replace(/\p{Mn}/gu, "")
+          .replace(/\bste\b/g, "saint")
+          .replace(/\bst\b/g, "saint")
+          .replace(/\bsainte\b/g, "saint")
+          .replace(/\bgde?\b/g, "grand")
+          .replace(/[^a-z0-9 ]/g, " ")
+          .replace(/\s+/g, " ").trim();
+
+      const siteKeywords = (s: string) =>
+        normalizeSite(s).split(" ").filter((w) => w.length > 2 && !SITE_STOP.has(w));
+
+      const { data: sitesInCommune } = await supabase.from("sites").select("id, nom, commune_id, categorie")
+        .eq("commune_id", commune_id!);
+
+      const nkw = siteKeywords(nom);
+      const matched = nkw.length > 0
+        ? (sitesInCommune ?? []).find((s) => {
+            const skw = siteKeywords(s.nom);
+            if (skw.length === 0) return false;
+            // exact normalized match
+            if (normalizeSite(s.nom) === normalizeSite(nom)) return true;
+            // keyword overlap: ≥50% of the shorter keyword list found in the other
+            const overlap = nkw.filter((w) => skw.includes(w)).length;
+            return overlap / Math.min(nkw.length, skw.length) >= 0.5;
+          })
+        : undefined;
+
+      if (matched) {
+        site = matched;
+      } else {
+        const { data: newSite, error: siteErr } = await supabase.from("sites")
+          .insert({ commune_id: commune_id!, categorie, nom, pdl: null })
+          .select("id, commune_id, categorie").single();
+        if (siteErr || !newSite) return NextResponse.json({ error: `Création site: ${siteErr?.message}` }, { status: 500 });
+        site = newSite;
+      }
+    }
   }
 
   // 1. Upsert client, rattaché à la commune du site.
@@ -80,7 +156,7 @@ export async function POST(request: Request) {
         pdl: extraction.contract.pdl ?? null,
         tarif_type: extraction.contract.tarif_type ?? null,
         client_id: clientId,
-        site_id,
+        site_id: site.id,
         created_by: authData.user.id,
       })
       .select("id")
@@ -94,7 +170,7 @@ export async function POST(request: Request) {
     await supabase
       .from("contracts")
       .update({
-        site_id,
+        site_id: site.id,
         ...(extraction.contract.pdl ? { pdl: extraction.contract.pdl } : {}),
         ...(extraction.contract.tarif_type ? { tarif_type: extraction.contract.tarif_type } : {}),
       })
@@ -122,7 +198,7 @@ export async function POST(request: Request) {
       contract_id: contractId,
       client_id: clientId,
       commune_id: site.commune_id,
-      site_id,
+      site_id: site.id,
       categorie: site.categorie,
       file_path,
       status: "reviewed",
