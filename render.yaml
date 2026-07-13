@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: smem-bill-analyzer-staging
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npx next start -p $PORT
+    healthCheckPath: /login
+    envVars:
+      - key: NODE_ENV
+        value: production

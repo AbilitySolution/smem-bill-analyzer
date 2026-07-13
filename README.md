@@ -43,7 +43,7 @@ ANTHROPIC_API_KEY=<clé API Anthropic (sk-ant-...)>
 ```
 
 > `.env.local` est ignoré par git — ne le committez jamais.
-> Les clés Supabase se trouvent dans *Project Settings → API* ; la clé Anthropic sur console.anthropic.com.
+> Les clés Supabase se trouvent dans _Project Settings → API_ ; la clé Anthropic sur console.anthropic.com.
 
 ## 3. Lancer en développement
 
@@ -62,6 +62,52 @@ npm run build   # build de production
 npm run start   # lancer le build de production
 npm run lint    # linter
 ```
+
+---
+
+## 🚀 Déploiement gratuit pour test client (Vercel)
+
+Pour permettre au client de tester la plateforme simplement, la solution la plus pratique et gratuite pour le moment est **Vercel**.
+
+### Pourquoi Vercel ?
+
+- déploiement rapide en quelques clics
+- gratuit pour un usage de test et de démonstration
+- compatible avec Next.js sans configuration supplémentaire
+- simple à partager via une URL publique
+
+### Étapes
+
+1. Poussez votre code sur GitHub
+2. Créez un compte sur https://vercel.com
+3. Cliquez sur “Add New Project” puis choisissez votre dépôt GitHub
+4. Vercel détecte automatiquement Next.js
+5. Ajoutez les variables d’environnement suivantes dans l’onglet “Environment Variables” :
+
+```dotenv
+NEXT_PUBLIC_SUPABASE_URL=https://<votre-projet>.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<clé anon publique>
+SUPABASE_SERVICE_ROLE_KEY=<clé service role>
+ANTHROPIC_API_KEY=<clé API Anthropic>
+```
+
+6. Déployez
+
+Votre application sera alors disponible sur une URL du type :
+
+```text
+https://<nom-du-projet>.vercel.app
+```
+
+### Conseils pratiques
+
+- utilisez une branche dédiée pour les tests clients, par exemple `staging` ou `preview`
+- gardez un environnement Supabase distinct pour les tests si vous voulez éviter d’affecter la production
+- pour un test simple, il suffit de partager l’URL Vercel au client
+
+### Variables d’environnement attendues
+
+Un fichier exemple est disponible dans [.env.example](.env.example).
 
 ---
 
@@ -107,18 +153,18 @@ supabase/migrations/           # schéma de la base
 
 ## Routes principales
 
-| Route | Description |
-|-------|-------------|
-| `/` | redirige vers `/documents` |
-| `/documents` | hub Mes documents : vues Liste/Galerie/Colonnes, regroupement, confiance, tickers d'anomalie, sélection & actions groupées, export CSV |
-| `/documents/extraction?id=` | éditeur : sélecteur de facture + PDF redimensionnable + champs extraits éditables |
-| `/rapport-excel` | Générer un rapport Excel : 3 rapports (Par commune, Avant/après travaux, Synthèse) — Python/openpyxl, TCD + séries temporelles |
-| `/connecteurs` | Connecteurs (version bêta) : sources de données externes à venir |
-| `/analyses` | analyses de consommation (filtres commune/site/catégorie, kWh/€/c€) |
-| `/anomalies` | module Anomalies (version bêta) : alertes, graphiques, résolution + historique |
-| `/documentation` · `/documentation/champs` | guide d'utilisation + champs du modèle d'extraction |
-| `/upload` | import et extraction OCR d'une facture |
-| `/factures`, `/factures/[id]`, `/documents/export`, `/champs` | anciennes routes — redirigent vers les nouvelles |
+| Route                                                         | Description                                                                                                                            |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/`                                                           | redirige vers `/documents`                                                                                                             |
+| `/documents`                                                  | hub Mes documents : vues Liste/Galerie/Colonnes, regroupement, confiance, tickers d'anomalie, sélection & actions groupées, export CSV |
+| `/documents/extraction?id=`                                   | éditeur : sélecteur de facture + PDF redimensionnable + champs extraits éditables                                                      |
+| `/rapport-excel`                                              | Générer un rapport Excel : 3 rapports (Par commune, Avant/après travaux, Synthèse) — Python/openpyxl, TCD + séries temporelles         |
+| `/connecteurs`                                                | Connecteurs (version bêta) : sources de données externes à venir                                                                       |
+| `/analyses`                                                   | analyses de consommation (filtres commune/site/catégorie, kWh/€/c€)                                                                    |
+| `/anomalies`                                                  | module Anomalies (version bêta) : alertes, graphiques, résolution + historique                                                         |
+| `/documentation` · `/documentation/champs`                    | guide d'utilisation + champs du modèle d'extraction                                                                                    |
+| `/upload`                                                     | import et extraction OCR d'une facture                                                                                                 |
+| `/factures`, `/factures/[id]`, `/documents/export`, `/champs` | anciennes routes — redirigent vers les nouvelles                                                                                       |
 
 ## Base de données
 
@@ -126,7 +172,7 @@ Le schéma (tables `invoices`, `clients`, `contracts`, `sites`, `communes`, `con
 
 Colonnes notables sur `invoices` : `archived` (masquage), `precision` (jsonb — score de précision par champ, renseigné aux nouveaux imports), `file_path` (PDF dans le bucket `invoice-files`).
 
-> **Détection d'anomalies & résolutions** : la détection actuelle est un *fallback* par règles (cohérence des totaux, coût/kWh atypique vs médiane annuelle) calculé à la volée ; les résolutions sont mémorisées côté navigateur (localStorage). Le suivi en base arrivera avec la version complète du module.
+> **Détection d'anomalies & résolutions** : la détection actuelle est un _fallback_ par règles (cohérence des totaux, coût/kWh atypique vs médiane annuelle) calculé à la volée ; les résolutions sont mémorisées côté navigateur (localStorage). Le suivi en base arrivera avec la version complète du module.
 
 ## Données de démonstration (seed)
 
