@@ -8,6 +8,15 @@ export default function UploadPage() {
   return <Suspense><UploadPageInner /></Suspense>;
 }
 
+// Étapes affichées pendant l'extraction — le seuil (s) déclenche le passage à l'étape
+// suivante ; la dernière (sans seuil dépassé) reste affichée jusqu'à la réponse serveur.
+const PROGRESS_STEPS = [
+  { after: 0, label: "Envoi du fichier…" },
+  { after: 2, label: "Lecture de la facture par OCR…" },
+  { after: 8, label: "Extraction des champs (consommation, tarifs, dates)…" },
+  { after: 16, label: "Vérification des données extraites…" },
+] as const;
+
 function UploadPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -15,7 +24,18 @@ function UploadPageInner() {
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Chrono réel pendant l'extraction (tourne tant que busy=true)
+  useEffect(() => {
+    if (!busy) { setElapsed(0); return; }
+    const start = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
+
+  const currentStep = [...PROGRESS_STEPS].reverse().find((s) => elapsed >= s.after) ?? PROGRESS_STEPS[0];
 
   const handleFile = useCallback(async (file: File) => {
     setBusy(true);
@@ -77,7 +97,13 @@ function UploadPageInner() {
         {busy ? (
           <>
             <Loader2 className="size-7 animate-spin text-[#f97316]" />
-            <p className="text-sm font-medium text-[var(--kn-text)]">Extraction des données en cours…</p>
+            <div className="text-center">
+              <p className="text-sm font-medium text-[var(--kn-text)]">{currentStep.label}</p>
+              <p className="mt-0.5 text-xs text-[var(--kn-text-muted)]">{elapsed}s écoulées</p>
+            </div>
+            <div className="h-1 w-40 overflow-hidden rounded-full bg-[var(--kn-border)]">
+              <div className="h-full w-1/3 animate-[upload-progress_1.4s_ease-in-out_infinite] rounded-full bg-[#f97316]" />
+            </div>
           </>
         ) : (
           <>

@@ -280,3 +280,9 @@
   border-bottom: 1px solid var(--kn-border);
   padding: 14px 4px;
 }
+
+/* Barre de progression indéterminée (upload / extraction OCR) */
+@keyframes upload-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
