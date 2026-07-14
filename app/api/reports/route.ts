@@ -65,7 +65,8 @@ export async function POST(request: Request) {
 
   const script = join(process.cwd(), "scripts", "reports", "generate_report.py");
   const outPath = join(tmpdir(), `ability-report-${randomUUID()}.xlsx`);
-  const { code, stderr } = await run("python3", [script, JSON.stringify(params), outPath], {
+  const pythonBin = process.env.PYTHON_BIN || "python3";
+  const { code, stderr } = await run(pythonBin, [script, JSON.stringify(params), outPath], {
     ...process.env,
     SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
