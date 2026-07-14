@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS activities (
 CREATE TABLE IF NOT EXISTS file_request_links (
   id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   commune_id  uuid        NOT NULL REFERENCES communes(id) ON DELETE CASCADE,
-  token       text        NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(16),'hex'),
+  token       text        NOT NULL UNIQUE DEFAULT encode(extensions.gen_random_bytes(16), 'hex'),
   label       text,
   created_by  uuid        REFERENCES auth.users(id),
   expires_at  timestamptz,
