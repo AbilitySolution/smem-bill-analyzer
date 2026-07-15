@@ -63,6 +63,64 @@ npm run start   # lancer le build de production
 npm run lint    # linter
 ```
 
+## File d'attente OCR (Supabase Queues)
+
+Les nouveaux imports multiples utilisent une architecture asynchrone :
+
+1. Next.js enregistre le fichier dans le bucket privé `invoice-files`.
+2. Un enregistrement durable est créé dans `document_jobs`.
+3. Son identifiant est envoyé dans la queue Postgres `document_ocr` (`pgmq`).
+4. L'Edge Function `process-document-queue` transfère jusqu'à cinq fichiers vers Claude Files API et crée un Message Batch.
+5. L'Edge Function `collect-document-batches` surveille les batches, importe le JSONL de résultats puis place chaque job en `needs_review`.
+6. Supabase Cron invoque le dispatcher et le collecteur chaque minute.
+
+Le navigateur tente aussi de démarrer le worker immédiatement après un upload. Le Cron garantit que le job sera repris si l'onglet est fermé ou si cette invocation échoue.
+
+### Installation sur un projet Supabase
+
+Le dépôt contient la migration et l'Edge Function, mais leur déploiement nécessite une connexion manuelle à votre compte Supabase :
+
+```bash
+npx supabase login
+npx supabase link --project-ref <PROJECT_REF>
+npx supabase db push
+npx supabase secrets set ANTHROPIC_API_KEY=<CLE_ANTHROPIC>
+npx supabase functions deploy process-document-queue
+npx supabase functions deploy collect-document-batches
+```
+
+`PROJECT_REF` est le sous-domaine situé avant `.supabase.co` dans l'URL du projet.
+
+Dans le SQL Editor Supabase, créez ensuite les deux secrets Vault utilisés par le Cron :
+
+```sql
+select vault.create_secret(
+  'https://<PROJECT_REF>.supabase.co',
+  'project_url'
+);
+
+select vault.create_secret(
+  '<SUPABASE_SERVICE_ROLE_KEY>',
+  'service_role_key'
+);
+```
+
+Ces valeurs ne doivent jamais être placées dans une migration ou commitées. La migration programme automatiquement le job `process-document-ocr-queue` toutes les minutes ; tant que les secrets Vault sont absents, elle n'envoie aucune requête.
+
+### Vérification
+
+Après le déploiement :
+
+- ouvrez `/upload` et envoyez deux petits PDF ;
+- vérifiez la transition `En attente` → `Extraction OCR` → `À réviser` ;
+- consultez **Integrations → Queues** et **Integrations → Cron** dans Supabase ;
+- consultez **Edge Functions → process-document-queue / collect-document-batches → Logs** en cas d'erreur ;
+- contrôlez la table `document_jobs` dans le Table Editor.
+
+Le dispatcher crée volontairement des sous-batches de cinq documents. Les fichiers sont référencés par `file_id`, ce qui évite de charger un dossier de 100 PDF en mémoire. Les fichiers temporaires hébergés par Claude sont supprimés après collecte du résultat.
+
+Claude Message Batches réduit de 50 % le coût des tokens, mais le résultat est différé : la majorité des batches terminent en moins d'une heure et Anthropic autorise jusqu'à 24 heures.
+
 ---
 
 ## 🚀 Déploiement gratuit pour test client (Vercel)

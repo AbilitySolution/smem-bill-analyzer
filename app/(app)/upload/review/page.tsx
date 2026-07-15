@@ -199,6 +199,7 @@ export default function ReviewPage() {
   const [fileUrlError, setFileUrlError] = useState(false);
   const [overrideComment, setOverrideComment] = useState("");
   const [overrideFlagAnomaly, setOverrideFlagAnomaly] = useState<boolean | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
 
   // Garde "modifications non sauvegardées" sur navigation navigateur (fermer onglet, recharger)
   useEffect(() => {
@@ -211,28 +212,49 @@ export default function ReviewPage() {
   }, [isDirty]);
 
   useEffect(() => {
-    const raw = sessionStorage.getItem("upload_ocr_result");
-    if (!raw) { router.replace("/upload"); return; }
-    const result: OcrResult = JSON.parse(raw);
-    setOcr(result);
-    setExt(result.extraction);
-    if (result.suggested_commune_id) setCommuneId(result.suggested_commune_id);
-    setCategorie((result.extraction.categorie_hint as "batiment" | "eclairage_public") ?? "batiment");
+    const load = async () => {
+      const queuedJobId = new URLSearchParams(window.location.search).get("job");
+      let result: OcrResult;
+      if (queuedJobId) {
+        const response = await fetch(`/api/document-jobs/${queuedJobId}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok || payload.job?.status !== "needs_review") {
+          setError(payload.error ?? "Ce document n'est pas prêt à être révisé.");
+          return;
+        }
+        setJobId(queuedJobId);
+        result = {
+          extraction: payload.job.extraction_json,
+          file_path: payload.job.file_path,
+          suggested_commune_id: payload.job.suggested_commune_id,
+          suggested_site_id: payload.job.suggested_site_id,
+          validation: payload.job.validation_json,
+        };
+      } else {
+        const raw = sessionStorage.getItem("upload_ocr_result");
+        if (!raw) { router.replace("/upload"); return; }
+        result = JSON.parse(raw) as OcrResult;
+      }
+
+      setOcr(result);
+      setExt(result.extraction);
+      if (result.suggested_commune_id) setCommuneId(result.suggested_commune_id);
+      setCategorie((result.extraction.categorie_hint as "batiment" | "eclairage_public") ?? "batiment");
+
+      const supabase = createClient();
+      supabase.storage.from("invoice-files").createSignedUrl(result.file_path, 3600)
+        .then(({ data, error }) => {
+          if (error || !data?.signedUrl) { setFileUrlError(true); return; }
+          setFileUrl(data.signedUrl);
+        })
+        .catch(() => setFileUrlError(true));
+    };
+
     fetch("/api/communes")
       .then((r) => r.json())
       .then((j) => { setCommunes(j.communes ?? []); setCommunesLoading(false); })
       .catch(() => setCommunesLoading(false));
-
-    // Fetch signed URL for document preview
-    const supabase = createClient();
-    supabase.storage
-      .from("invoice-files")
-      .createSignedUrl(result.file_path, 3600)
-      .then(({ data, error }) => {
-        if (error || !data?.signedUrl) { setFileUrlError(true); return; }
-        setFileUrl(data.signedUrl);
-      })
-      .catch(() => setFileUrlError(true));
+    void load();
   }, [router]);
 
   // Real-time validation re-run whenever ext changes
@@ -268,6 +290,13 @@ export default function ReviewPage() {
       });
       const json = await res.json();
       if (!res.ok || json.error) { setError(json.error ?? "Erreur enregistrement."); setSaving(false); return; }
+      if (jobId) {
+        await fetch(`/api/document-jobs/${jobId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "complete", invoice_id: json.invoice_id }),
+        });
+      }
       sessionStorage.removeItem("upload_ocr_result");
       setIsDirty(false);
       setSavedBanner(true);
@@ -349,7 +378,7 @@ export default function ReviewPage() {
           <div className="mb-6 flex items-start justify-between gap-4">
             <div>
               <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Vérification de la facture</h1>
-              <p className="mt-1 text-[13px] text-[var(--kn-text-muted)]">Vérifiez et corrigez les données extraites par l'OCR avant d'enregistrer.</p>
+              <p className="mt-1 text-[13px] text-[var(--kn-text-muted)]">Vérifiez et corrigez les données extraites par l&apos;OCR avant d&apos;enregistrer.</p>
             </div>
             <button
               onClick={handleSave}
