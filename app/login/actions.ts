@@ -18,7 +18,7 @@ export async function login(_prevState: unknown, formData: FormData) {
     return { error: "Identifiants invalides." };
   }
 
-  redirect("/");
+  redirect("/documents");
 }
 
 export async function logout() {

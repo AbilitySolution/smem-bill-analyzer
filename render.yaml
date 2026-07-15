@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: smem-bill-analyzer-staging
+    name: smem-bill-analyzer
     env: node
     plan: free
     buildCommand: npm install && npm run build && pip3 install -r scripts/reports/requirements.txt
