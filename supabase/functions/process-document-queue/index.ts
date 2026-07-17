@@ -117,9 +117,27 @@ const extractionTool = {
   },
 };
 
+function claudeSafeFilename(filename: string) {
+  const basename = filename.split(/[\\/]/).pop()?.trim() || "document";
+  const sanitized = Array.from(basename.normalize("NFKC"))
+    .map((character) => /[<>:"|?*\\/\u0000-\u001F]/.test(character) ? "_" : character)
+    .join("")
+    .trim();
+
+  const safe = sanitized || "document";
+  const characters = Array.from(safe);
+  if (characters.length <= 200) return safe;
+
+  // Anthropic accepts 1–255 characters. Keep the extension while leaving a
+  // margin for Unicode filenames and multipart encoding details.
+  const extensionIndex = safe.lastIndexOf(".");
+  const extension = extensionIndex > 0 ? safe.slice(extensionIndex, extensionIndex + 16) : "";
+  return `${characters.slice(0, 200 - Array.from(extension).length).join("")}${extension}`;
+}
+
 async function uploadToClaude(file: Blob, filename: string, apiKey: string) {
   const formData = new FormData();
-  formData.append("file", file, filename);
+  formData.append("file", file, claudeSafeFilename(filename));
   const response = await fetch("https://api.anthropic.com/v1/files", {
     method: "POST",
     headers: {
