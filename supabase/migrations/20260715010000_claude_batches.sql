@@ -73,7 +73,7 @@ BEGIN
     status='queued', last_error=NULL, anthropic_file_id=NULL,
     anthropic_batch_id=NULL, updated_at=now()
   WHERE id=job_id;
-  SELECT msg_id INTO message_id FROM pgmq.send('document_ocr', jsonb_build_object('job_id', job_id));
+  SELECT * INTO message_id FROM pgmq.send('document_ocr', jsonb_build_object('job_id', job_id));
   RETURN message_id;
 END;
 $$;

@@ -72,7 +72,7 @@ BEGIN
     RAISE EXCEPTION 'Not authorized';
   END IF;
 
-  SELECT msg_id INTO message_id
+  SELECT * INTO message_id
   FROM pgmq.send('document_ocr', jsonb_build_object('job_id', job_id));
 
   RETURN message_id;
@@ -111,7 +111,7 @@ BEGIN
   SET status = 'queued', last_error = NULL, updated_at = now()
   WHERE id = job_id;
 
-  SELECT msg_id INTO message_id
+  SELECT * INTO message_id
   FROM pgmq.send('document_ocr', jsonb_build_object('job_id', job_id));
   RETURN message_id;
 END;
