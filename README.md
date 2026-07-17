@@ -76,6 +76,12 @@ Les nouveaux imports multiples utilisent une architecture asynchrone :
 
 Le navigateur tente aussi de démarrer le worker immédiatement après un upload. Le Cron garantit que le job sera repris si l'onglet est fermé ou si cette invocation échoue.
 
+### Suivi en direct et estimation
+
+La page `/upload` charge la liste une fois, puis reçoit les changements de `document_jobs` par Supabase Realtime. Un GET de secours est effectué au maximum une fois par minute pendant un traitement actif, ainsi qu'au retour sur l'onglet ou après une erreur de canal. La migration ajoute déjà `document_jobs` à la publication `supabase_realtime` et les politiques RLS limitent chaque utilisateur à ses propres jobs.
+
+L'estimation affichée tient compte des sous-batches de cinq documents, du dispatcher exécuté chaque minute et des durées des 100 derniers batches terminés sur 90 jours. Elle utilise les percentiles P50/P80 à partir de cinq échantillons ; avant ce seuil, une plage prudente issue du test staging est utilisée. Les durées sont recalculées par `GET /api/document-jobs` sans exposer le contenu des factures.
+
 ### Installation sur un projet Supabase
 
 Le dépôt contient la migration et l'Edge Function, mais leur déploiement nécessite une connexion manuelle à votre compte Supabase :
@@ -105,7 +111,7 @@ select vault.create_secret(
 );
 ```
 
-Ces valeurs ne doivent jamais être placées dans une migration ou commitées. La migration programme automatiquement le job `process-document-ocr-queue` toutes les minutes ; tant que les secrets Vault sont absents, elle n'envoie aucune requête.
+Ces valeurs ne doivent jamais être placées dans une migration ou commitées. La migration programme automatiquement les jobs `dispatch-claude-batches` et `collect-claude-batches` toutes les minutes ; tant que les secrets Vault sont absents, elle n'envoie aucune requête.
 
 ### Vérification
 
