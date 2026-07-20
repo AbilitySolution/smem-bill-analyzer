@@ -4,19 +4,29 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const QUEUE_VISIBILITY_SECONDS = 180;
 const MAX_ATTEMPTS = 3;
 const BATCH_SIZE = 5;
+const MAX_BATCHES_PER_INVOCATION = 10;
+const FILE_UPLOAD_CONCURRENCY = 3;
 const OCR_MODEL = "claude-sonnet-4-6";
 
-const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF.
-Retourne toutes les dates au format YYYY-MM-DD, les montants sous forme de nombres, et null pour toute valeur absente ou illisible.
-N'invente jamais de valeur. Normalise les postes tarifaires vers HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN ou EJPP.`;
+const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF (électricité) pour des bâtiments publics et points d'éclairage public en France.
 
-const EXTRACTION_PROMPT = `Extrais la facture avec l'outil extract_edf_invoice.
-- fixed_charges contient la part fixe et les abonnements.
-- consumption_lines contient uniquement la période courante, jamais l'historique.
-- taxes contient les taxes et contributions.
-- precision contient un score entre 0 et 1 pour chaque champ clé.
-- categorie_hint vaut batiment, eclairage_public ou null.
-- commune_hint reprend le nom visible, sans l'inventer.`;
+Règles générales :
+- Toutes les dates au format ISO 8601 (YYYY-MM-DD).
+- Les montants en nombre décimal avec point comme séparateur, sans symbole €.
+- Si une valeur est absente ou illisible : null — ne jamais inventer.
+- Codes poste_tarifaire canoniques : HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN, EJPP.
+- Sur contrat HPHC, HP est toujours plus cher que HC. Relis la facture si les deux prix sont identiques.
+- precision : score 0-1 pour chaque champ clé.`;
+
+const EXTRACTION_PROMPT = `Extrait toutes les données structurées de cette facture EDF avec l'outil extract_edf_invoice.
+- fixed_charges : part fixe et abonnements.
+- consumption_lines : période courante uniquement, jamais l'historique.
+- taxes : une ligne par taxe et période.
+- Une consommation sans HP/HC utilise BASE.
+- tarif_type vaut BASE, HPHC, TEMPO, EJP ou null.
+- is_duplicata vaut true si DUPLICATA apparaît.
+- commune_hint reprend le nom visible sans l'inventer.
+- categorie_hint vaut batiment, eclairage_public ou null.`;
 
 const nullableString = { type: ["string", "null"] };
 const nullableNumber = { type: ["number", "null"] };
@@ -196,62 +206,118 @@ async function createClaudeBatch(
   return await response.json() as { id: string; processing_status: string; request_counts: Record<string, number> };
 }
 
-Deno.serve(async () => {
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+function isRetryableProcessingError(error: unknown) {
+  if (!(error instanceof Error)) return true;
+  const status = error.message.match(/(?:Claude Files|Claude Batch)\s+(\d{3}):/)?.[1];
+  if (!status) return true;
+  return ["408", "409", "429", "500", "502", "503", "504", "529"].includes(status);
+}
 
-  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY")!;
+async function mapWithConcurrency<T, R>(values: T[], limit: number, worker: (value: T) => Promise<R>) {
+  const results: R[] = new Array(values.length);
+  let nextIndex = 0;
+  async function run() {
+    while (nextIndex < values.length) {
+      const index = nextIndex++;
+      results[index] = await worker(values[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => run()));
+  return results;
+}
+
+async function dispatchNextBatch(
+  supabase: ReturnType<typeof createClient>,
+  anthropicKey: string,
+) {
   const { data: claims, error: claimError } = await supabase.rpc("claim_document_jobs", {
     visibility_timeout_seconds: QUEUE_VISIBILITY_SECONDS,
     message_limit: BATCH_SIZE,
   });
-  if (claimError) return Response.json({ error: claimError.message }, { status: 500 });
-  if (!claims?.length) return Response.json({ processed: false, message: "Queue vide" });
+  if (claimError) throw new Error(claimError.message);
+  if (!claims?.length) return null;
 
   const claimByJob = new Map(claims.map((claim: { job_id: string; message_id: number }) => [claim.job_id, claim]));
   const { data: rows, error: jobsError } = await supabase.from("document_jobs").select("*").in("id", claims.map((claim: { job_id: string }) => claim.job_id));
-  if (jobsError) return Response.json({ error: jobsError.message }, { status: 500 });
+  if (jobsError) throw new Error(jobsError.message);
   const prepared: Array<{ id: string; mime_type: string; anthropic_file_id: string }> = [];
+  const dispatchStartedAt = new Date().toISOString();
 
   try {
+    const candidates = [];
     for (const job of rows ?? []) {
       if (["batched", "needs_review", "completed"].includes(job.status)) {
         await supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id });
         continue;
       }
       const attempt = (job.attempt_count ?? 0) + 1;
-      await supabase.from("document_jobs").update({ status: "uploading_to_claude", attempt_count: attempt, updated_at: new Date().toISOString() }).eq("id", job.id);
+      await supabase.from("document_jobs").update({ status: "uploading_to_claude", attempt_count: attempt, dispatch_started_at: dispatchStartedAt, started_at: dispatchStartedAt, updated_at: dispatchStartedAt }).eq("id", job.id);
+      candidates.push(job);
+    }
 
+    const uploaded = await mapWithConcurrency(candidates, FILE_UPLOAD_CONCURRENCY, async (job) => {
       let fileId = job.anthropic_file_id as string | null;
       if (!fileId) {
         const { data: file, error: downloadError } = await supabase.storage.from("invoice-files").download(job.file_path);
         if (downloadError || !file) throw new Error(`${job.original_name}: ${downloadError?.message ?? "fichier absent"}`);
         fileId = (await uploadToClaude(file, job.original_name, anthropicKey)).id;
-        await supabase.from("document_jobs").update({ anthropic_file_id: fileId, updated_at: new Date().toISOString() }).eq("id", job.id);
+        const uploadedAt = new Date().toISOString();
+        await supabase.from("document_jobs").update({ anthropic_file_id: fileId, claude_file_uploaded_at: uploadedAt, updated_at: uploadedAt }).eq("id", job.id);
       }
-      prepared.push({ id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId });
-    }
-
-    if (!prepared.length) return Response.json({ processed: false, message: "Aucun job à dispatcher" });
-    const batch = await createClaudeBatch(prepared, anthropicKey);
-    await supabase.from("document_batches").insert({
-      anthropic_batch_id: batch.id, status: "in_progress", document_count: prepared.length, request_counts: batch.request_counts,
+      return { id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId };
     });
-    await supabase.from("document_jobs").update({ status: "batched", anthropic_batch_id: batch.id, updated_at: new Date().toISOString(), last_error: null })
+    prepared.push(...uploaded);
+
+    if (!prepared.length) return { batchId: null, documentCount: 0 };
+    const batch = await createClaudeBatch(prepared, anthropicKey);
+    const batchCreatedAt = new Date().toISOString();
+    const { error: insertError } = await supabase.from("document_batches").insert({
+      anthropic_batch_id: batch.id,
+      status: "in_progress",
+      document_count: prepared.length,
+      request_counts: batch.request_counts,
+      dispatch_started_at: dispatchStartedAt,
+      created_at: batchCreatedAt,
+    });
+    if (insertError) throw new Error(insertError.message);
+    await supabase.from("document_jobs").update({ status: "batched", anthropic_batch_id: batch.id, batch_created_at: batchCreatedAt, updated_at: batchCreatedAt, last_error: null })
       .in("id", prepared.map((job) => job.id));
-    for (const job of prepared) {
-      await supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id });
-    }
-    return Response.json({ processed: true, batch_id: batch.id, document_count: prepared.length });
+    await Promise.all(prepared.map((job) => supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id })));
+    return { batchId: batch.id, documentCount: prepared.length };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Erreur OCR inconnue";
-    for (const job of rows ?? []) {
-      if (job.status === "batched") continue;
-      const terminal = (job.attempt_count ?? 0) + 1 >= MAX_ATTEMPTS;
-      await supabase.from("document_jobs").update({ status: terminal ? "failed" : "queued", last_error: message, updated_at: new Date().toISOString() }).eq("id", job.id);
+    await Promise.all((rows ?? []).map(async (job) => {
+      if (job.status === "batched") return;
+      const terminal = (job.attempt_count ?? 0) + 1 >= MAX_ATTEMPTS || !isRetryableProcessingError(error);
+      await supabase.from("document_jobs").update({ status: terminal ? "failed" : "queued", last_error: message.slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", job.id);
       if (terminal) await supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id });
+    }));
+    throw error;
+  }
+}
+
+Deno.serve(async () => {
+  const startedAt = Date.now();
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY")!;
+  const batches: Array<{ batchId: string | null; documentCount: number }> = [];
+
+  try {
+    for (let index = 0; index < MAX_BATCHES_PER_INVOCATION; index++) {
+      const result = await dispatchNextBatch(supabase, anthropicKey);
+      if (!result) break;
+      if (result.documentCount > 0) batches.push(result);
     }
-    return Response.json({ processed: false, error: message }, { status: 503 });
+    return Response.json({
+      processed: batches.length > 0,
+      batches,
+      batch_count: batches.length,
+      document_count: batches.reduce((total, batch) => total + batch.documentCount, 0),
+      duration_ms: Date.now() - startedAt,
+    });
+  } catch (error) {
+    return Response.json({ processed: false, batches, error: error instanceof Error ? error.message : "Erreur OCR inconnue" }, { status: 503 });
   }
 });

@@ -24,6 +24,7 @@ const MAX_FILES = 200;
 const MAX_ARCHIVE_SIZE = 100 * 1024 * 1024;
 const MAX_TOTAL_SIZE = 500 * 1024 * 1024;
 const UPLOAD_CHUNK_SIZE = 5;
+const DIRECT_DOCUMENT_LIMIT = 10;
 const FALLBACK_REFRESH_MS = 60_000;
 const ACTIVE_UPLOAD_STORAGE_KEY = "smem-active-document-job-ids";
 
@@ -47,6 +48,8 @@ async function detectedDocumentType(file: File) {
 }
 
 const statusLabel: Record<DocumentJobStatus, string> = {
+  direct_queued: "Traitement direct en attente",
+  direct_processing: "Extraction directe Claude",
   queued: "En attente",
   uploading_to_claude: "Préparation Claude",
   batched: "Batch Claude en cours",
@@ -281,11 +284,13 @@ export default function UploadPage() {
     setActiveUploadJobIds([]);
     window.localStorage.removeItem(ACTIVE_UPLOAD_STORAGE_KEY);
     const submittedJobIds: string[] = [];
+    const processingMode = files.length <= DIRECT_DOCUMENT_LIMIT ? "direct" : "batch";
 
     try {
       for (let offset = 0; offset < files.length; offset += UPLOAD_CHUNK_SIZE) {
         const chunk = files.slice(offset, offset + UPLOAD_CHUNK_SIZE);
         const formData = new FormData();
+        formData.append("processing_mode", processingMode);
         chunk.forEach((file) => formData.append("files", file));
         const response = await fetch("/api/document-jobs", { method: "POST", body: formData });
         const payload = await response.json();
@@ -298,10 +303,13 @@ export default function UploadPage() {
       setFiles([]);
       await refreshJobs();
 
-      // Démarrage immédiat opportuniste. Supabase Cron reste le filet de sécurité
+      // Démarrage immédiat opportuniste. Les crons restent le filet de sécurité
       // si l'onglet est fermé ou si cette invocation échoue.
       const supabase = createClient();
-      void supabase.functions.invoke("process-document-queue").finally(() => void refreshJobs());
+      const functionName = processingMode === "direct" ? "process-direct-documents" : "process-document-queue";
+      void supabase.functions.invoke(functionName, {
+        body: processingMode === "direct" ? { job_ids: submittedJobIds } : {},
+      }).finally(() => void refreshJobs());
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Erreur réseau.");
     } finally {
@@ -316,7 +324,13 @@ export default function UploadPage() {
     const payload = await response.json();
     if (!response.ok) setError(payload.error ?? "Nouvelle tentative impossible.");
     await refreshJobs();
-    if (response.ok) void createClient().functions.invoke("process-document-queue").finally(() => void refreshJobs());
+    if (response.ok) {
+      const job = jobsRef.current.find((candidate) => candidate.id === jobId);
+      const functionName = job?.processing_mode === "direct" ? "process-direct-documents" : "process-document-queue";
+      void createClient().functions.invoke(functionName, {
+        body: job?.processing_mode === "direct" ? { job_ids: [jobId] } : {},
+      }).finally(() => void refreshJobs());
+    }
   }
 
   const fallbackActiveJobs = jobs.filter((job) => !["needs_review", "completed", "failed"].includes(job.status));
@@ -324,16 +338,19 @@ export default function UploadPage() {
     ? jobs.filter((job) => activeUploadJobIds.includes(job.id))
     : fallbackActiveJobs;
   const activeTrackedJobs = trackedJobs.filter((job) => !["needs_review", "completed", "failed"].includes(job.status));
+  const directFlow = files.length > 0
+    ? files.length <= DIRECT_DOCUMENT_LIMIT
+    : trackedJobs.length > 0 && trackedJobs.every((job) => job.processing_mode === "direct");
   const estimate = activeTrackedJobs.length
     ? estimateRemainingForJobs(activeTrackedJobs, estimationStats, now)
     : estimateForDocumentCount(files.length, estimationStats);
-  const sentToClaude = trackedJobs.filter((job) => ["batched", "processing", "needs_review", "completed"].includes(job.status)).length;
+  const sentToClaude = trackedJobs.filter((job) => ["direct_processing", "batched", "processing", "needs_review", "completed"].includes(job.status)).length;
   const ocrCompleted = trackedJobs.filter((job) => ["needs_review", "completed"].includes(job.status)).length;
   const failedCount = trackedJobs.filter((job) => job.status === "failed").length;
   const trackedTotal = Math.max(trackedJobs.length, submitting ? uploadedCount : 0);
   const progressStages = [
     { label: "Documents reçus", value: trackedTotal },
-    { label: "Envoyés à Claude Batch", value: sentToClaude },
+    { label: directFlow ? "Envoyés à Claude" : "Envoyés à Claude Batch", value: sentToClaude },
     { label: "OCR terminé · prêts à réviser", value: ocrCompleted },
   ];
 
@@ -341,7 +358,7 @@ export default function UploadPage() {
     <div className="mx-auto max-w-3xl px-6 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer des factures</h1>
       <p className="mb-7 text-[13px] text-[var(--kn-text-muted)]">
-        Ajoutez jusqu&apos;à {MAX_FILES} documents. Ils seront regroupés en sous-batches Claude et resteront visibles même si vous quittez cette page.
+        De 1 à {DIRECT_DOCUMENT_LIMIT} documents, l&apos;extraction démarre en mode rapide. Les lots plus grands utilisent Claude Batch et restent visibles même si vous quittez cette page.
       </p>
 
       <div
@@ -401,14 +418,16 @@ export default function UploadPage() {
               <p className="text-sm font-semibold text-[var(--kn-text)]">
                 {activeTrackedJobs.length ? "Traitement en cours" : trackedJobs.length ? "Traitement terminé" : "Estimation avant envoi"}
               </p>
-              {estimate && (
+              {estimate && !directFlow && (
                 <p className="mt-0.5 text-lg font-bold text-[#f97316]">
                   Environ {estimate.minimumMinutes}–{estimate.maximumMinutes} min
                   {activeTrackedJobs.length ? " restantes" : ""}
                 </p>
               )}
               <p className="mt-1 text-xs text-[var(--kn-text-muted)]">
-                {estimationStats?.source === "historical"
+                {directFlow
+                  ? "Traitement direct optimisé pour obtenir rapidement les premiers résultats."
+                  : estimationStats?.source === "historical"
                   ? `Estimation basée sur ${estimationStats.sampleCount} batches terminés récemment.`
                   : "Estimation prudente initiale, recalibrée automatiquement après 5 batches terminés."}
               </p>
@@ -445,7 +464,7 @@ export default function UploadPage() {
         <div className="space-y-2">
           {jobs.map((job) => (
             <div key={job.id} className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
-              {["uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 animate-spin text-[#f97316]" />
+              {["direct_processing", "uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 animate-spin text-[#f97316]" />
                 : job.status === "needs_review" || job.status === "completed" ? <CheckCircle2 className="size-5 text-emerald-600" />
                 : job.status === "failed" ? <AlertCircle className="size-5 text-red-600" /> : <Clock3 className="size-5 text-amber-600" />}
               <div className="min-w-0 flex-1">

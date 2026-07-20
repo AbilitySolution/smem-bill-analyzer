@@ -5,9 +5,14 @@ type BatchLine = {
   custom_id: string;
   result: {
     type: "succeeded" | "errored" | "canceled" | "expired";
-    message?: { content?: Array<{ type: string; input?: unknown }> };
+    message?: { content?: Array<{ type: string; input?: unknown }>; usage?: Record<string, number> };
     error?: { error?: { message?: string }; message?: string };
   };
+};
+
+type BatchRow = {
+  id: string;
+  anthropic_batch_id: string;
 };
 
 function extractionFromResult(line: BatchLine) {
@@ -45,33 +50,28 @@ async function deleteClaudeFile(fileId: string | null, apiKey: string) {
   });
 }
 
-Deno.serve(async () => {
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    { auth: { persistSession: false } },
-  );
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY")!;
-
-  const { data: batch, error: batchError } = await supabase.from("document_batches")
-    .select("*").eq("status", "in_progress").order("created_at").limit(1).maybeSingle();
-  if (batchError) return Response.json({ error: batchError.message }, { status: 500 });
-  if (!batch) return Response.json({ processed: false, message: "Aucun batch actif" });
-
+async function collectBatch(
+  batch: BatchRow,
+  supabase: ReturnType<typeof createClient>,
+  apiKey: string,
+) {
   const statusResponse = await anthropicRequest(`/v1/messages/batches/${batch.anthropic_batch_id}`, apiKey);
   if (!statusResponse.ok) {
     const detail = await statusResponse.text();
     await supabase.from("document_batches").update({ last_error: detail.slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", batch.id);
-    return Response.json({ error: detail }, { status: statusResponse.status });
+    throw new Error(detail);
   }
   const remoteBatch = await statusResponse.json();
-  await supabase.from("document_batches").update({ request_counts: remoteBatch.request_counts, updated_at: new Date().toISOString() }).eq("id", batch.id);
+  const anthropicEndedAt = remoteBatch.ended_at ?? null;
+  await supabase.from("document_batches").update({ request_counts: remoteBatch.request_counts, anthropic_ended_at: anthropicEndedAt, updated_at: new Date().toISOString() }).eq("id", batch.id);
   if (remoteBatch.processing_status !== "ended") {
-    return Response.json({ processed: false, batch_id: batch.anthropic_batch_id, status: remoteBatch.processing_status, request_counts: remoteBatch.request_counts });
+    return { processed: false, batch_id: batch.anthropic_batch_id, status: remoteBatch.processing_status };
   }
 
+  const collectionStartedAt = new Date().toISOString();
+  await supabase.from("document_batches").update({ collection_started_at: collectionStartedAt, updated_at: collectionStartedAt }).eq("id", batch.id);
   const resultsResponse = await anthropicRequest(`/v1/messages/batches/${batch.anthropic_batch_id}/results`, apiKey);
-  if (!resultsResponse.ok) return Response.json({ error: await resultsResponse.text() }, { status: resultsResponse.status });
+  if (!resultsResponse.ok) throw new Error(await resultsResponse.text());
   const jsonl = await resultsResponse.text();
   const lines = jsonl.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as BatchLine);
 
@@ -82,8 +82,12 @@ Deno.serve(async () => {
     if (!job) continue;
     try {
       const extraction = extractionFromResult(line);
+      const resultAvailableAt = new Date().toISOString();
       await supabase.from("document_jobs").update({
-        status: "needs_review", extraction_json: extraction, completed_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_error: null,
+        status: "needs_review", extraction_json: extraction,
+        validation_json: { anthropic_usage: line.result.message?.usage ?? null },
+        completed_at: resultAvailableAt, result_available_at: resultAvailableAt,
+        updated_at: resultAvailableAt, last_error: null,
       }).eq("id", job.id);
       succeeded++;
     } catch (error) {
@@ -92,17 +96,45 @@ Deno.serve(async () => {
       }).eq("id", job.id);
       failed++;
     }
-    await deleteClaudeFile(job.anthropic_file_id, apiKey);
+    await deleteClaudeFile(job.anthropic_file_id, apiKey).catch(() => null);
     await supabase.from("document_jobs").update({ anthropic_file_id: null, updated_at: new Date().toISOString() }).eq("id", job.id);
   }
 
+  const resultAvailableAt = new Date().toISOString();
   await supabase.from("document_batches").update({
     status: failed === lines.length ? "failed" : "ended",
     request_counts: remoteBatch.request_counts,
-    completed_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    anthropic_ended_at: anthropicEndedAt,
+    completed_at: resultAvailableAt,
+    result_available_at: resultAvailableAt,
+    updated_at: resultAvailableAt,
     last_error: failed ? `${failed} document(s) en erreur` : null,
   }).eq("id", batch.id);
 
-  return Response.json({ processed: true, batch_id: batch.anthropic_batch_id, succeeded, failed });
+  return { processed: true, batch_id: batch.anthropic_batch_id, succeeded, failed };
+}
+
+Deno.serve(async () => {
+  const startedAt = Date.now();
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { auth: { persistSession: false } },
+  );
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY")!;
+
+  const { data: batches, error: batchError } = await supabase.from("document_batches")
+    .select("*").eq("status", "in_progress").order("created_at").limit(10);
+  if (batchError) return Response.json({ error: batchError.message }, { status: 500 });
+  if (!batches?.length) return Response.json({ processed: false, message: "Aucun batch actif" });
+
+  const results = await Promise.allSettled((batches as BatchRow[]).map((batch) => collectBatch(batch, supabase, apiKey)));
+  const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+  return Response.json({
+    processed: results.some((result) => result.status === "fulfilled" && result.value.processed),
+    checked: batches.length,
+    results: results.filter((result) => result.status === "fulfilled").map((result) => result.value),
+    errors: failures,
+    duration_ms: Date.now() - startedAt,
+  }, { status: failures.length === batches.length ? 503 : 200 });
 });

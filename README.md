@@ -76,6 +76,13 @@ Les nouveaux imports multiples utilisent une architecture asynchrone :
 
 Le navigateur tente aussi de démarrer le worker immédiatement après un upload. Le Cron garantit que le job sera repris si l'onglet est fermé ou si cette invocation échoue.
 
+### Routage hybride direct / Batch
+
+- De 1 à 10 documents inclus, les jobs utilisent `processing_mode=direct` et l'Edge Function `process-direct-documents`. Elle lance au maximum trois appels Claude Messages simultanés et le cron `process-direct-documents` reprend les jobs si l'invocation du navigateur est interrompue.
+- À partir de 11 documents, les jobs utilisent `processing_mode=batch`, PGMQ et Claude Message Batches.
+- Une invocation du dispatcher peut créer jusqu'à dix sous-batches de cinq documents. Le collecteur vérifie jusqu'à dix batches actifs sans blocage sur le plus ancien.
+- Les timestamps `queued_at`, `dispatch_started_at`, `claude_file_uploaded_at`, `batch_created_at`, `anthropic_ended_at`, `collection_started_at` et `result_available_at` servent à mesurer chaque segment sans lire les données OCR.
+
 ### Suivi en direct et estimation
 
 La page `/upload` charge la liste une fois, puis reçoit les changements de `document_jobs` par Supabase Realtime. Un GET de secours est effectué au maximum une fois par minute pendant un traitement actif, ainsi qu'au retour sur l'onglet ou après une erreur de canal. La migration ajoute déjà `document_jobs` à la publication `supabase_realtime` et les politiques RLS limitent chaque utilisateur à ses propres jobs.
@@ -112,6 +119,39 @@ select vault.create_secret(
 ```
 
 Ces valeurs ne doivent jamais être placées dans une migration ou commitées. La migration programme automatiquement les jobs `dispatch-claude-batches` et `collect-claude-batches` toutes les minutes ; tant que les secrets Vault sont absents, elle n'envoie aucune requête.
+
+Pour déployer le routage hybride sur le projet Supabase lié :
+
+```bash
+npx supabase db push --linked
+npx supabase functions deploy process-direct-documents --project-ref hfihvslrzmlukpjjxdmy
+npx supabase functions deploy process-document-queue --project-ref hfihvslrzmlukpjjxdmy
+npx supabase functions deploy collect-document-batches --project-ref hfihvslrzmlukpjjxdmy
+```
+
+Vérifiez toujours que `supabase/.temp/project-ref` contient la référence staging avant ces commandes.
+
+### Benchmark direct / Batch
+
+Le script `scripts/benchmark-document-processing.mjs` exécute par défaut trois répétitions : direct pour 3, 5 et 10 documents, puis Batch pour 3, 5, 10 et 20 documents. Utilisez exclusivement un corpus synthétique ou de démonstration non-client.
+
+Variables requises :
+
+```text
+BENCHMARK_EMAIL
+BENCHMARK_PASSWORD
+BENCHMARK_FILES_DIR
+BENCHMARK_BASE_URL=http://localhost:3000
+BENCHMARK_REPETITIONS=3
+```
+
+L'application doit être démarrée avec la branche et les migrations à tester, puis :
+
+```bash
+npm run benchmark:documents
+```
+
+Le script écrit une ligne JSON par exécution. La requête `supabase/benchmarks/document-processing.sql` calcule ensuite les médianes et p95 à partir des timestamps staging. Chaque exécution crée de vrais appels Anthropic payants et doit être lancée avec un budget explicitement validé.
 
 ### Vérification
 

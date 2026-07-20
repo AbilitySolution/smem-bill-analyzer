@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { fallbackEstimateStats, type ProcessingEstimateStats } from "@/lib/document-processing-estimate";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 const ALLOWED_TYPES = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]);
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -56,10 +57,24 @@ async function processingEstimateStats(): Promise<ProcessingEstimateStats> {
 
 export async function POST(request: Request) {
   const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
+  const bearerToken = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const { data: authData } = bearerToken
+    ? await createSupabaseClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        { global: { headers: { Authorization: `Bearer ${bearerToken}` } }, auth: { persistSession: false } },
+      ).auth.getUser(bearerToken)
+    : await supabase.auth.getUser();
   if (!authData.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const formData = await request.formData();
+  const requestedMode = formData.get("processing_mode");
+  const processingMode = requestedMode === "direct" ? "direct" : requestedMode === "batch" ? "batch" : null;
+  if (!processingMode) return NextResponse.json({ error: "Mode de traitement manquant ou invalide." }, { status: 400 });
+  const benchmarkRunId = formData.get("benchmark_run_id");
+  const validBenchmarkRunId = typeof benchmarkRunId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(benchmarkRunId)
+    ? benchmarkRunId
+    : null;
   const files = formData.getAll("files").filter((value): value is File => value instanceof File);
   if (!files.length) return NextResponse.json({ error: "Aucun fichier fourni." }, { status: 400 });
   if (files.length > MAX_FILES) return NextResponse.json({ error: `Maximum ${MAX_FILES} fichiers par envoi.` }, { status: 400 });
@@ -96,7 +111,9 @@ export async function POST(request: Request) {
       original_name: file.name,
       mime_type: file.type,
       file_size: file.size,
-      status: "queued",
+      processing_mode: processingMode,
+      status: processingMode === "direct" ? "direct_queued" : "queued",
+      benchmark_run_id: validBenchmarkRunId,
     }).select("id, original_name, status").single();
 
     if (insertError || !job) {
@@ -104,14 +121,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `${file.name} : ${insertError?.message ?? "création du job impossible"}` }, { status: 500 });
     }
 
-    const { error: queueError } = await admin.rpc("enqueue_document_job", { job_id: job.id });
-    if (queueError) {
-      await admin.from("document_jobs").update({ status: "failed", last_error: queueError.message }).eq("id", job.id);
+    if (processingMode === "batch") {
+      const { error: queueError } = await admin.rpc("enqueue_document_job", { job_id: job.id });
+      if (queueError) {
+        await admin.from("document_jobs").update({ status: "failed", last_error: queueError.message }).eq("id", job.id);
+      }
     }
     jobs.push(job);
   }
 
-  return NextResponse.json({ jobs }, { status: 202 });
+  return NextResponse.json({ jobs, processing_mode: processingMode }, { status: 202 });
 }
 
 export async function GET() {
@@ -121,7 +140,7 @@ export async function GET() {
 
   const [{ data, error }, estimation] = await Promise.all([
     supabase.from("document_jobs")
-      .select("id, original_name, mime_type, file_size, status, attempt_count, last_error, created_at, updated_at, processed_invoice_id, anthropic_batch_id")
+      .select("id, original_name, mime_type, file_size, status, processing_mode, attempt_count, last_error, created_at, updated_at, queued_at, dispatch_started_at, claude_file_uploaded_at, batch_created_at, result_available_at, started_at, completed_at, processed_invoice_id, anthropic_batch_id")
       .order("created_at", { ascending: false })
       .limit(200),
     processingEstimateStats(),
