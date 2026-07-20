@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   Search, Download, Building2, Lightbulb, ChevronsUpDown, ChevronUp, ChevronDown,
   ChevronRight, Layers, List, LayoutGrid, Columns3, FileText,
-  Check, Eye, EyeOff, Zap, Euro, CalendarRange, Hash, AlertTriangle,
+  Check, Eye, EyeOff, Zap, Euro, CalendarRange, CalendarDays, Hash, AlertTriangle, X,
 } from "lucide-react";
 import type { InvoiceDoc } from "@/lib/data/invoices";
 import { downloadCsv } from "@/lib/csv";
@@ -13,6 +13,7 @@ import { loadResolved, anomalyKey } from "@/lib/data/anomalies";
 import { SelectionBar } from "./selection-bar";
 import { DocumentCard } from "./document-card";
 import { ColumnsView } from "./columns-view";
+import { CalendarView, type PeriodFilter } from "./calendar-view";
 import { ConfidenceBadge } from "./confidence-badge";
 import { AnomalyTicker } from "./anomaly-ticker";
 
@@ -26,12 +27,13 @@ const frDate = (d: string) => { const [y, m, j] = d.split("-"); return `${j}/${m
 type SortKey = "date" | "number" | "site" | "commune" | "kwh" | "totalTtc";
 type CatFilter = "all" | "batiment" | "eclairage_public";
 type GroupBy = "none" | "commune" | "site" | "categorie";
-type View = "liste" | "galerie" | "colonnes";
+type View = "liste" | "galerie" | "colonnes" | "calendrier";
 
 const VIEWS: { id: View; label: string; icon: typeof List }[] = [
   { id: "liste", label: "Liste", icon: List },
   { id: "galerie", label: "Galerie", icon: LayoutGrid },
   { id: "colonnes", label: "Colonnes", icon: Columns3 },
+  { id: "calendrier", label: "Calendrier", icon: CalendarDays },
 ];
 
 export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: boolean }) {
@@ -45,6 +47,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
   const [showArchived, setShowArchived] = useState(false);
   const [onlyAnomalies, setOnlyAnomalies] = useState(false);
   const [resolved, setResolved] = useState<Set<string>>(new Set());
+  const [periodFilter, setPeriodFilter] = useState<PeriodFilter | null>(null);
 
   useEffect(() => { setResolved(loadResolved()); }, []);
 
@@ -54,14 +57,21 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
   const archivedCount = useMemo(() => docs.filter((d) => d.archived).length, [docs]);
   const anomalyCount = useMemo(() => docs.filter((d) => !d.archived && hasAnomaly(d)).length, [docs, resolved]);
 
-  const rows = useMemo(() => {
+  // Périmètre filtré hors période (alimente la vue Calendrier, qui doit voir toute l'année).
+  const scoped = useMemo(() => {
     const q = query.toLowerCase();
-    const list = docs.filter(
+    return docs.filter(
       (d) => (showArchived ? true : !d.archived) &&
         (cat === "all" || d.categorie === cat) &&
         (!onlyAnomalies || hasAnomaly(d)) &&
         (d.number.toLowerCase().includes(q) || d.site.toLowerCase().includes(q) || d.commune.toLowerCase().includes(q)),
     );
+  }, [docs, query, cat, showArchived, onlyAnomalies, resolved]);
+
+  const rows = useMemo(() => {
+    const list = periodFilter
+      ? scoped.filter((d) => d.date >= periodFilter.from && d.date <= periodFilter.to)
+      : scoped;
     return [...list].sort((a, b) => {
       let c = 0;
       if (sort.key === "number") c = a.number.localeCompare(b.number);
@@ -72,7 +82,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
       else c = a.date.localeCompare(b.date);
       return c * sort.dir;
     });
-  }, [docs, query, cat, sort, showArchived, onlyAnomalies, resolved]);
+  }, [scoped, periodFilter, sort]);
 
   const groupKey = (d: InvoiceDoc) => (groupBy === "commune" ? d.commune : groupBy === "site" ? d.site : catLabel(d.categorie));
   const groups = useMemo(() => {
@@ -94,6 +104,9 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
 
   const toggleSort = (key: SortKey) => setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
   const toggleGroup = (k: string) => setCollapsed((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+
+  // Depuis la vue Calendrier : filtre la liste sur la période choisie et bascule en vue Liste.
+  const pickPeriod = (p: PeriodFilter) => { setPeriodFilter(p); setView("liste"); };
 
   const toggleSel = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const setMany = (ids: string[], on: boolean) => setSelected((s) => { const n = new Set(s); ids.forEach((id) => (on ? n.add(id) : n.delete(id))); return n; });
@@ -229,6 +242,17 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
             ))}
           </div>
 
+          {periodFilter && (
+            <button
+              onClick={() => setPeriodFilter(null)}
+              title="Retirer le filtre de période"
+              className="flex items-center gap-1.5 rounded-lg border border-[#f97316] bg-[var(--kn-yellow-soft)] px-2.5 py-1.5 text-[13px] font-medium text-[#9a3412] transition-colors hover:bg-[#fed7aa]"
+            >
+              <CalendarDays className="size-3.5" /> {periodFilter.label}
+              <X className="size-3.5" />
+            </button>
+          )}
+
           <div className="relative min-w-[200px] flex-1 max-w-xs">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--kn-text-muted)]" strokeWidth={1.75} />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher (n°, site, commune)"
@@ -275,7 +299,9 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
 
       {/* Contenu */}
       <div className={cx("min-h-0 flex-1 px-8 pb-24", scroll)}>
-        {rows.length === 0 ? (
+        {view === "calendrier" ? (
+          <CalendarView docs={scoped} onPick={pickPeriod} />
+        ) : rows.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--kn-text-muted)]">
             <FileText className="size-8" strokeWidth={1.4} />
             <p className="text-[13px]">Aucune facture ne correspond.</p>
