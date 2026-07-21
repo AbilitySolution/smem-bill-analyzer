@@ -85,6 +85,8 @@ export default function UploadPage() {
   const [estimationStats, setEstimationStats] = useState<ProcessingEstimateStats | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>("connecting");
   const [activeUploadJobIds, setActiveUploadJobIds] = useState<string[]>([]);
+  const [selectedReviewJobIds, setSelectedReviewJobIds] = useState<Set<string>>(new Set());
+  const [deletingReviewJobs, setDeletingReviewJobs] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const jobsRef = useRef<DocumentJob[]>([]);
   const [autoResult, setAutoResult] = useState<{ autoSaved: AutoSavedEntry[]; toReview: ToReviewEntry[]; duplicates: DuplicateEntry[] }>({ autoSaved: [], toReview: [], duplicates: [] });
@@ -356,6 +358,45 @@ export default function UploadPage() {
     await refreshJobs();
   }
 
+  function toggleReviewJob(jobId: string) {
+    setSelectedReviewJobIds((current) => {
+      const next = new Set(current);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
+      return next;
+    });
+  }
+
+  async function deleteSelectedReviewJobs() {
+    const ids = [...selectedReviewJobIds];
+    if (!ids.length) return;
+    if (!window.confirm(`Supprimer ${ids.length} facture${ids.length > 1 ? "s" : ""} à réviser ? Les extractions seront perdues.`)) return;
+
+    setDeletingReviewJobs(true);
+    setError(null);
+    const results = await Promise.all(ids.map(async (jobId) => {
+      try {
+        const response = await fetch(`/api/document-jobs/${jobId}`, { method: "DELETE" });
+        return { jobId, deleted: response.ok };
+      } catch {
+        return { jobId, deleted: false };
+      }
+    }));
+    const deletedIds = results.filter(({ deleted }) => deleted).map(({ jobId }) => jobId);
+    const failedCount = results.length - deletedIds.length;
+
+    setSelectedReviewJobIds((current) => {
+      const next = new Set(current);
+      deletedIds.forEach((id) => next.delete(id));
+      return next;
+    });
+    setActiveUploadJobIds((current) => current.filter((id) => !deletedIds.includes(id)));
+    deletedIds.forEach((id) => autoProcessedRef.current.delete(id));
+    if (failedCount) setError(`${failedCount} suppression${failedCount > 1 ? "s ont" : " a"} échoué. Veuillez réessayer.`);
+    await refreshJobs();
+    setDeletingReviewJobs(false);
+  }
+
   const TERMINAL_STATUSES = ["needs_review", "completed", "failed", "rejected_non_invoice"];
   const fallbackActiveJobs = jobs.filter((job) => !TERMINAL_STATUSES.includes(job.status));
   // File de traitement : uniquement ce qui reste à traiter/réviser. Un job terminé = facture
@@ -535,9 +576,22 @@ export default function UploadPage() {
       )}
 
       <div className="mt-8">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold text-[var(--kn-text)]">File de traitement</h2>
-          <button onClick={() => void refreshJobs()} className="flex items-center gap-1 text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]"><RefreshCw className="size-3.5" />Actualiser</button>
+          <div className="flex items-center gap-2">
+            {selectedReviewJobIds.size > 0 && (
+              <button
+                type="button"
+                disabled={deletingReviewJobs}
+                onClick={() => void deleteSelectedReviewJobs()}
+                className="flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deletingReviewJobs ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                Supprimer ({selectedReviewJobIds.size})
+              </button>
+            )}
+            <button onClick={() => void refreshJobs()} className="flex items-center gap-1 text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]"><RefreshCw className="size-3.5" />Actualiser</button>
+          </div>
         </div>
         <div className="space-y-2">
           {queueJobs.map((job) => (
@@ -557,7 +611,20 @@ export default function UploadPage() {
               {job.status === "needs_review" && <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white">Réviser</button>}
               {job.status === "failed" && <button onClick={() => void retry(job.id)} className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>}
               {job.status === "rejected_non_invoice" && <button onClick={() => void retry(job.id)} title="Le document a été jugé non-facture par erreur : relancez pour forcer l'extraction complète." className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Traiter quand même</button>}
-              <button onClick={() => void deleteJob(job.id)} title="Supprimer de la file" aria-label="Supprimer de la file" className="rounded-lg p-1.5 text-[var(--kn-text-muted)] transition-colors hover:bg-[#fef2f2] hover:text-[#b91c1c]"><Trash2 className="size-4" /></button>
+              {job.status === "needs_review" ? (
+                <button
+                  type="button"
+                  onClick={() => toggleReviewJob(job.id)}
+                  aria-pressed={selectedReviewJobIds.has(job.id)}
+                  title={selectedReviewJobIds.has(job.id) ? "Retirer de la sélection" : "Sélectionner pour suppression"}
+                  aria-label={selectedReviewJobIds.has(job.id) ? `Retirer ${job.original_name} de la sélection` : `Sélectionner ${job.original_name} pour suppression`}
+                  className={`rounded-lg p-1.5 transition-colors ${selectedReviewJobIds.has(job.id) ? "bg-red-600 text-white" : "text-[var(--kn-text-muted)] hover:bg-[#fef2f2] hover:text-[#b91c1c]"}`}
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              ) : (
+                <button onClick={() => void deleteJob(job.id)} title="Supprimer de la file" aria-label="Supprimer de la file" className="rounded-lg p-1.5 text-[var(--kn-text-muted)] transition-colors hover:bg-[#fef2f2] hover:text-[#b91c1c]"><Trash2 className="size-4" /></button>
+              )}
             </div>
           ))}
           {!queueJobs.length && <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">Aucun document dans la file.</div>}
