@@ -29,7 +29,7 @@ const MAX_FILES = 200;
 const MAX_ARCHIVE_SIZE = 100 * 1024 * 1024;
 const MAX_TOTAL_SIZE = 500 * 1024 * 1024;
 const UPLOAD_CHUNK_SIZE = 5;
-const DIRECT_DOCUMENT_LIMIT = 10;
+const DIRECT_DOCUMENT_LIMIT = 20;
 const FALLBACK_REFRESH_MS = 60_000;
 const ACTIVE_UPLOAD_STORAGE_KEY = "smem-active-document-job-ids";
 
