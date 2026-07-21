@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { AlertCircle, Archive, CheckCircle2, Clock3, ExternalLink, FileText, FolderOpen, Loader2, RefreshCw, Undo2, UploadCloud, X } from "lucide-react";
+import { AlertCircle, Archive, CheckCircle2, Clock3, ExternalLink, FileText, FolderOpen, Loader2, RefreshCw, Trash2, UploadCloud, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
   estimateForDocumentCount,
@@ -53,12 +53,12 @@ async function detectedDocumentType(file: File) {
 }
 
 const statusLabel: Record<DocumentJobStatus, string> = {
-  direct_queued: "Traitement direct en attente",
-  direct_processing: "Extraction directe Claude",
+  direct_queued: "En attente",
+  direct_processing: "Extraction en cours",
   queued: "En attente",
-  uploading_to_claude: "Préparation Claude",
-  batched: "Batch Claude en cours",
-  processing: "Extraction OCR",
+  uploading_to_claude: "Préparation",
+  batched: "Extraction en cours",
+  processing: "Extraction en cours",
   needs_review: "À réviser",
   completed: "Terminé",
   failed: "Échec",
@@ -81,7 +81,6 @@ export default function UploadPage() {
   const [now, setNow] = useState(() => Date.now());
   const jobsRef = useRef<DocumentJob[]>([]);
   const [autoResult, setAutoResult] = useState<{ autoSaved: AutoSavedEntry[]; toReview: ToReviewEntry[]; duplicates: DuplicateEntry[] }>({ autoSaved: [], toReview: [], duplicates: [] });
-  const [pendingRollback, setPendingRollback] = useState<{ invoiceIds: string[]; jobIds: string[]; secondsLeft: number } | null>(null);
   const autoProcessedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -341,6 +340,15 @@ export default function UploadPage() {
     }
   }
 
+  async function deleteJob(jobId: string) {
+    if (!window.confirm("Supprimer ce document de la file ? L'extraction sera perdue.")) return;
+    const response = await fetch(`/api/document-jobs/${jobId}`, { method: "DELETE" });
+    if (!response.ok) { const p = await response.json().catch(() => ({})); setError(p.error ?? "Suppression impossible."); return; }
+    setActiveUploadJobIds((cur) => cur.filter((j) => j !== jobId));
+    autoProcessedRef.current.delete(jobId);
+    await refreshJobs();
+  }
+
   const fallbackActiveJobs = jobs.filter((job) => !["needs_review", "completed", "failed"].includes(job.status));
   // File de traitement : uniquement ce qui reste à traiter/réviser. Un job terminé = facture
   // enregistrée (ou doublon déjà en base) → il sort de la file (il reste visible dans Mes documents).
@@ -387,44 +395,15 @@ export default function UploadPage() {
         toReview: [...cur.toReview, ...(data.toReview ?? [])],
         duplicates: [...cur.duplicates, ...(data.duplicates ?? [])],
       }));
-      if (saved.length) {
-        setPendingRollback({
-          invoiceIds: saved.map((e) => e.invoiceId),
-          jobIds: saved.map((e) => e.jobId),
-          secondsLeft: 10,
-        });
-      }
       await refreshJobs();
     })();
   }, [trackedJobs, refreshJobs]);
-
-  // Compte à rebours du bouton Annuler.
-  useEffect(() => {
-    if (!pendingRollback) return;
-    if (pendingRollback.secondsLeft <= 0) { setPendingRollback(null); return; }
-    const t = window.setTimeout(() => setPendingRollback((p) => (p ? { ...p, secondsLeft: p.secondsLeft - 1 } : null)), 1000);
-    return () => window.clearTimeout(t);
-  }, [pendingRollback]);
-
-  async function undoAutoSave() {
-    if (!pendingRollback) return;
-    const { invoiceIds, jobIds } = pendingRollback;
-    setPendingRollback(null);
-    await fetch("/api/document-jobs/rollback", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ invoice_ids: invoiceIds, job_ids: jobIds }),
-    });
-    // Les factures annulées repassent en révision manuelle → on les retire du récap auto.
-    setAutoResult((cur) => ({ ...cur, autoSaved: cur.autoSaved.filter((e) => !invoiceIds.includes(e.invoiceId)) }));
-    await refreshJobs();
-  }
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer des factures</h1>
       <p className="mb-7 text-[13px] text-[var(--kn-text-muted)]">
-        De 1 à {DIRECT_DOCUMENT_LIMIT} documents, l&apos;extraction démarre en mode rapide. Les lots plus grands utilisent Claude Batch et restent visibles même si vous quittez cette page.
+        De 1 à {DIRECT_DOCUMENT_LIMIT} documents, l&apos;extraction démarre en mode rapide. Les lots plus grands sont traités par sous-lots et restent visibles même si vous quittez cette page.
       </p>
 
       <div
@@ -525,15 +504,8 @@ export default function UploadPage() {
             <span className="inline-flex items-center gap-1.5 text-[var(--kn-text-muted)]"><FileText className="size-4" /> {autoResult.duplicates.length} déjà en base</span>
           </div>
 
-          {pendingRollback && pendingRollback.secondsLeft > 0 && (
-            <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-[#f97316] bg-[var(--kn-yellow-soft)] px-3 py-2">
-              <span className="text-[13px] text-[#9a3412]">
-                {pendingRollback.invoiceIds.length} facture{pendingRollback.invoiceIds.length > 1 ? "s" : ""} enregistrée{pendingRollback.invoiceIds.length > 1 ? "s" : ""} automatiquement (badge « à contrôler »).
-              </span>
-              <button onClick={() => void undoAutoSave()} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90">
-                <Undo2 className="size-3.5" /> Annuler ({pendingRollback.secondsLeft} s)
-              </button>
-            </div>
+          {autoResult.autoSaved.length > 0 && (
+            <p className="mt-2 text-xs text-[var(--kn-text-muted)]">Les factures enregistrées automatiquement portent le badge « à contrôler » dans Mes documents.</p>
           )}
 
           {autoResult.duplicates.length > 0 && (
@@ -570,6 +542,7 @@ export default function UploadPage() {
               </div>
               {job.status === "needs_review" && <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white">Réviser</button>}
               {job.status === "failed" && <button onClick={() => void retry(job.id)} className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>}
+              <button onClick={() => void deleteJob(job.id)} title="Supprimer de la file" aria-label="Supprimer de la file" className="rounded-lg p-1.5 text-[var(--kn-text-muted)] transition-colors hover:bg-[#fef2f2] hover:text-[#b91c1c]"><Trash2 className="size-4" /></button>
             </div>
           ))}
           {!queueJobs.length && <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">Aucun document dans la file.</div>}

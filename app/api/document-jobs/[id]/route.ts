@@ -51,3 +51,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   return NextResponse.json({ error: "Action inconnue." }, { status: 400 });
 }
 
+export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const supabase = await createClient();
+  const { data: authData } = await supabase.auth.getUser();
+  if (!authData.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  // Vérifie la propriété avant suppression.
+  const { data: job } = await supabase.from("document_jobs").select("id, created_by").eq("id", id).single();
+  if (!job) return NextResponse.json({ error: "Job introuvable." }, { status: 404 });
+  if (job.created_by !== authData.user.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  const admin = createAdminClient();
+  const { error } = await admin.from("document_jobs").delete().eq("id", id);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ success: true });
+}
+

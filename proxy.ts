@@ -26,6 +26,7 @@ export async function proxy(request: NextRequest) {
   const { data } = await supabase.auth.getUser();
   const isPublic =
     request.nextUrl.pathname.startsWith("/login") ||
+    request.nextUrl.pathname.startsWith("/preview-upload") ||
     request.nextUrl.pathname.startsWith("/depot/") ||
     request.nextUrl.pathname === "/api/document-jobs";
 
