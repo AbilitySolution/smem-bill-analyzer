@@ -12,6 +12,7 @@ const saveRequestSchema = z.object({
   new_site_categorie: z.enum(["batiment", "eclairage_public"]).optional(),
   override_comment: z.string().min(1).optional(),
   override_flag_anomaly: z.boolean().optional(),
+  auto_saved: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
@@ -30,7 +31,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly } = parsed.data;
+  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly, auto_saved } = parsed.data;
 
   if (!site_id && !commune_id) {
     return NextResponse.json({ error: "Commune non détectée — sélectionnez-la manuellement." }, { status: 400 });
@@ -44,58 +45,33 @@ export async function POST(request: Request) {
     if (error || !data) return NextResponse.json({ error: "Site introuvable." }, { status: 400 });
     site = data;
   } else {
-    {
-      // Fuzzy match against existing sites in the commune by normalized meaningful keywords
-      const categorie = (new_site_categorie ?? extraction.categorie_hint ?? "batiment") as "batiment" | "eclairage_public";
-      const nom = extraction.contract.espace_livraison?.trim() || extraction.client.nom || "Nouveau site";
+    // Le site d'une facture = son propre espace de livraison extrait. AUCUN matching flou et AUCUN
+    // héritage du site du contrat (source des faux sites, ex. contrat couvrant plusieurs points de
+    // livraison). Correspondance STRICTE (nom normalisé) avec un site existant de la commune pour
+    // éviter les doublons ; sinon création d'un site portant exactement ce nom.
+    const categorie = (new_site_categorie ?? extraction.categorie_hint ?? "batiment") as "batiment" | "eclairage_public";
+    const nom = extraction.contract.espace_livraison?.trim() || extraction.client.nom || "Nouveau site";
 
-      // Words that appear in almost every site name — useless for deduplication
-      const SITE_STOP = new Set([
-        "eclairage", "public", "ep", "armoire", "candelabre", "luminaire", "voirie",
-        "route", "rue", "impasse", "chemin", "allee", "boulevard", "avenue", "rte", "av",
-        "quartier", "qtr", "section", "lot", "lotissement", "residence", "cite",
-        "de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au", "aux",
-        "par", "sur", "sous", "chez",
-      ]);
+    const normalizeSite = (s: string) =>
+      s.toLowerCase()
+        .normalize("NFD").replace(/\p{Mn}/gu, "")
+        .replace(/[^a-z0-9 ]/g, " ")
+        .replace(/\s+/g, " ").trim();
 
-      const normalizeSite = (s: string) =>
-        s.toLowerCase()
-          .normalize("NFD").replace(/\p{Mn}/gu, "")
-          .replace(/\bste\b/g, "saint")
-          .replace(/\bst\b/g, "saint")
-          .replace(/\bsainte\b/g, "saint")
-          .replace(/\bgde?\b/g, "grand")
-          .replace(/[^a-z0-9 ]/g, " ")
-          .replace(/\s+/g, " ").trim();
+    const { data: sitesInCommune } = await supabase.from("sites").select("id, nom, commune_id, categorie")
+      .eq("commune_id", commune_id!);
 
-      const siteKeywords = (s: string) =>
-        normalizeSite(s).split(" ").filter((w) => w.length > 2 && !SITE_STOP.has(w));
+    const target = normalizeSite(nom);
+    const matched = target ? (sitesInCommune ?? []).find((s) => normalizeSite(s.nom) === target) : undefined;
 
-      const { data: sitesInCommune } = await supabase.from("sites").select("id, nom, commune_id, categorie")
-        .eq("commune_id", commune_id!);
-
-      const nkw = siteKeywords(nom);
-      const matched = nkw.length > 0
-        ? (sitesInCommune ?? []).find((s) => {
-            const skw = siteKeywords(s.nom);
-            if (skw.length === 0) return false;
-            // exact normalized match
-            if (normalizeSite(s.nom) === normalizeSite(nom)) return true;
-            // keyword overlap: ≥50% of the shorter keyword list found in the other
-            const overlap = nkw.filter((w) => skw.includes(w)).length;
-            return overlap / Math.min(nkw.length, skw.length) >= 0.5;
-          })
-        : undefined;
-
-      if (matched) {
-        site = matched;
-      } else {
-        const { data: newSite, error: siteErr } = await supabase.from("sites")
-          .insert({ commune_id: commune_id!, categorie, nom, pdl: null })
-          .select("id, commune_id, categorie").single();
-        if (siteErr || !newSite) return NextResponse.json({ error: `Création site: ${siteErr?.message}` }, { status: 500 });
-        site = newSite;
-      }
+    if (matched) {
+      site = matched;
+    } else {
+      const { data: newSite, error: siteErr } = await supabase.from("sites")
+        .insert({ commune_id: commune_id!, categorie, nom, pdl: null })
+        .select("id, commune_id, categorie").single();
+      if (siteErr || !newSite) return NextResponse.json({ error: `Création site: ${siteErr?.message}` }, { status: 500 });
+      site = newSite;
     }
   }
 
@@ -171,7 +147,11 @@ export async function POST(request: Request) {
 
   if (existingInvoice) {
     return NextResponse.json(
-      { error: `Facture ${extraction.invoice.facture_number} déjà enregistrée.` },
+      {
+        error: `Facture ${extraction.invoice.facture_number} déjà enregistrée.`,
+        duplicate: true,
+        existing_invoice_id: existingInvoice.id,
+      },
       { status: 409 },
     );
   }
@@ -197,6 +177,7 @@ export async function POST(request: Request) {
       categorie: site.categorie,
       file_path,
       status: initialStatus,
+      auto_saved: auto_saved ?? false,
       created_by: authData.user.id,
       raw_ocr_json: isOverride
         ? { ...extraction, _override: { comment: override_comment, flag_anomaly: override_flag_anomaly } }

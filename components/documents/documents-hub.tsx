@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   Search, Download, Building2, Lightbulb, ChevronsUpDown, ChevronUp, ChevronDown,
   ChevronRight, Layers, List, LayoutGrid, Columns3, FileText,
-  Check, Eye, EyeOff, Zap, Euro, CalendarRange, CalendarDays, Hash, AlertTriangle, X,
+  Check, Eye, EyeOff, Zap, Euro, CalendarRange, CalendarDays, Hash, AlertTriangle, BadgeCheck, X,
 } from "lucide-react";
 import type { InvoiceDoc } from "@/lib/data/invoices";
 import { downloadCsv } from "@/lib/csv";
@@ -46,6 +46,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showArchived, setShowArchived] = useState(false);
   const [onlyAnomalies, setOnlyAnomalies] = useState(false);
+  const [onlyAutoSaved, setOnlyAutoSaved] = useState(false);
   const [resolved, setResolved] = useState<Set<string>>(new Set());
   const [periodFilter, setPeriodFilter] = useState<PeriodFilter | null>(null);
 
@@ -56,6 +57,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
 
   const archivedCount = useMemo(() => docs.filter((d) => d.archived).length, [docs]);
   const anomalyCount = useMemo(() => docs.filter((d) => !d.archived && hasAnomaly(d)).length, [docs, resolved]);
+  const autoSavedCount = useMemo(() => docs.filter((d) => !d.archived && d.autoSaved).length, [docs]);
 
   // Périmètre filtré hors période (alimente la vue Calendrier, qui doit voir toute l'année).
   const scoped = useMemo(() => {
@@ -64,9 +66,10 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
       (d) => (showArchived ? true : !d.archived) &&
         (cat === "all" || d.categorie === cat) &&
         (!onlyAnomalies || hasAnomaly(d)) &&
+        (!onlyAutoSaved || !!d.autoSaved) &&
         (d.number.toLowerCase().includes(q) || d.site.toLowerCase().includes(q) || d.commune.toLowerCase().includes(q)),
     );
-  }, [docs, query, cat, showArchived, onlyAnomalies, resolved]);
+  }, [docs, query, cat, showArchived, onlyAnomalies, onlyAutoSaved, resolved]);
 
   const rows = useMemo(() => {
     const list = periodFilter
@@ -156,6 +159,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
             {d.number}
           </Link>
           <AnomalyTicker invoiceId={d.id} anomalies={d.anomalies} label={false} />
+          {d.autoSaved && <span title="Enregistrée automatiquement — à contrôler" className="rounded bg-[var(--kn-yellow-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[#9a3412]">à contrôler</span>}
           {d.archived && <span className="rounded bg-[var(--kn-value-box)] px-1.5 text-[10px] text-[var(--kn-text-muted)]">masqué</span>}
         </div>
       </td>
@@ -270,6 +274,14 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
               className={cx("flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-medium transition-colors",
                 onlyAnomalies ? "border-[#f59e0b] bg-[#f59e0b]/10 text-[#b45309]" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
               <AlertTriangle className="size-3.5 text-[#f59e0b]" /> Anomalies ({anomalyCount})
+            </button>
+          )}
+
+          {autoSavedCount > 0 && (
+            <button onClick={() => setOnlyAutoSaved((s) => !s)} title="Factures enregistrées automatiquement — à contrôler"
+              className={cx("flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                onlyAutoSaved ? "border-[#f97316] bg-[var(--kn-yellow-soft)] text-[#9a3412]" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
+              <BadgeCheck className="size-3.5" /> À contrôler ({autoSavedCount})
             </button>
           )}
 

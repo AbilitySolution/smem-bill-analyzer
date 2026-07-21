@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, Archive, CheckCircle2, Clock3, FileText, FolderOpen, Loader2, RefreshCw, UploadCloud, X } from "lucide-react";
+import Link from "next/link";
+import { AlertCircle, Archive, CheckCircle2, Clock3, ExternalLink, FileText, FolderOpen, Loader2, RefreshCw, Undo2, UploadCloud, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
   estimateForDocumentCount,
@@ -10,6 +11,10 @@ import {
   type ProcessingEstimateStats,
 } from "@/lib/document-processing-estimate";
 import type { DocumentJob, DocumentJobStatus } from "@/lib/types/document-job";
+
+type AutoSavedEntry = { jobId: string; invoiceId: string; factureNumber: string };
+type DuplicateEntry = { jobId: string; existingInvoiceId: string; factureNumber: string };
+type ToReviewEntry = { jobId: string; factureNumber: string; reason: string };
 
 const ACCEPTED_TYPES = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]);
 const ACCEPTED_EXTENSIONS = new Map([
@@ -75,6 +80,9 @@ export default function UploadPage() {
   const [activeUploadJobIds, setActiveUploadJobIds] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const jobsRef = useRef<DocumentJob[]>([]);
+  const [autoResult, setAutoResult] = useState<{ autoSaved: AutoSavedEntry[]; toReview: ToReviewEntry[]; duplicates: DuplicateEntry[] }>({ autoSaved: [], toReview: [], duplicates: [] });
+  const [pendingRollback, setPendingRollback] = useState<{ invoiceIds: string[]; jobIds: string[]; secondsLeft: number } | null>(null);
+  const autoProcessedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     folderInputRef.current?.setAttribute("webkitdirectory", "");
@@ -334,6 +342,9 @@ export default function UploadPage() {
   }
 
   const fallbackActiveJobs = jobs.filter((job) => !["needs_review", "completed", "failed"].includes(job.status));
+  // File de traitement : uniquement ce qui reste à traiter/réviser. Un job terminé = facture
+  // enregistrée (ou doublon déjà en base) → il sort de la file (il reste visible dans Mes documents).
+  const queueJobs = jobs.filter((job) => job.status !== "completed");
   const trackedJobs = activeUploadJobIds.length
     ? jobs.filter((job) => activeUploadJobIds.includes(job.id))
     : fallbackActiveJobs;
@@ -344,15 +355,70 @@ export default function UploadPage() {
   const estimate = activeTrackedJobs.length
     ? estimateRemainingForJobs(activeTrackedJobs, estimationStats, now)
     : estimateForDocumentCount(files.length, estimationStats);
-  const sentToClaude = trackedJobs.filter((job) => ["direct_processing", "batched", "processing", "needs_review", "completed"].includes(job.status)).length;
   const ocrCompleted = trackedJobs.filter((job) => ["needs_review", "completed"].includes(job.status)).length;
   const failedCount = trackedJobs.filter((job) => job.status === "failed").length;
   const trackedTotal = Math.max(trackedJobs.length, submitting ? uploadedCount : 0);
-  const progressStages = [
-    { label: "Documents reçus", value: trackedTotal },
-    { label: directFlow ? "Envoyés à Claude" : "Envoyés à Claude Batch", value: sentToClaude },
-    { label: "OCR terminé · prêts à réviser", value: ocrCompleted },
-  ];
+  // Progression unique : part des documents arrivés au bout (OCR terminé ou échec) sur le total.
+  const progressTotal = trackedTotal || trackedJobs.length || 1;
+  const doneCount = Math.min(progressTotal, ocrCompleted + failedCount);
+  const progressPct = Math.min(100, Math.round((doneCount / progressTotal) * 100));
+
+  const hasAutoResult = autoResult.autoSaved.length > 0 || autoResult.toReview.length > 0 || autoResult.duplicates.length > 0;
+
+  // Auto-enregistrement : dès qu'un document de ce lot passe en révision, on tente l'enregistrement
+  // automatique (≥ 96 % extraction ET commune). Le ref évite de retraiter un même job.
+  useEffect(() => {
+    const candidates = trackedJobs
+      .filter((j) => j.status === "needs_review" && !autoProcessedRef.current.has(j.id))
+      .map((j) => j.id);
+    if (!candidates.length) return;
+    candidates.forEach((id) => autoProcessedRef.current.add(id));
+    void (async () => {
+      const res = await fetch("/api/document-jobs/auto-save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ job_ids: candidates }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const saved: AutoSavedEntry[] = data.autoSaved ?? [];
+      setAutoResult((cur) => ({
+        autoSaved: [...cur.autoSaved, ...saved],
+        toReview: [...cur.toReview, ...(data.toReview ?? [])],
+        duplicates: [...cur.duplicates, ...(data.duplicates ?? [])],
+      }));
+      if (saved.length) {
+        setPendingRollback({
+          invoiceIds: saved.map((e) => e.invoiceId),
+          jobIds: saved.map((e) => e.jobId),
+          secondsLeft: 10,
+        });
+      }
+      await refreshJobs();
+    })();
+  }, [trackedJobs, refreshJobs]);
+
+  // Compte à rebours du bouton Annuler.
+  useEffect(() => {
+    if (!pendingRollback) return;
+    if (pendingRollback.secondsLeft <= 0) { setPendingRollback(null); return; }
+    const t = window.setTimeout(() => setPendingRollback((p) => (p ? { ...p, secondsLeft: p.secondsLeft - 1 } : null)), 1000);
+    return () => window.clearTimeout(t);
+  }, [pendingRollback]);
+
+  async function undoAutoSave() {
+    if (!pendingRollback) return;
+    const { invoiceIds, jobIds } = pendingRollback;
+    setPendingRollback(null);
+    await fetch("/api/document-jobs/rollback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ invoice_ids: invoiceIds, job_ids: jobIds }),
+    });
+    // Les factures annulées repassent en révision manuelle → on les retire du récap auto.
+    setAutoResult((cur) => ({ ...cur, autoSaved: cur.autoSaved.filter((e) => !invoiceIds.includes(e.invoiceId)) }));
+    await refreshJobs();
+  }
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
@@ -418,19 +484,18 @@ export default function UploadPage() {
               <p className="text-sm font-semibold text-[var(--kn-text)]">
                 {activeTrackedJobs.length ? "Traitement en cours" : trackedJobs.length ? "Traitement terminé" : "Estimation avant envoi"}
               </p>
-              {estimate && !directFlow && (
+              {estimate && activeTrackedJobs.length > 0 && (
                 <p className="mt-0.5 text-lg font-bold text-[#f97316]">
-                  Environ {estimate.minimumMinutes}–{estimate.maximumMinutes} min
-                  {activeTrackedJobs.length ? " restantes" : ""}
+                  Environ {estimate.minimumMinutes}–{estimate.maximumMinutes} min restantes
                 </p>
               )}
-              <p className="mt-1 text-xs text-[var(--kn-text-muted)]">
-                {directFlow
-                  ? "Traitement direct optimisé pour obtenir rapidement les premiers résultats."
-                  : estimationStats?.source === "historical"
-                  ? `Estimation basée sur ${estimationStats.sampleCount} batches terminés récemment.`
-                  : "Estimation prudente initiale, recalibrée automatiquement après 5 batches terminés."}
-              </p>
+              {!directFlow && (
+                <p className="mt-1 text-xs text-[var(--kn-text-muted)]">
+                  {estimationStats?.source === "historical"
+                    ? `Estimation basée sur ${estimationStats.sampleCount} batches terminés récemment.`
+                    : "Estimation prudente initiale, recalibrée automatiquement après 5 batches terminés."}
+                </p>
+              )}
             </div>
             <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${realtimeStatus === "live" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
               {realtimeStatus === "live" ? "Suivi en direct" : realtimeStatus === "connecting" ? "Connexion au suivi…" : "Reconnexion au suivi…"}
@@ -438,19 +503,50 @@ export default function UploadPage() {
           </div>
 
           {trackedJobs.length > 0 && (
-            <div className="mt-4 space-y-3">
-              {progressStages.map((stage) => (
-                <div key={stage.label}>
-                  <div className="mb-1 flex justify-between text-xs">
-                    <span className="text-[var(--kn-text-muted)]">{stage.label}</span>
-                    <span className="font-semibold text-[var(--kn-text)]">{stage.value}/{trackedTotal || trackedJobs.length}</span>
-                  </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--kn-panel)]">
-                    <div className="h-full rounded-full bg-[#f97316] transition-[width] duration-500" style={{ width: `${trackedTotal ? Math.min(100, (stage.value / trackedTotal) * 100) : 0}%` }} />
-                  </div>
-                </div>
-              ))}
-              {failedCount > 0 && <p className="text-xs font-medium text-red-600">{failedCount} document{failedCount > 1 ? "s" : ""} en échec — vous pouvez les relancer individuellement.</p>}
+            <div className="mt-4">
+              <div className="mb-1.5 flex items-center justify-end text-xs">
+                <span className="font-semibold tabular-nums text-[var(--kn-text)]">{doneCount}/{progressTotal} · {progressPct} %</span>
+              </div>
+              <div className="h-2.5 overflow-hidden rounded-full bg-[var(--kn-panel)]">
+                <div className="h-full rounded-full bg-[#f97316] transition-[width] duration-500" style={{ width: `${progressPct}%` }} />
+              </div>
+              {failedCount > 0 && <p className="mt-2 text-xs font-medium text-red-600">{failedCount} document{failedCount > 1 ? "s" : ""} en échec — vous pouvez les relancer individuellement.</p>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {hasAutoResult && (
+        <div className="mt-4 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
+          <p className="text-sm font-semibold text-[var(--kn-text)]">Résultat du traitement</p>
+          <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1.5 text-[13px]">
+            <span className="inline-flex items-center gap-1.5 text-emerald-700"><CheckCircle2 className="size-4" /> {autoResult.autoSaved.length} enregistrée{autoResult.autoSaved.length > 1 ? "s" : ""} auto</span>
+            <span className="inline-flex items-center gap-1.5 text-amber-700"><Clock3 className="size-4" /> {autoResult.toReview.length} à réviser</span>
+            <span className="inline-flex items-center gap-1.5 text-[var(--kn-text-muted)]"><FileText className="size-4" /> {autoResult.duplicates.length} déjà en base</span>
+          </div>
+
+          {pendingRollback && pendingRollback.secondsLeft > 0 && (
+            <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-[#f97316] bg-[var(--kn-yellow-soft)] px-3 py-2">
+              <span className="text-[13px] text-[#9a3412]">
+                {pendingRollback.invoiceIds.length} facture{pendingRollback.invoiceIds.length > 1 ? "s" : ""} enregistrée{pendingRollback.invoiceIds.length > 1 ? "s" : ""} automatiquement (badge « à contrôler »).
+              </span>
+              <button onClick={() => void undoAutoSave()} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90">
+                <Undo2 className="size-3.5" /> Annuler ({pendingRollback.secondsLeft} s)
+              </button>
+            </div>
+          )}
+
+          {autoResult.duplicates.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">Déjà dans Mes documents</p>
+              <div className="space-y-1">
+                {autoResult.duplicates.map((d) => (
+                  <Link key={d.jobId} href={`/documents/extraction?id=${d.existingInvoiceId}`} className="flex items-center justify-between rounded-lg bg-[var(--kn-panel)] px-3 py-2 text-[13px] hover:bg-[var(--kn-active)]">
+                    <span className="truncate">Facture {d.factureNumber} — déjà enregistrée</span>
+                    <span className="inline-flex shrink-0 items-center gap-1 font-medium text-[#f97316]">Voir <ExternalLink className="size-3.5" /></span>
+                  </Link>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -462,7 +558,7 @@ export default function UploadPage() {
           <button onClick={() => void refreshJobs()} className="flex items-center gap-1 text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]"><RefreshCw className="size-3.5" />Actualiser</button>
         </div>
         <div className="space-y-2">
-          {jobs.map((job) => (
+          {queueJobs.map((job) => (
             <div key={job.id} className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
               {["direct_processing", "uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 animate-spin text-[#f97316]" />
                 : job.status === "needs_review" || job.status === "completed" ? <CheckCircle2 className="size-5 text-emerald-600" />
@@ -476,7 +572,7 @@ export default function UploadPage() {
               {job.status === "failed" && <button onClick={() => void retry(job.id)} className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>}
             </div>
           ))}
-          {!jobs.length && <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">Aucun document dans la file.</div>}
+          {!queueJobs.length && <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">Aucun document dans la file.</div>}
         </div>
       </div>
     </div>

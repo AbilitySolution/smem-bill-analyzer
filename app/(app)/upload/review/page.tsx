@@ -195,6 +195,7 @@ export default function ReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [savedBanner, setSavedBanner] = useState(false);
+  const [duplicateBanner, setDuplicateBanner] = useState(false);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileUrlError, setFileUrlError] = useState(false);
   const [overrideComment, setOverrideComment] = useState("");
@@ -278,7 +279,8 @@ export default function ReviewPage() {
         commune_id: communeId,
         new_site_categorie: categorie,
       };
-      if (ocr.suggested_site_id) body.site_id = ocr.suggested_site_id;
+      // On n'envoie PAS le site suggéré (hérité du contrat) : le serveur résout le site depuis
+      // l'espace de livraison de la facture. Évite les faux sites liés au contrat.
       if (hasOverrideComment) {
         body.override_comment = overrideComment.trim();
         body.override_flag_anomaly = overrideFlagAnomaly ?? false;
@@ -289,6 +291,22 @@ export default function ReviewPage() {
         body: JSON.stringify(body),
       });
       const json = await res.json();
+      // Doublon : la facture existe déjà en base. On sort le job de la file (marqué terminé sur
+      // la facture existante) et on revient à l'upload, au lieu de la laisser traîner dans la file.
+      if (res.status === 409 && json.duplicate) {
+        if (jobId && typeof json.existing_invoice_id === "string") {
+          await fetch(`/api/document-jobs/${jobId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "complete", invoice_id: json.existing_invoice_id }),
+          });
+        }
+        sessionStorage.removeItem("upload_ocr_result");
+        setIsDirty(false);
+        setDuplicateBanner(true);
+        setTimeout(() => router.push("/upload"), 3500);
+        return;
+      }
       if (!res.ok || json.error) { setError(json.error ?? "Erreur enregistrement."); setSaving(false); return; }
       if (jobId) {
         await fetch(`/api/document-jobs/${jobId}`, {
@@ -300,8 +318,8 @@ export default function ReviewPage() {
       sessionStorage.removeItem("upload_ocr_result");
       setIsDirty(false);
       setSavedBanner(true);
-      // Laisser le banner visible 1.5s avant redirect
-      setTimeout(() => router.push("/documents"), 1500);
+      // Laisser le banner visible avant redirect
+      setTimeout(() => router.push("/upload"), 2500);
     } catch {
       setError("Erreur réseau.");
       setSaving(false);
@@ -393,6 +411,12 @@ export default function ReviewPage() {
           {savedBanner && (
             <div role="status" className="mb-4 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 font-semibold">
               <CheckCircle2 className="size-4 shrink-0" /> Facture enregistrée — redirection…
+            </div>
+          )}
+
+          {duplicateBanner && (
+            <div role="status" className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700 font-semibold">
+              <CheckCircle2 className="size-4 shrink-0" /> Facture déjà enregistrée — retour à l&apos;upload…
             </div>
           )}
 

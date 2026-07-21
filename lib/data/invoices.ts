@@ -27,6 +27,7 @@ export interface InvoiceDoc {
   previewUrl?: string | null; // URL signée pour la vignette (générée côté page)
   archived?: boolean;
   confidence?: number | null; // précision modèle moyenne (0-100), null si non disponible
+  autoSaved?: boolean; // enregistrée automatiquement (haute confiance) → badge « à contrôler »
   anomalies?: AnomalyLite[];
   anomalySeverity?: Severity | null;
 }
@@ -54,6 +55,7 @@ interface RawInvoice {
   file_path: string | null;
   archived: boolean | null;
   precision: Record<string, number> | null;
+  auto_saved: boolean | null;
   sites: { nom: string } | null;
   communes: { nom: string } | null;
 }
@@ -102,7 +104,7 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   const invoices = await selectAll<RawInvoice>((from, to) =>
     supabase
       .from("invoices")
-      .select("id, facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, is_duplicata, categorie, file_path, archived, precision, sites(nom), communes(nom)")
+      .select("id, facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, is_duplicata, categorie, file_path, archived, precision, auto_saved, sites(nom), communes(nom)")
       .order("facture_date", { ascending: false })
       .range(from, to),
   );
@@ -170,6 +172,7 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
       filePath: i.file_path ?? null,
       archived: !!i.archived,
       confidence: avgConfidence(i.precision),
+      autoSaved: !!i.auto_saved,
     };
   });
 

@@ -6,6 +6,7 @@ import {
   invoiceExtractionToolSchema,
 } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice } from "@/lib/anthropic/invoice-validation";
+import { matchCommune } from "@/lib/invoices/commune-match";
 
 // Règles générales déplacées en system prompt : plus stables, moins sensibles aux variations de mise en page.
 const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF (électricité) pour des bâtiments publics et points d'éclairage public en France.
@@ -115,79 +116,19 @@ export async function POST(request: Request) {
       );
     }
 
-    // Match commune_hint against canonical list with abbreviation normalization
-    let suggested_commune_id: string | null = null;
-    let suggested_commune_nom: string | null = null;
-    // Build candidate texts to search for commune: hint → espace_livraison → adresse
-    const hintCandidates = [
-      parsed.data.commune_hint,
-      parsed.data.contract.espace_livraison,
-      parsed.data.client.adresse,
-      parsed.data.client.nom,
-    ].filter(Boolean) as string[];
+    // Rapprochement de commune (lib partagée). Suggestion retenue si score ≥ 0.5.
+    const { data: allCommunes } = await supabase.from("communes").select("id, nom");
+    const communeMatch = matchCommune(
+      [parsed.data.commune_hint, parsed.data.contract.espace_livraison, parsed.data.client.adresse, parsed.data.client.nom],
+      allCommunes ?? [],
+    );
+    const suggested_commune_id = communeMatch && communeMatch.score >= 0.5 ? communeMatch.id : null;
+    const suggested_commune_nom = communeMatch && communeMatch.score >= 0.5 ? communeMatch.nom : null;
 
-    if (hintCandidates.length) {
-      const { data: allCommunes } = await supabase.from("communes").select("id, nom");
-      if (allCommunes?.length) {
-        // Normalize: expand abbrevs, neutralize saint/sainte gender, strip accents/punct
-        const COMM_STOP = new Set(["de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au"]);
-        const normalizeComm = (s: string) =>
-          s.toLowerCase()
-            .normalize("NFD").replace(/\p{Mn}/gu, "")
-            .replace(/\bste\b/g, "sainte")
-            .replace(/\bst\b/g, "saint")
-            .replace(/\bsainte\b/g, "saint") // neutralize gender: saint == sainte
-            .replace(/\bgde?\b/g, "grand")
-            .replace(/\bgrande\b/g, "grand")
-            .replace(/[^a-z0-9 ]/g, " ")
-            .replace(/\s+/g, " ").trim();
-
-        const meaningfulWords = (normalized: string) =>
-          normalized.split(" ").filter((w) => w.length > 1 && !COMM_STOP.has(w));
-
-        const scoreOne = (candidate: string, communeNom: string) => {
-          const nc = normalizeComm(candidate);
-          const nn = normalizeComm(communeNom);
-          // Exact / substring match
-          if (nc === nn || nc.includes(nn) || nn.includes(nc)) return 100;
-          // Word-overlap on meaningful words only (ignore stop words)
-          const cWords = new Set(meaningfulWords(nc));
-          const nWords = meaningfulWords(nn);
-          if (nWords.length === 0) return 0;
-          const matches = nWords.filter((w) => cWords.has(w)).length;
-          return matches / nWords.length;
-        };
-
-        let bestScore = 0;
-        let best: { id: string; nom: string } | null = null;
-        for (const c of allCommunes) {
-          const s = Math.max(...hintCandidates.map((h) => scoreOne(h, c.nom)));
-          if (s > bestScore) { bestScore = s; best = c; }
-        }
-        if (best && bestScore >= 0.5) {
-          suggested_commune_id = best.id;
-          suggested_commune_nom = best.nom;
-        }
-      }
-    }
-
-    // Lookup existing site by contract_number within the matched commune
-    let suggested_site_id: string | null = null;
-    let suggested_site_nom: string | null = null;
-    const contractNumber = parsed.data.contract.contract_number;
-    if (suggested_commune_id && contractNumber) {
-      const { data: existingContract } = await supabase
-        .from("contracts")
-        .select("site_id, sites(id, nom, commune_id)")
-        .eq("contract_number", contractNumber)
-        .maybeSingle();
-      const rawSite = existingContract?.sites;
-      const contractSite = Array.isArray(rawSite) ? rawSite[0] : rawSite;
-      if (contractSite && (contractSite as { commune_id: string }).commune_id === suggested_commune_id) {
-        suggested_site_id = (contractSite as { id: string }).id;
-        suggested_site_nom = (contractSite as { nom: string }).nom;
-      }
-    }
+    // Le site n'est plus hérité du contrat (source de faux sites) : il est résolu à l'enregistrement
+    // depuis l'espace de livraison de la facture.
+    const suggested_site_id: string | null = null;
+    const suggested_site_nom: string | null = null;
 
     const validation = validateInvoice(parsed.data);
 

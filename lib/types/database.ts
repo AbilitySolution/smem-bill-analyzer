@@ -85,6 +85,7 @@ export interface Invoice {
   status: InvoiceStatus;
   archived: boolean;
   precision: Record<string, number> | null;
+  auto_saved: boolean;
   created_by: string | null;
   created_at: string;
 }
