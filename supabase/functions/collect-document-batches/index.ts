@@ -1,5 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { deleteDocument } from "../_shared/ai-client.ts";
+import { toUserSafeError } from "../_shared/ai-error.ts";
 
 type BatchLine = {
   custom_id: string;
@@ -17,10 +19,10 @@ type BatchRow = {
 
 function extractionFromResult(line: BatchLine) {
   if (line.result.type !== "succeeded") {
-    throw new Error(line.result.error?.error?.message ?? line.result.error?.message ?? `Résultat Claude ${line.result.type}`);
+    throw new Error(line.result.error?.error?.message ?? line.result.error?.message ?? `Résultat d'extraction ${line.result.type}`);
   }
   const toolUse = line.result.message?.content?.find((block) => block.type === "tool_use");
-  if (!toolUse?.input || typeof toolUse.input !== "object") throw new Error("Claude n'a pas retourné d'extraction structurée.");
+  if (!toolUse?.input || typeof toolUse.input !== "object") throw new Error("L'extraction structurée n'a pas été retournée.");
   const value = toolUse.input as Record<string, unknown>;
   for (const key of ["client", "contract", "invoice", "fixed_charges", "consumption_lines", "taxes"]) {
     if (!(key in value)) throw new Error(`Extraction incomplète : ${key} est absent.`);
@@ -28,20 +30,8 @@ function extractionFromResult(line: BatchLine) {
   return value;
 }
 
-async function anthropicRequest(path: string, apiKey: string) {
+async function aiStatusRequest(path: string, apiKey: string) {
   return fetch(`https://api.anthropic.com${path}`, {
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "files-api-2025-04-14",
-    },
-  });
-}
-
-async function deleteClaudeFile(fileId: string | null, apiKey: string) {
-  if (!fileId) return;
-  await fetch(`https://api.anthropic.com/v1/files/${fileId}`, {
-    method: "DELETE",
     headers: {
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
@@ -55,10 +45,12 @@ async function collectBatch(
   supabase: ReturnType<typeof createClient>,
   apiKey: string,
 ) {
-  const statusResponse = await anthropicRequest(`/v1/messages/batches/${batch.anthropic_batch_id}`, apiKey);
+  const statusResponse = await aiStatusRequest(`/v1/messages/batches/${batch.anthropic_batch_id}`, apiKey);
   if (!statusResponse.ok) {
     const detail = await statusResponse.text();
-    await supabase.from("document_batches").update({ last_error: detail.slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", batch.id);
+    const { userMessage, logMessage } = toUserSafeError(new Error(detail));
+    console.error(`[collect-document-batches] batch ${batch.anthropic_batch_id} status error:`, logMessage);
+    await supabase.from("document_batches").update({ last_error: userMessage.slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", batch.id);
     throw new Error(detail);
   }
   const remoteBatch = await statusResponse.json();
@@ -70,7 +62,7 @@ async function collectBatch(
 
   const collectionStartedAt = new Date().toISOString();
   await supabase.from("document_batches").update({ collection_started_at: collectionStartedAt, updated_at: collectionStartedAt }).eq("id", batch.id);
-  const resultsResponse = await anthropicRequest(`/v1/messages/batches/${batch.anthropic_batch_id}/results`, apiKey);
+  const resultsResponse = await aiStatusRequest(`/v1/messages/batches/${batch.anthropic_batch_id}/results`, apiKey);
   if (!resultsResponse.ok) throw new Error(await resultsResponse.text());
   const jsonl = await resultsResponse.text();
   const lines = jsonl.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as BatchLine);
@@ -91,12 +83,14 @@ async function collectBatch(
       }).eq("id", job.id);
       succeeded++;
     } catch (error) {
+      const { userMessage, logMessage } = toUserSafeError(error);
+      console.error(`[collect-document-batches] job ${job.id} failed:`, logMessage);
       await supabase.from("document_jobs").update({
-        status: "failed", last_error: error instanceof Error ? error.message : "Résultat batch invalide", updated_at: new Date().toISOString(),
+        status: "failed", last_error: userMessage, updated_at: new Date().toISOString(),
       }).eq("id", job.id);
       failed++;
     }
-    await deleteClaudeFile(job.anthropic_file_id, apiKey).catch(() => null);
+    await deleteDocument(job.anthropic_file_id, apiKey);
     await supabase.from("document_jobs").update({ anthropic_file_id: null, updated_at: new Date().toISOString() }).eq("id", job.id);
   }
 
@@ -129,7 +123,7 @@ Deno.serve(async () => {
   if (!batches?.length) return Response.json({ processed: false, message: "Aucun batch actif" });
 
   const results = await Promise.allSettled((batches as BatchRow[]).map((batch) => collectBatch(batch, supabase, apiKey)));
-  const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+  const failures = results.filter((result) => result.status === "rejected").map((result) => toUserSafeError(result.status === "rejected" ? result.reason : null).userMessage);
   return Response.json({
     processed: results.some((result) => result.status === "fulfilled" && result.value.processed),
     checked: batches.length,

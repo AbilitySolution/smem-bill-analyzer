@@ -453,7 +453,7 @@ export default function UploadPage() {
     <div className="mx-auto max-w-3xl px-6 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer des factures</h1>
       <p className="mb-7 text-[13px] text-[var(--kn-text-muted)]">
-        De 1 à {DIRECT_DOCUMENT_LIMIT} documents, l&apos;extraction démarre en mode rapide. Les lots plus grands sont traités par sous-lots et restent visibles même si vous quittez cette page.
+        De 1 à {DIRECT_DOCUMENT_LIMIT}{" "}documents, l&apos;extraction démarre en mode rapide. Les lots plus grands sont traités par sous-lots et restent visibles même si vous quittez cette page.
       </p>
 
       <div
