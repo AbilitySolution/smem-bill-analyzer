@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   Search, Download, Building2, Lightbulb, ChevronsUpDown, ChevronUp, ChevronDown,
   ChevronRight, Layers, List, LayoutGrid, Columns3, FileText,
-  Check, Eye, EyeOff, Zap, Euro, CalendarRange, CalendarDays, Hash, AlertTriangle, BadgeCheck, X,
+  Check, Eye, EyeOff, Zap, Euro, CalendarRange, CalendarDays, Hash, AlertTriangle, BadgeCheck, UploadCloud, X,
 } from "lucide-react";
 import type { InvoiceDoc } from "@/lib/data/invoices";
 import { downloadCsv } from "@/lib/csv";
@@ -303,7 +303,11 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
             </button>
           )}
 
-          <button onClick={exportCsv} className="ml-auto flex items-center gap-1.5 rounded-lg bg-[var(--kn-solid)] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90">
+          <Link href="/upload" className="ml-auto flex items-center gap-1.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-3 py-1.5 text-[13px] font-medium text-[var(--kn-text)] transition-colors hover:border-[#f97316] hover:bg-[var(--kn-active)]">
+            <UploadCloud className="size-3.5" /> Importer des documents
+          </Link>
+
+          <button onClick={exportCsv} className="flex items-center gap-1.5 rounded-lg bg-[var(--kn-solid)] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90">
             <Download className="size-3.5" /> Exporter CSV
           </button>
         </div>
