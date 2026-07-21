@@ -62,6 +62,13 @@ const statusLabel: Record<DocumentJobStatus, string> = {
   needs_review: "À réviser",
   completed: "Terminé",
   failed: "Échec",
+  rejected_non_invoice: "Ignoré (pas une facture)",
+};
+
+const prefilterTypeLabel: Record<string, string> = {
+  bordereau_recapitulatif: "bordereau récapitulatif",
+  autre: "document non reconnu comme facture",
+  facture: "facture",
 };
 
 export default function UploadPage() {
@@ -149,7 +156,7 @@ export default function UploadPage() {
     })();
 
     const fallbackTimer = window.setInterval(() => {
-      const hasActiveJobs = jobsRef.current.some((job) => !["needs_review", "completed", "failed"].includes(job.status));
+      const hasActiveJobs = jobsRef.current.some((job) => !["needs_review", "completed", "failed", "rejected_non_invoice"].includes(job.status));
       if (document.visibilityState === "visible" && hasActiveJobs) void refreshJobs();
     }, FALLBACK_REFRESH_MS);
     const clockTimer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -349,14 +356,15 @@ export default function UploadPage() {
     await refreshJobs();
   }
 
-  const fallbackActiveJobs = jobs.filter((job) => !["needs_review", "completed", "failed"].includes(job.status));
+  const TERMINAL_STATUSES = ["needs_review", "completed", "failed", "rejected_non_invoice"];
+  const fallbackActiveJobs = jobs.filter((job) => !TERMINAL_STATUSES.includes(job.status));
   // File de traitement : uniquement ce qui reste à traiter/réviser. Un job terminé = facture
   // enregistrée (ou doublon déjà en base) → il sort de la file (il reste visible dans Mes documents).
   const queueJobs = jobs.filter((job) => job.status !== "completed");
   const trackedJobs = activeUploadJobIds.length
     ? jobs.filter((job) => activeUploadJobIds.includes(job.id))
     : fallbackActiveJobs;
-  const activeTrackedJobs = trackedJobs.filter((job) => !["needs_review", "completed", "failed"].includes(job.status));
+  const activeTrackedJobs = trackedJobs.filter((job) => !TERMINAL_STATUSES.includes(job.status));
   const directFlow = files.length > 0
     ? files.length <= DIRECT_DOCUMENT_LIMIT
     : trackedJobs.length > 0 && trackedJobs.every((job) => job.processing_mode === "direct");
@@ -365,10 +373,11 @@ export default function UploadPage() {
     : estimateForDocumentCount(files.length, estimationStats);
   const ocrCompleted = trackedJobs.filter((job) => ["needs_review", "completed"].includes(job.status)).length;
   const failedCount = trackedJobs.filter((job) => job.status === "failed").length;
+  const rejectedCount = trackedJobs.filter((job) => job.status === "rejected_non_invoice").length;
   const trackedTotal = Math.max(trackedJobs.length, submitting ? uploadedCount : 0);
-  // Progression unique : part des documents arrivés au bout (OCR terminé ou échec) sur le total.
+  // Progression unique : part des documents arrivés au bout (OCR terminé, échec ou ignoré) sur le total.
   const progressTotal = trackedTotal || trackedJobs.length || 1;
-  const doneCount = Math.min(progressTotal, ocrCompleted + failedCount);
+  const doneCount = Math.min(progressTotal, ocrCompleted + failedCount + rejectedCount);
   const progressPct = Math.min(100, Math.round((doneCount / progressTotal) * 100));
 
   const hasAutoResult = autoResult.autoSaved.length > 0 || autoResult.toReview.length > 0 || autoResult.duplicates.length > 0;
@@ -490,6 +499,7 @@ export default function UploadPage() {
                 <div className="h-full rounded-full bg-[#f97316] transition-[width] duration-500" style={{ width: `${progressPct}%` }} />
               </div>
               {failedCount > 0 && <p className="mt-2 text-xs font-medium text-red-600">{failedCount} document{failedCount > 1 ? "s" : ""} en échec — vous pouvez les relancer individuellement.</p>}
+              {rejectedCount > 0 && <p className="mt-2 text-xs font-medium text-amber-700">{rejectedCount} document{rejectedCount > 1 ? "s" : ""} ignoré{rejectedCount > 1 ? "s" : ""} (pas reconnu{rejectedCount > 1 ? "s" : ""} comme facture) — vérifiez et forcez le traitement si besoin.</p>}
             </div>
           )}
         </div>
@@ -534,14 +544,19 @@ export default function UploadPage() {
             <div key={job.id} className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
               {["direct_processing", "uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 animate-spin text-[#f97316]" />
                 : job.status === "needs_review" || job.status === "completed" ? <CheckCircle2 className="size-5 text-emerald-600" />
-                : job.status === "failed" ? <AlertCircle className="size-5 text-red-600" /> : <Clock3 className="size-5 text-amber-600" />}
+                : job.status === "failed" ? <AlertCircle className="size-5 text-red-600" />
+                : job.status === "rejected_non_invoice" ? <AlertCircle className="size-5 text-amber-600" /> : <Clock3 className="size-5 text-amber-600" />}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-[var(--kn-text)]">{job.original_name}</p>
-                <p className="text-xs text-[var(--kn-text-muted)]">{statusLabel[job.status]}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}</p>
+                <p className="text-xs text-[var(--kn-text-muted)]">
+                  {statusLabel[job.status]}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}
+                  {job.status === "rejected_non_invoice" && job.prefilter_type ? ` · détecté comme ${prefilterTypeLabel[job.prefilter_type] ?? job.prefilter_type}` : ""}
+                </p>
                 {job.last_error && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.last_error}</p>}
               </div>
               {job.status === "needs_review" && <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white">Réviser</button>}
               {job.status === "failed" && <button onClick={() => void retry(job.id)} className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>}
+              {job.status === "rejected_non_invoice" && <button onClick={() => void retry(job.id)} title="Le document a été jugé non-facture par erreur : relancez pour forcer l'extraction complète." className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Traiter quand même</button>}
               <button onClick={() => void deleteJob(job.id)} title="Supprimer de la file" aria-label="Supprimer de la file" className="rounded-lg p-1.5 text-[var(--kn-text-muted)] transition-colors hover:bg-[#fef2f2] hover:text-[#b91c1c]"><Trash2 className="size-4" /></button>
             </div>
           ))}

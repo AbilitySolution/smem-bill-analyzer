@@ -7,6 +7,7 @@ const BATCH_SIZE = 5;
 const MAX_BATCHES_PER_INVOCATION = 10;
 const FILE_UPLOAD_CONCURRENCY = 3;
 const OCR_MODEL = "claude-sonnet-4-6";
+const PREFILTER_MODEL = "claude-haiku-4-5";
 
 const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF (électricité) pour des bâtiments publics et points d'éclairage public en France.
 
@@ -27,6 +28,23 @@ const EXTRACTION_PROMPT = `Extrait toutes les données structurées de cette fac
 - is_duplicata vaut true si DUPLICATA apparaît.
 - commune_hint reprend le nom visible sans l'inventer.
 - categorie_hint vaut batiment, eclairage_public ou null.`;
+
+const CLASSIFY_SYSTEM_PROMPT = "Tu vérifies si un document est une facture d'électricité individuelle avant son traitement. Réponds uniquement avec l'outil classify_document.";
+
+const CLASSIFY_PROMPT = "Ce document est-il UNE facture d'électricité individuelle (un numéro de facture, un montant à payer pour un seul contrat) ? Ce n'est PAS une facture s'il s'agit d'un bordereau récapitulatif (liste de plusieurs factures dans un tableau), d'un courrier, d'un justificatif ou de tout autre document. En cas de doute, réponds true. Utilise l'outil classify_document.";
+
+const classifyTool = {
+  name: "classify_document",
+  description: "Détermine si le document est une facture d'électricité individuelle avant extraction complète.",
+  input_schema: {
+    type: "object",
+    properties: {
+      is_facture_electricite: { type: "boolean" },
+      type_document: { type: "string", enum: ["facture", "bordereau_recapitulatif", "autre"] },
+    },
+    required: ["is_facture_electricite", "type_document"],
+  },
+};
 
 const nullableString = { type: ["string", "null"] };
 const nullableNumber = { type: ["number", "null"] };
@@ -164,6 +182,47 @@ async function uploadToClaude(file: Blob, filename: string, apiKey: string) {
   return await response.json() as { id: string };
 }
 
+async function deleteClaudeFile(fileId: string, apiKey: string) {
+  await fetch(`https://api.anthropic.com/v1/files/${fileId}`, {
+    method: "DELETE",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "files-api-2025-04-14",
+    },
+  });
+}
+
+async function classifyDocument(fileId: string, mimeType: string, apiKey: string) {
+  const blockType = mimeType === "application/pdf" ? "document" : "image";
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "files-api-2025-04-14",
+    },
+    body: JSON.stringify({
+      model: PREFILTER_MODEL,
+      max_tokens: 60,
+      system: CLASSIFY_SYSTEM_PROMPT,
+      tools: [classifyTool],
+      tool_choice: { type: "tool", name: "classify_document" },
+      messages: [{ role: "user", content: [
+        { type: blockType, source: { type: "file", file_id: fileId } },
+        { type: "text", text: CLASSIFY_PROMPT },
+      ] }],
+    }),
+  });
+  if (!response.ok) throw new Error(`Claude Classify ${response.status}: ${(await response.text()).slice(0, 500)}`);
+  const message = await response.json() as { content?: Array<{ type: string; input?: unknown }> };
+  const toolUse = message.content?.find((block) => block.type === "tool_use");
+  const input = toolUse?.input as { is_facture_electricite?: unknown; type_document?: unknown } | undefined;
+  if (!input || typeof input.is_facture_electricite !== "boolean") throw new Error("Classification invalide");
+  return { isInvoice: input.is_facture_electricite, type: typeof input.type_document === "string" ? input.type_document : "autre" };
+}
+
 async function createClaudeBatch(
   jobs: Array<{ id: string; mime_type: string; anthropic_file_id: string }>,
   apiKey: string,
@@ -264,9 +323,36 @@ async function dispatchNextBatch(
         const uploadedAt = new Date().toISOString();
         await supabase.from("document_jobs").update({ anthropic_file_id: fileId, claude_file_uploaded_at: uploadedAt, updated_at: uploadedAt }).eq("id", job.id);
       }
-      return { id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId };
+
+      if (!job.skip_prefilter) {
+        try {
+          const classification = await classifyDocument(fileId, job.mime_type, anthropicKey);
+          if (!classification.isInvoice) {
+            const now = new Date().toISOString();
+            await supabase.from("document_jobs").update({
+              status: "rejected_non_invoice",
+              prefilter_type: classification.type,
+              completed_at: now,
+              result_available_at: now,
+              updated_at: now,
+              last_error: null,
+            }).eq("id", job.id);
+            await deleteClaudeFile(fileId, anthropicKey).catch(() => null);
+            await supabase.from("document_jobs").update({ anthropic_file_id: null, updated_at: new Date().toISOString() }).eq("id", job.id);
+            return { id: job.id, rejected: true as const };
+          }
+        } catch {
+          // Classifieur indisponible ou réponse invalide : on ne bloque pas le lot,
+          // le document part en extraction normale (biais volontaire vers l'acceptation).
+        }
+      }
+
+      return { id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId, rejected: false as const };
     });
-    prepared.push(...uploaded);
+    const rejectedJobs = uploaded.filter((job) => job.rejected);
+    const acceptedJobs = uploaded.filter((job): job is { id: string; mime_type: string; anthropic_file_id: string; rejected: false } => !job.rejected);
+    await Promise.all(rejectedJobs.map((job) => supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id })));
+    prepared.push(...acceptedJobs);
 
     if (!prepared.length) return { batchId: null, documentCount: 0 };
     const batch = await createClaudeBatch(prepared, anthropicKey);

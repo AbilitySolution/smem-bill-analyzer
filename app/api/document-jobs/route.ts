@@ -140,7 +140,7 @@ export async function GET() {
 
   const [{ data, error }, estimation] = await Promise.all([
     supabase.from("document_jobs")
-      .select("id, original_name, mime_type, file_size, status, processing_mode, attempt_count, last_error, created_at, updated_at, queued_at, dispatch_started_at, claude_file_uploaded_at, batch_created_at, result_available_at, started_at, completed_at, processed_invoice_id, anthropic_batch_id")
+      .select("id, original_name, mime_type, file_size, status, processing_mode, attempt_count, last_error, created_at, updated_at, queued_at, dispatch_started_at, claude_file_uploaded_at, batch_created_at, result_available_at, started_at, completed_at, processed_invoice_id, anthropic_batch_id, prefilter_type")
       .order("created_at", { ascending: false })
       .limit(200),
     processingEstimateStats(),

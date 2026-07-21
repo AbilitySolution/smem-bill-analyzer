@@ -1,7 +1,9 @@
 import type { InvoiceExtraction } from "@/lib/anthropic/invoice-schema";
 import type { ValidationResult } from "@/lib/anthropic/invoice-validation";
 
-export type DocumentJobStatus = "direct_queued" | "direct_processing" | "queued" | "uploading_to_claude" | "batched" | "processing" | "needs_review" | "completed" | "failed";
+export type DocumentJobStatus = "direct_queued" | "direct_processing" | "queued" | "uploading_to_claude" | "batched" | "processing" | "needs_review" | "completed" | "failed" | "rejected_non_invoice";
+
+export type DocumentPrefilterType = "facture" | "bordereau_recapitulatif" | "autre";
 
 export interface DocumentJob {
   id: string;
@@ -29,4 +31,6 @@ export interface DocumentJob {
   processed_invoice_id?: string | null;
   anthropic_file_id?: string | null;
   anthropic_batch_id?: string | null;
+  prefilter_type?: DocumentPrefilterType | null;
+  skip_prefilter?: boolean;
 }
