@@ -1,11 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { getConsumptionAnalysis, DEMO_CONSUMPTION, type AnalysisData } from "@/lib/data/consumption";
-import { AnalysesView } from "@/components/analyses/analyses-view";
+import { getCoverageData, DEMO_COVERAGE, type CoverageData } from "@/lib/data/coverage";
+import { AnalysesTabs } from "@/components/analyses/analyses-tabs";
 
 const EMPTY: AnalysisData = {
-  byYear: [],
-  hpHc: { hpKwh: 0, hcKwh: 0, hpEur: 0, hcEur: 0, hpPx: 0, hcPx: 0 },
-  kpis: { totalKwh: 0, totalCost: 0, avgPrice: 0, invoiceCount: 0 },
+  months: [],
+  kpis: { totalKwh: 0, varEur: 0, aboEur: 0, totalCost: 0, avgPrice: 0, invoiceCount: 0, approxCount: 0 },
 };
 
 export default async function AnalysesPage({
@@ -29,17 +29,24 @@ export default async function AnalysesPage({
     : { data: [] };
 
   let analysis: AnalysisData | null = null;
+  let coverage: CoverageData | null = null;
   try {
-    analysis = await getConsumptionAnalysis({ communeId: sp.commune, siteId: sp.site, categorie: cat });
+    [analysis, coverage] = await Promise.all([
+      getConsumptionAnalysis({ communeId: sp.commune, siteId: sp.site, categorie: cat }),
+      getCoverageData(),
+    ]);
   } catch {
     analysis = null;
+    coverage = null;
   }
   // null = soit RLS/hors session (→ démo), soit filtres sans donnée (→ vide)
   if (!analysis) analysis = hasFilters ? EMPTY : DEMO_CONSUMPTION;
+  if (!coverage) coverage = DEMO_COVERAGE;
 
   return (
-    <AnalysesView
+    <AnalysesTabs
       analysis={analysis}
+      coverage={coverage}
       communes={communesRes.data ?? []}
       sites={sitesRes.data ?? []}
       filters={{ commune: sp.commune ?? "", site: sp.site ?? "", cat: sp.cat ?? "" }}

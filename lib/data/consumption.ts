@@ -1,19 +1,27 @@
 import { createClient } from "@/lib/supabase/server";
 
 export type Tarif = "HP" | "HC" | "Base";
-export type Metric = "kwh" | "eur" | "cents";
+export type Metric = "kwh" | "eur";
 
-export interface YearRow {
-  label: string;
+/** Bucket mensuel (granularité atomique). Le client ré-agrège en semestre/année. */
+export interface MonthBucket {
+  key: string; // "YYYY-MM"
   hpKwh: number; hcKwh: number; baseKwh: number;
-  hpEur: number; hcEur: number; baseEur: number;
-  hpPx: number | null; hcPx: number | null; basePx: number | null;
+  hpEur: number; hcEur: number; baseEur: number; // part variable (€)
+  aboEur: number; // abonnement / part fixe (€)
 }
 
 export interface AnalysisData {
-  byYear: YearRow[];
-  hpHc: { hpKwh: number; hcKwh: number; hpEur: number; hcEur: number; hpPx: number; hcPx: number };
-  kpis: { totalKwh: number; totalCost: number; avgPrice: number; invoiceCount: number };
+  months: MonthBucket[]; // triés ascendant
+  kpis: {
+    totalKwh: number;
+    varEur: number;    // part variable € (HP+HC+Base)
+    aboEur: number;    // abonnement € (part fixe)
+    totalCost: number; // total_ttc réel des factures
+    avgPrice: number;  // c€/kWh (part variable)
+    invoiceCount: number;
+    approxCount: number; // lignes rattachées à la date facture (période absente)
+  };
   isDemo?: boolean;
 }
 
@@ -25,87 +33,130 @@ export interface AnalysisFilters {
 
 export function classifyTarif(poste: string): Tarif {
   const p = poste.toLowerCase().trim();
-  // startsWith("hp") → hp/hpn/hph/hpjb; includes("_hp") → ejp_hp/ejp_hpn/tempo_hp
   if (p.includes("heures pleines") || p.startsWith("hp") || p.includes("_hp")) return "HP";
   if (p.includes("heures creuses") || p.startsWith("hc") || p.includes("_hc")) return "HC";
   return "Base";
+}
+
+const DAY = 86_400_000;
+const monthKeyOf = (iso: string) => iso.slice(0, 7); // "YYYY-MM"
+const utc = (iso: string) => Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+
+/**
+ * Répartit une valeur (kWh ou €) au prorata des jours sur les mois couverts par [start, end]
+ * (bornes incluses). Appelle `add(monthKey, fraction)` pour chaque mois chevauché.
+ */
+function distributeByMonth(start: string, end: string, add: (monthKey: string, fraction: number) => void) {
+  const s = utc(start);
+  const e = utc(end);
+  if (Number.isNaN(s) || Number.isNaN(e) || e < s) {
+    add(monthKeyOf(start), 1); // données incohérentes → un seul mois
+    return;
+  }
+  const totalDays = Math.round((e - s) / DAY) + 1;
+  let y = +start.slice(0, 4);
+  let m = +start.slice(5, 7) - 1; // 0-indexé
+  while (true) {
+    const mStart = Date.UTC(y, m, 1);
+    const mEnd = Date.UTC(y, m + 1, 0); // dernier jour du mois
+    if (mStart > e) break;
+    const ovStart = Math.max(mStart, s);
+    const ovEnd = Math.min(mEnd, e);
+    const ovDays = Math.round((ovEnd - ovStart) / DAY) + 1;
+    if (ovDays > 0) add(`${y}-${String(m + 1).padStart(2, "0")}`, ovDays / totalDays);
+    m += 1;
+    if (m > 11) { m = 0; y += 1; }
+  }
 }
 
 interface RawPeriod {
   invoice_id: string;
   poste_tarifaire: string | null;
   period_start: string | null;
+  period_end: string | null;
   consommation_kwh: number | null;
-  prix_unitaire_ckwh: number | null;
   montant_eur: number | null;
-  invoices?: { total_ttc?: number | null } | null;
+  invoices?: { facture_date?: string | null; total_ttc?: number | null } | null;
 }
 
-function aggregate(rows: RawPeriod[]): AnalysisData {
-  const years = new Map<number, {
-    kwh: Record<Tarif, number>; eur: Record<Tarif, number>; pxw: Record<Tarif, { sum: number; w: number }>;
-  }>();
-  const tot = {
-    kwh: { HP: 0, HC: 0, Base: 0 } as Record<Tarif, number>,
-    eur: { HP: 0, HC: 0, Base: 0 } as Record<Tarif, number>,
-    pxw: { HP: { sum: 0, w: 0 }, HC: { sum: 0, w: 0 }, Base: { sum: 0, w: 0 } } as Record<Tarif, { sum: number; w: number }>,
+interface RawCharge {
+  invoice_id: string;
+  period_start: string | null;
+  period_end: string | null;
+  montant_eur: number | null;
+  invoices?: { facture_date?: string | null } | null;
+}
+
+function aggregate(periods: RawPeriod[], charges: RawCharge[]): AnalysisData {
+  const buckets = new Map<string, MonthBucket>();
+  const bucket = (key: string): MonthBucket => {
+    let b = buckets.get(key);
+    if (!b) { b = { key, hpKwh: 0, hcKwh: 0, baseKwh: 0, hpEur: 0, hcEur: 0, baseEur: 0, aboEur: 0 }; buckets.set(key, b); }
+    return b;
   };
+
   const invoiceIds = new Set<string>();
   const invoiceTotals = new Map<string, number>();
+  let approxCount = 0;
 
-  for (const r of rows) {
-    if (!r.period_start) continue;
+  for (const r of periods) {
     invoiceIds.add(r.invoice_id);
-    if (!invoiceTotals.has(r.invoice_id)) {
-      invoiceTotals.set(r.invoice_id, Number(r.invoices?.total_ttc ?? 0));
-    }
-    const yr = new Date(r.period_start).getFullYear();
-    const cat = classifyTarif(r.poste_tarifaire ?? "");
+    if (!invoiceTotals.has(r.invoice_id)) invoiceTotals.set(r.invoice_id, Number(r.invoices?.total_ttc ?? 0));
+
+    const tarif = classifyTarif(r.poste_tarifaire ?? "");
     const kwh = Number(r.consommation_kwh ?? 0);
     const eur = Number(r.montant_eur ?? 0);
-    const px = r.prix_unitaire_ckwh != null ? Number(r.prix_unitaire_ckwh) : null;
+    const put = (key: string, f: number) => {
+      const b = bucket(key);
+      if (tarif === "HP") { b.hpKwh += kwh * f; b.hpEur += eur * f; }
+      else if (tarif === "HC") { b.hcKwh += kwh * f; b.hcEur += eur * f; }
+      else { b.baseKwh += kwh * f; b.baseEur += eur * f; }
+    };
 
-    if (!years.has(yr)) {
-      years.set(yr, {
-        kwh: { HP: 0, HC: 0, Base: 0 }, eur: { HP: 0, HC: 0, Base: 0 },
-        pxw: { HP: { sum: 0, w: 0 }, HC: { sum: 0, w: 0 }, Base: { sum: 0, w: 0 } },
-      });
-    }
-    const y = years.get(yr)!;
-    y.kwh[cat] += kwh; y.eur[cat] += eur;
-    tot.kwh[cat] += kwh; tot.eur[cat] += eur;
-    if (px != null && kwh > 0) {
-      y.pxw[cat].sum += px * kwh; y.pxw[cat].w += kwh;
-      tot.pxw[cat].sum += px * kwh; tot.pxw[cat].w += kwh;
+    if (r.period_start && r.period_end) {
+      distributeByMonth(r.period_start, r.period_end, put);
+    } else {
+      // Fallback : période absente → rattacher à la date de facture (marqué approximatif).
+      const fd = r.invoices?.facture_date;
+      approxCount += 1;
+      if (fd) put(monthKeyOf(fd), 1);
     }
   }
 
-  const sorted = [...years.entries()].sort((a, b) => a[0] - b[0]);
-  const round = (n: number) => Math.round(n);
-  const px = (s: number, w: number) => (w ? +(s / w).toFixed(2) : null);
+  // Part fixe (abonnement) : réparti dans le temps comme la conso, mais uniquement en €.
+  for (const c of charges) {
+    const eur = Number(c.montant_eur ?? 0);
+    if (!eur) continue;
+    if (c.period_start && c.period_end) {
+      distributeByMonth(c.period_start, c.period_end, (key, f) => { bucket(key).aboEur += eur * f; });
+    } else {
+      const fd = c.invoices?.facture_date;
+      if (fd) bucket(monthKeyOf(fd)).aboEur += eur;
+    }
+  }
 
-  const byYear: YearRow[] = sorted.map(([yr, y]) => ({
-    label: String(yr),
-    hpKwh: round(y.kwh.HP), hcKwh: round(y.kwh.HC), baseKwh: round(y.kwh.Base),
-    hpEur: +y.eur.HP.toFixed(2), hcEur: +y.eur.HC.toFixed(2), baseEur: +y.eur.Base.toFixed(2),
-    hpPx: px(y.pxw.HP.sum, y.pxw.HP.w), hcPx: px(y.pxw.HC.sum, y.pxw.HC.w), basePx: px(y.pxw.Base.sum, y.pxw.Base.w),
-  }));
+  const months = [...buckets.values()].sort((a, b) => a.key.localeCompare(b.key));
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  for (const b of months) {
+    b.hpKwh = Math.round(b.hpKwh); b.hcKwh = Math.round(b.hcKwh); b.baseKwh = Math.round(b.baseKwh);
+    b.hpEur = round2(b.hpEur); b.hcEur = round2(b.hcEur); b.baseEur = round2(b.baseEur); b.aboEur = round2(b.aboEur);
+  }
 
-  const totalKwh = tot.kwh.HP + tot.kwh.HC + tot.kwh.Base;
-  const totalCost = Array.from(invoiceTotals.values()).reduce((s, v) => s + v, 0);
+  const totalKwh = months.reduce((s, b) => s + b.hpKwh + b.hcKwh + b.baseKwh, 0);
+  const varEur = months.reduce((s, b) => s + b.hpEur + b.hcEur + b.baseEur, 0);
+  const aboEur = months.reduce((s, b) => s + b.aboEur, 0);
+  const totalCost = [...invoiceTotals.values()].reduce((s, v) => s + v, 0);
 
   return {
-    byYear,
-    hpHc: {
-      hpKwh: round(tot.kwh.HP), hcKwh: round(tot.kwh.HC),
-      hpEur: +tot.eur.HP.toFixed(2), hcEur: +tot.eur.HC.toFixed(2),
-      hpPx: px(tot.pxw.HP.sum, tot.pxw.HP.w) ?? 0, hcPx: px(tot.pxw.HC.sum, tot.pxw.HC.w) ?? 0,
-    },
+    months,
     kpis: {
-      totalKwh: round(totalKwh),
-      totalCost: round(totalCost),
-      avgPrice: totalKwh ? +((totalCost / totalKwh) * 100).toFixed(2) : 0,
+      totalKwh: Math.round(totalKwh),
+      varEur: Math.round(varEur),
+      aboEur: Math.round(aboEur),
+      totalCost: Math.round(totalCost),
+      avgPrice: totalKwh ? +((varEur / totalKwh) * 100).toFixed(2) : 0,
       invoiceCount: invoiceIds.size,
+      approxCount,
     },
   };
 }
@@ -113,30 +164,40 @@ function aggregate(rows: RawPeriod[]): AnalysisData {
 /** Analyse de consommation réelle (Supabase), filtrable par commune/site/catégorie. */
 export async function getConsumptionAnalysis(filters?: AnalysisFilters): Promise<AnalysisData | null> {
   const supabase = await createClient();
-  let q = supabase
+
+  let pq = supabase
     .from("consumption_periods")
-    .select("invoice_id, poste_tarifaire, period_start, consommation_kwh, prix_unitaire_ckwh, montant_eur, invoices!inner(site_id, commune_id, categorie, total_ttc)");
+    .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, montant_eur, invoices!inner(facture_date, site_id, commune_id, categorie, total_ttc)");
+  let cq = supabase
+    .from("invoice_charges")
+    .select("invoice_id, period_start, period_end, montant_eur, invoices!inner(facture_date, site_id, commune_id, categorie)")
+    .eq("category", "fixed");
 
-  if (filters?.communeId) q = q.eq("invoices.commune_id", filters.communeId);
-  if (filters?.siteId) q = q.eq("invoices.site_id", filters.siteId);
-  if (filters?.categorie) q = q.eq("invoices.categorie", filters.categorie);
+  if (filters?.communeId) { pq = pq.eq("invoices.commune_id", filters.communeId); cq = cq.eq("invoices.commune_id", filters.communeId); }
+  if (filters?.siteId) { pq = pq.eq("invoices.site_id", filters.siteId); cq = cq.eq("invoices.site_id", filters.siteId); }
+  if (filters?.categorie) { pq = pq.eq("invoices.categorie", filters.categorie); cq = cq.eq("invoices.categorie", filters.categorie); }
 
-  const { data, error } = await q;
-  if (error || !data || data.length === 0) return null;
-  return aggregate(data as unknown as RawPeriod[]);
+  const [pRes, cRes] = await Promise.all([pq, cq]);
+  if (pRes.error || !pRes.data || pRes.data.length === 0) return null;
+  return aggregate(pRes.data as unknown as RawPeriod[], (cRes.data as unknown as RawCharge[]) ?? []);
 }
 
-/** Instantané des VRAIES données agrégées — repli pour le preview public (RLS). */
+/** Instantané de démonstration (repli hors session / RLS) — quelques mois plausibles. */
 export const DEMO_CONSUMPTION: AnalysisData = {
   isDemo: true,
-  byYear: [
-    { label: "2017", hpKwh: 3356, hcKwh: 7207, baseKwh: 0, hpEur: 228.29, hcEur: 490.27, baseEur: 0, hpPx: 6.81, hcPx: 6.80, basePx: null },
-    { label: "2018", hpKwh: 5340, hcKwh: 8903, baseKwh: 0, hpEur: 270.47, hcEur: 442.96, baseEur: 0, hpPx: 6.51, hcPx: 6.51, basePx: null },
-    { label: "2020", hpKwh: 303, hcKwh: 150, baseKwh: 0, hpEur: 35.5, hcEur: 12.36, baseEur: 0, hpPx: 11.72, hcPx: 8.24, basePx: null },
-    { label: "2021", hpKwh: 42, hcKwh: 21, baseKwh: 0, hpEur: 5.31, hcEur: 1.86, baseEur: 0, hpPx: 12.64, hcPx: 8.85, basePx: null },
-    { label: "2022", hpKwh: 0, hcKwh: 0, baseKwh: 3313, hpEur: 0, hcEur: 0, baseEur: 198.42, hpPx: null, hcPx: null, basePx: 11.86 },
-    { label: "2023", hpKwh: 0, hcKwh: 0, baseKwh: 1721, hpEur: 0, hcEur: 0, baseEur: 232.32, hpPx: null, hcPx: null, basePx: 14.08 },
+  months: [
+    { key: "2023-01", hpKwh: 620, hcKwh: 1180, baseKwh: 0, hpEur: 42, hcEur: 80, baseEur: 0, aboEur: 34 },
+    { key: "2023-02", hpKwh: 540, hcKwh: 1020, baseKwh: 0, hpEur: 37, hcEur: 69, baseEur: 0, aboEur: 31 },
+    { key: "2023-03", hpKwh: 500, hcKwh: 980, baseKwh: 0, hpEur: 34, hcEur: 66, baseEur: 0, aboEur: 34 },
+    { key: "2023-04", hpKwh: 0, hcKwh: 0, baseKwh: 1240, hpEur: 0, hcEur: 0, baseEur: 150, aboEur: 33 },
+    { key: "2023-05", hpKwh: 0, hcKwh: 0, baseKwh: 1180, hpEur: 0, hcEur: 0, baseEur: 143, aboEur: 34 },
+    { key: "2023-06", hpKwh: 0, hcKwh: 0, baseKwh: 1090, hpEur: 0, hcEur: 0, baseEur: 132, aboEur: 33 },
+    { key: "2023-07", hpKwh: 0, hcKwh: 0, baseKwh: 1010, hpEur: 0, hcEur: 0, baseEur: 122, aboEur: 34 },
+    { key: "2023-08", hpKwh: 0, hcKwh: 0, baseKwh: 980, hpEur: 0, hcEur: 0, baseEur: 119, aboEur: 34 },
+    { key: "2023-09", hpKwh: 430, hcKwh: 900, baseKwh: 0, hpEur: 30, hcEur: 61, baseEur: 0, aboEur: 33 },
+    { key: "2023-10", hpKwh: 470, hcKwh: 940, baseKwh: 0, hpEur: 32, hcEur: 64, baseEur: 0, aboEur: 34 },
+    { key: "2023-11", hpKwh: 560, hcKwh: 1080, baseKwh: 0, hpEur: 38, hcEur: 73, baseEur: 0, aboEur: 33 },
+    { key: "2023-12", hpKwh: 640, hcKwh: 1220, baseKwh: 0, hpEur: 44, hcEur: 83, baseEur: 0, aboEur: 34 },
   ],
-  hpHc: { hpKwh: 9041, hcKwh: 16281, hpEur: 539.57, hcEur: 947.45, hpPx: 5.97, hcPx: 5.82 },
-  kpis: { totalKwh: 30356, totalCost: 2012, avgPrice: 6.63, invoiceCount: 6 },
+  kpis: { totalKwh: 20000, varEur: 1428, aboEur: 401, totalCost: 2130, avgPrice: 7.14, invoiceCount: 8, approxCount: 0 },
 };

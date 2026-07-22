@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   FileText,
   FileSpreadsheet,
@@ -23,12 +23,25 @@ export interface SidebarUser {
   roleLabel: string;
 }
 
-type NavItem = { href: string; label: string; icon: typeof FileText; soon?: boolean };
+type NavChild = { href: string; label: string; match: (pathname: string, vue: string | null) => boolean };
+type NavItem = { href: string; label: string; icon: typeof FileText; soon?: boolean; children?: NavChild[] };
 
 const mainNav: NavItem[] = [
-  { href: "/documents", label: "Mes documents", icon: FileText },
+  {
+    href: "/documents", label: "Documents", icon: FileText,
+    children: [
+      { href: "/documents", label: "Mes documents", match: (p) => p === "/documents" },
+      { href: "/documents/extraction", label: "Extraction", match: (p) => p.startsWith("/documents/extraction") },
+    ],
+  },
   { href: "/rapport-excel", label: "Rapports", icon: FileSpreadsheet },
-  { href: "/analyses", label: "Analyse de consommation", icon: Gauge },
+  {
+    href: "/analyses?vue=conso", label: "Analyse", icon: Gauge,
+    children: [
+      { href: "/analyses?vue=conso", label: "Consommation", match: (p, v) => p === "/analyses" && v !== "couverture" },
+      { href: "/analyses?vue=couverture", label: "Couverture", match: (p, v) => p === "/analyses" && v === "couverture" },
+    ],
+  },
   { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
   { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true },
 ];
@@ -46,6 +59,8 @@ export function AbilitySidebar({
   isAdmin?: boolean;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const vue = searchParams.get("vue");
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
   const initials = (user.email ?? "?").slice(0, 2).toUpperCase();
 
@@ -66,27 +81,55 @@ export function AbilitySidebar({
           Extraction
         </p>
         {mainNav.map((item) => {
-          const active = isActive(item.href);
+          const sectionActive = pathname === "/analyses" ? item.href.startsWith("/analyses") : isActive(item.href.split("?")[0]);
+          const anyChildActive = item.children?.some((c) => c.match(pathname, vue)) ?? false;
+          const active = item.children ? sectionActive : isActive(item.href);
           return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cx(
-                "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
-                active
-                  ? "bg-[var(--kn-yellow-soft)] font-semibold text-[var(--kn-text)]"
-                  : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)] hover:text-[var(--kn-text)]",
+            <div key={item.label}>
+              <Link
+                href={item.href}
+                className={cx(
+                  "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
+                  active && !item.children
+                    ? "bg-[var(--kn-yellow-soft)] font-semibold text-[var(--kn-text)]"
+                    : active
+                    ? "font-semibold text-[var(--kn-text)]"
+                    : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)] hover:text-[var(--kn-text)]",
+                )}
+              >
+                {active && !item.children && <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-[#f97316]" />}
+                <item.icon className={cx("size-[17px] shrink-0", (active || anyChildActive) && "text-[#ea580c]")} strokeWidth={1.75} />
+                <span className="truncate">{item.label}</span>
+                {item.soon && (
+                  <span className="ml-auto shrink-0 rounded-full bg-[var(--kn-yellow-soft)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#9a3412]">
+                    Version bêta
+                  </span>
+                )}
+              </Link>
+
+              {item.children && (
+                <div className="mb-0.5 ml-[26px] mt-0.5 flex flex-col gap-0.5 border-l border-[var(--kn-border)] pl-2">
+                  {item.children.map((child) => {
+                    const cActive = child.match(pathname, vue);
+                    return (
+                      <Link
+                        key={child.label}
+                        href={child.href}
+                        className={cx(
+                          "relative rounded-md px-2.5 py-1.5 text-[12.5px] transition-colors",
+                          cActive
+                            ? "bg-[var(--kn-yellow-soft)] font-semibold text-[var(--kn-text)]"
+                            : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)] hover:text-[var(--kn-text)]",
+                        )}
+                      >
+                        {cActive && <span className="absolute -left-[9px] top-1/2 h-4 w-1 -translate-y-1/2 rounded-r-full bg-[#f97316]" />}
+                        {child.label}
+                      </Link>
+                    );
+                  })}
+                </div>
               )}
-            >
-              {active && <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-[#f97316]" />}
-              <item.icon className={cx("size-[17px] shrink-0", active && "text-[#ea580c]")} strokeWidth={1.75} />
-              <span className="truncate">{item.label}</span>
-              {item.soon && (
-                <span className="ml-auto shrink-0 rounded-full bg-[var(--kn-yellow-soft)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#9a3412]">
-                  Version bêta
-                </span>
-              )}
-            </Link>
+            </div>
           );
         })}
 
