@@ -73,7 +73,7 @@ export function AnalysesView({
     if (f.commune) params.set("commune", f.commune);
     if (f.site) params.set("site", f.site);
     if (f.cat) params.set("cat", f.cat);
-    startTransition(() => router.push(`/analyses${params.toString() ? "?" + params : ""}`));
+    startTransition(() => router.push(`/analyses/consommation${params.toString() ? "?" + params : ""}`));
   }
 
   const buckets = useMemo(() => reBucket(analysis.months, gran), [analysis.months, gran]);

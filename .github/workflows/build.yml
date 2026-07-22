@@ -1,0 +1,20 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - staging
+
+jobs:
+  next-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build

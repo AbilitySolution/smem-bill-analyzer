@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   FileText,
   FileSpreadsheet,
@@ -23,7 +23,7 @@ export interface SidebarUser {
   roleLabel: string;
 }
 
-type NavChild = { href: string; label: string; match: (pathname: string, vue: string | null) => boolean };
+type NavChild = { href: string; label: string; match: (pathname: string) => boolean };
 type NavItem = { href: string; label: string; icon: typeof FileText; soon?: boolean; children?: NavChild[] };
 
 const mainNav: NavItem[] = [
@@ -36,10 +36,10 @@ const mainNav: NavItem[] = [
   },
   { href: "/rapport-excel", label: "Rapports", icon: FileSpreadsheet },
   {
-    href: "/analyses?vue=conso", label: "Analyse", icon: Gauge,
+    href: "/analyses/consommation", label: "Analyse", icon: Gauge,
     children: [
-      { href: "/analyses?vue=conso", label: "Consommation", match: (p, v) => p === "/analyses" && v !== "couverture" },
-      { href: "/analyses?vue=couverture", label: "Couverture", match: (p, v) => p === "/analyses" && v === "couverture" },
+      { href: "/analyses/consommation", label: "Consommation", match: (p) => p === "/analyses/consommation" },
+      { href: "/analyses/couverture", label: "Couverture", match: (p) => p === "/analyses/couverture" },
     ],
   },
   { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
@@ -59,8 +59,6 @@ export function AbilitySidebar({
   isAdmin?: boolean;
 }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const vue = searchParams.get("vue");
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
   const initials = (user.email ?? "?").slice(0, 2).toUpperCase();
 
@@ -81,9 +79,9 @@ export function AbilitySidebar({
           Extraction
         </p>
         {mainNav.map((item) => {
-          const sectionActive = pathname === "/analyses" ? item.href.startsWith("/analyses") : isActive(item.href.split("?")[0]);
-          const anyChildActive = item.children?.some((c) => c.match(pathname, vue)) ?? false;
-          const active = item.children ? sectionActive : isActive(item.href);
+          const sectionActive = isActive(item.href);
+          const anyChildActive = item.children?.some((c) => c.match(pathname)) ?? false;
+          const active = item.children ? sectionActive || anyChildActive : isActive(item.href);
           return (
             <div key={item.label}>
               <Link
@@ -110,7 +108,7 @@ export function AbilitySidebar({
               {item.children && (
                 <div className="mb-0.5 ml-[26px] mt-0.5 flex flex-col gap-0.5 border-l border-[var(--kn-border)] pl-2">
                   {item.children.map((child) => {
-                    const cActive = child.match(pathname, vue);
+                    const cActive = child.match(pathname);
                     return (
                       <Link
                         key={child.label}

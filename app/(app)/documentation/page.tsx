@@ -47,7 +47,7 @@ const GUIDES: Guide[] = [
     ],
   },
   {
-    icon: Gauge, title: "Analyse de consommation", href: "/analyses", hrefLabel: "Ouvrir l'analyse",
+    icon: Gauge, title: "Analyse de consommation", href: "/analyses/consommation", hrefLabel: "Ouvrir l'analyse",
     role: "Visualiser l'évolution de la consommation et la répartition heures pleines / heures creuses.",
     steps: [
       "Filtrez par commune, site et catégorie pour cibler le périmètre.",
