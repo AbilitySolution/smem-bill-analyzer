@@ -1,4 +1,6 @@
+import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { getUserContext } from "@/lib/auth";
 import { PdfViewer } from "@/components/factures/pdf-viewer";
 import { SplitPane } from "@/components/factures/split-pane";
 import { InvoiceEditPanel, type InvoiceEditData } from "@/components/factures/invoice-edit-panel";
@@ -9,6 +11,7 @@ type Row = Record<string, unknown>;
 
 async function selectAllInvoices(
   supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
   pageSize = 1000,
 ) {
   const out: Record<string, unknown>[] = [];
@@ -17,6 +20,7 @@ async function selectAllInvoices(
     const { data, error } = await supabase
       .from("invoices")
       .select("id, facture_number, facture_date, categorie, is_duplicata, sites(nom), communes(nom)")
+      .eq("org_id", orgId)
       .eq("archived", false)
       .order("facture_date", { ascending: false })
       .range(start, start + pageSize - 1);
@@ -29,10 +33,12 @@ async function selectAllInvoices(
 
 export default async function ExtractionPage({ searchParams }: { searchParams: Promise<{ id?: string }> }) {
   const { id } = await searchParams;
+  const ctx = await getUserContext();
+  if (!ctx) redirect("/login");
   const supabase = await createClient();
 
   // Liste légère pour le sélecteur
-  const list = await selectAllInvoices(supabase);
+  const list = await selectAllInvoices(supabase, ctx.orgId);
 
   const pickerInvoices: PickerInvoice[] = (list ?? []).map((i: Record<string, unknown>) => ({
     id: i.id as string,

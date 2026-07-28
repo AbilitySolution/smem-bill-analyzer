@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { getUserContext } from "@/lib/auth";
 import { detectAnomalies, topSeverity, median, costPerKwh, type AnomalyLite, type Severity } from "./anomalies";
 
 export interface InvoiceLine {
@@ -97,12 +98,16 @@ async function selectAll<T>(
 
 /** Toutes les factures + leurs lignes de consommation (vraies données Supabase). */
 export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
+  const ctx = await getUserContext();
+  if (!ctx) return null;
+
   const supabase = await createClient();
 
   const invoices = await selectAll<RawInvoice>((from, to) =>
     supabase
       .from("invoices")
       .select("id, facture_number, facture_date, total_ht, tva, autres_taxes, total_ttc, is_duplicata, categorie, file_path, archived, precision, sites(nom), communes(nom)")
+      .eq("org_id", ctx.orgId)
       .order("facture_date", { ascending: false })
       .range(from, to),
   );

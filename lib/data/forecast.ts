@@ -8,6 +8,7 @@ type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 export type Categorie = "batiment" | "eclairage_public";
 
 export interface ForecastFilters {
+  orgId: string;
   communeId?: string;
   siteId?: string;
   categorie?: Categorie;
@@ -48,8 +49,8 @@ interface SiteRow {
 }
 
 /** Débit moyen kWh/jour + fenêtre historique, agrégés sur toutes les factures d'une catégorie (indépendant des filtres actifs — sert de "pool" pour le lissage). */
-async function categoriePool(supabase: SupabaseServerClient, categorie: Categorie) {
-  const { data: catInvoices } = await supabase.from("invoices").select("id").eq("categorie", categorie);
+async function categoriePool(supabase: SupabaseServerClient, orgId: string, categorie: Categorie) {
+  const { data: catInvoices } = await supabase.from("invoices").select("id").eq("org_id", orgId).eq("categorie", categorie);
   const ids = (catInvoices ?? []).map((i) => i.id as string);
   if (ids.length === 0) return { rate: null as number | null, span: null as { start: string; end: string } | null };
   const { data: periods } = await supabase
@@ -68,10 +69,10 @@ async function categoriePool(supabase: SupabaseServerClient, categorie: Categori
  * pour le détail — architecture pensée pour évoluer vers un modèle statistique
  * une fois davantage de factures accumulées.
  */
-export async function getConsumptionForecast(filters?: ForecastFilters): Promise<ForecastData | null> {
+export async function getConsumptionForecast(filters: ForecastFilters): Promise<ForecastData | null> {
   const supabase = await createClient();
 
-  let siteQ = supabase.from("sites").select("id, categorie, commune_id, communes(latitude, longitude)");
+  let siteQ = supabase.from("sites").select("id, categorie, commune_id, communes(latitude, longitude)").eq("org_id", filters.orgId);
   if (filters?.communeId) siteQ = siteQ.eq("commune_id", filters.communeId);
   if (filters?.siteId) siteQ = siteQ.eq("id", filters.siteId);
   if (filters?.categorie) siteQ = siteQ.eq("categorie", filters.categorie);
@@ -83,7 +84,7 @@ export async function getConsumptionForecast(filters?: ForecastFilters): Promise
   // que la détection d'anomalie existante dans app/api/invoices/route.ts, plus
   // fiable que de filtrer une ressource embarquée avec .in()).
   const siteIds = sites.map((s) => s.id);
-  const { data: invoiceRows } = await supabase.from("invoices").select("id, site_id").in("site_id", siteIds);
+  const { data: invoiceRows } = await supabase.from("invoices").select("id, site_id").eq("org_id", filters.orgId).in("site_id", siteIds);
   const invoiceIds = (invoiceRows ?? []).map((i) => i.id as string);
   const invoiceSiteMap = new Map((invoiceRows ?? []).map((i) => [i.id as string, i.site_id as string]));
 
@@ -105,7 +106,7 @@ export async function getConsumptionForecast(filters?: ForecastFilters): Promise
   const categoriesPresent = [...new Set(sites.map((s) => s.categorie))];
   const pools = new Map<Categorie, { rate: number | null; span: { start: string; end: string } | null }>();
   for (const cat of categoriesPresent) {
-    pools.set(cat, await categoriePool(supabase, cat));
+    pools.set(cat, await categoriePool(supabase, filters.orgId, cat));
   }
 
   const now = new Date();

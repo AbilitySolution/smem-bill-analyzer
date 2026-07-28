@@ -81,10 +81,16 @@ def sb_get(path: str, params: dict) -> list:
             return rows
         start += 1000
 
-INVOICE_SELECT = "id,facture_number,facture_date,total_ht,tva,autres_taxes,total_ttc,categorie,commune_id,site_id,communes(nom),sites(nom,pdl,kva)"
+INVOICE_SELECT = "id,facture_number,facture_date,total_ht,tva,autres_taxes,total_ttc,categorie,commune_id,site_id,org_id,communes(nom),sites(nom,pdl,kva)"
 
 def load_data(p: dict):
-    base = {"select": INVOICE_SELECT, "archived": "eq.false", "order": "facture_date.asc"}
+    # org_id est la SEULE protection contre une fuite cross-tenant sur ce chemin :
+    # ce script tourne avec la service-role key et contourne RLS entièrement.
+    org_id = p.get("orgId")
+    if not org_id:
+        raise SystemExit("orgId manquant — refus de générer un rapport non scopé à une organisation.")
+
+    base = {"select": INVOICE_SELECT, "archived": "eq.false", "order": "facture_date.asc", "org_id": f"eq.{org_id}"}
     if p.get("communeId"):
         base["commune_id"] = f"eq.{p['communeId']}"
     if p.get("from"):
@@ -108,7 +114,7 @@ def load_data(p: dict):
         "select": "invoice_id,poste_tarifaire,period_start,period_end,consommation_kwh,prix_unitaire_ckwh,montant_eur"}) if r["invoice_id"] in inv_ids]
     charges = [r for r in sb_get("invoice_charges", {
         "select": "invoice_id,category,libelle,period_start,period_end,montant_eur"}) if r["invoice_id"] in inv_ids]
-    communes = sb_get("communes", {"select": "id,nom,points_lumineux,armoires,travaux_debut,travaux_fin,travaux_estimes"})
+    communes = sb_get("communes", {"select": "id,nom,points_lumineux,armoires,travaux_debut,travaux_fin,travaux_estimes", "org_id": f"eq.{org_id}"})
     return invoices, periods, charges, {c["id"]: c for c in communes}
 
 # ── Normalisation pro-rata (semestres calendaires) ───────────────────────────

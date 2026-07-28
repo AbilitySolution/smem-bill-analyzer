@@ -18,6 +18,7 @@ export interface AnalysisData {
 }
 
 export interface AnalysisFilters {
+  orgId: string;
   communeId?: string;
   siteId?: string;
   categorie?: "batiment" | "eclairage_public";
@@ -111,11 +112,12 @@ function aggregate(rows: RawPeriod[]): AnalysisData {
 }
 
 /** Analyse de consommation réelle (Supabase), filtrable par commune/site/catégorie. */
-export async function getConsumptionAnalysis(filters?: AnalysisFilters): Promise<AnalysisData | null> {
+export async function getConsumptionAnalysis(filters: AnalysisFilters): Promise<AnalysisData | null> {
   const supabase = await createClient();
   let q = supabase
     .from("consumption_periods")
-    .select("invoice_id, poste_tarifaire, period_start, consommation_kwh, prix_unitaire_ckwh, montant_eur, invoices!inner(site_id, commune_id, categorie, total_ttc)");
+    .select("invoice_id, poste_tarifaire, period_start, consommation_kwh, prix_unitaire_ckwh, montant_eur, invoices!inner(site_id, commune_id, categorie, total_ttc, org_id)")
+    .eq("invoices.org_id", filters.orgId);
 
   if (filters?.communeId) q = q.eq("invoices.commune_id", filters.communeId);
   if (filters?.siteId) q = q.eq("invoices.site_id", filters.siteId);

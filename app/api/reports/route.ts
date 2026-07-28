@@ -4,7 +4,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createClient } from "@/lib/supabase/server";
+import { getUserContext } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -25,9 +25,8 @@ function run(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ cod
 }
 
 export async function POST(request: Request) {
-  const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const ctx = await getUserContext();
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json().catch(() => ({}));
   const report = String(body.report ?? "");
@@ -36,22 +35,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Choisissez une commune." }, { status: 400 });
   }
 
-  // Enforce commune scoping for agent_commune users.
-  const { data: roleRow } = await supabase
-    .from("user_roles")
-    .select("role, commune_id")
-    .eq("user_id", authData.user.id)
-    .maybeSingle();
-  const isAgent = roleRow?.role === "agent_commune";
-  if (isAgent && !roleRow?.commune_id) {
-    return NextResponse.json({ error: "Compte non rattaché à une commune." }, { status: 403 });
-  }
-  const forcedCommuneId = isAgent ? roleRow!.commune_id : null;
-
-  const params: Record<string, unknown> = { report, dataLogger: !!body.dataLogger };
+  // orgId toujours transmis, quel que soit le rôle/type de rapport : le générateur
+  // Python tourne avec la service-role key (contourne RLS) donc ce filtre est la
+  // SEULE protection contre une fuite cross-org sur ce chemin.
+  const params: Record<string, unknown> = { report, dataLogger: !!body.dataLogger, orgId: ctx.orgId };
   const requestedCommuneId = UUID.test(String(body.communeId ?? "")) ? String(body.communeId) : null;
-  const effectiveCommuneId = forcedCommuneId ?? requestedCommuneId;
-  if (effectiveCommuneId) params.communeId = effectiveCommuneId;
+  if (requestedCommuneId) params.communeId = requestedCommuneId;
   const ids = uuidList(body.ids, 1200);
   if (ids.length) params.ids = ids;
   const siteIds = uuidList(body.siteIds, 200);

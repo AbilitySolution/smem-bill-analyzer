@@ -23,7 +23,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
 
   const { data: link } = await admin
     .from("file_request_links")
-    .select("id, commune_id, expires_at")
+    .select("id, org_id, commune_id, expires_at")
     .eq("token", token)
     .maybeSingle();
 
@@ -49,7 +49,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .replace(/[^a-zA-Z0-9.-]/g, "_");
-  const storagePath = `${link.commune_id}/${Date.now()}-${safeName}`;
+  const storagePath = `${link.org_id}/${link.commune_id}/${Date.now()}-${safeName}`;
 
   const { error: uploadError } = await admin.storage
     .from("pending-uploads")
@@ -60,6 +60,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
   }
 
   await admin.from("pending_uploads").insert({
+    org_id: link.org_id,
     commune_id: link.commune_id,
     file_request_link_id: link.id,
     file_path: storagePath,

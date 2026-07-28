@@ -32,6 +32,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const body = await request.json();
-  await supabase.from("pending_uploads").update({ processed: Boolean(body.processed) }).eq("id", id);
+  await supabase.from("pending_uploads").update({ status: body.processed ? "done" : "pending" }).eq("id", id);
   return NextResponse.json({ success: true });
 }

@@ -4,8 +4,8 @@ import { AbilitySidebar } from "@/components/koncile/kn-sidebar";
 import { TopBar } from "@/components/app-shell/top-bar";
 
 const ROLE_LABELS: Record<string, string> = {
-  admin_smem: "Admin SMEM",
-  agent_commune: "Agent commune",
+  org_admin: "Administrateur",
+  org_member: "Membre",
 };
 
 export default async function AppGroupLayout({
@@ -22,7 +22,7 @@ export default async function AppGroupLayout({
       <div className="flex min-h-0 flex-1">
         <AbilitySidebar
           user={{ email: ctx.email, roleLabel: ROLE_LABELS[ctx.role] ?? ctx.role }}
-          isAdmin={ctx.role === "admin_smem"}
+          isAdmin={ctx.role === "org_admin"}
         />
         <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
       </div>
