@@ -4,6 +4,19 @@ import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice, normalizePosteTarifaire } from "@/lib/anthropic/invoice-validation";
 import { z } from "zod";
 
+const customFieldEntrySchema = z.object({
+  section: z.enum(["localisation", "invoice", "client", "contract"]),
+  value: z.string().min(1),
+  definition_id: z.string().uuid().optional(),
+  new_definition: z.object({
+    label: z.string().min(1),
+    field_type: z.enum(["text", "number", "date"]),
+  }).optional(),
+}).refine(
+  (v) => Boolean(v.definition_id) !== Boolean(v.new_definition),
+  { message: "Fournir soit definition_id, soit new_definition, pas les deux." },
+);
+
 const saveRequestSchema = z.object({
   extraction: invoiceExtractionSchema,
   file_path: z.string(),
@@ -12,6 +25,7 @@ const saveRequestSchema = z.object({
   new_site_categorie: z.enum(["batiment", "eclairage_public"]).optional(),
   override_comment: z.string().min(1).optional(),
   override_flag_anomaly: z.boolean().optional(),
+  custom_fields: z.array(customFieldEntrySchema).optional().default([]),
 });
 
 export async function POST(request: Request) {
@@ -30,7 +44,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly } = parsed.data;
+  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly, custom_fields } = parsed.data;
 
   if (!site_id && !commune_id) {
     return NextResponse.json({ error: "Commune non détectée — sélectionnez-la manuellement." }, { status: 400 });
@@ -269,6 +283,69 @@ export async function POST(request: Request) {
   if (childError) {
     await supabase.from("invoices").delete().eq("id", invoiceId);
     return NextResponse.json({ error: `Détails facture: ${childError.message}` }, { status: 500 });
+  }
+
+  // 4.5. Résoudre/créer les définitions de champs personnalisés puis insérer les valeurs.
+  if (custom_fields.length > 0) {
+    const resolvedIds = new Map<number, string>(); // index dans custom_fields -> definition_id
+
+    for (let i = 0; i < custom_fields.length; i++) {
+      const cf = custom_fields[i];
+      if (cf.definition_id) {
+        resolvedIds.set(i, cf.definition_id);
+        continue;
+      }
+      const label = cf.new_definition!.label.trim();
+      const { data: inserted, error: defErr } = await supabase
+        .from("custom_field_definitions")
+        .insert({
+          section: cf.section,
+          label,
+          field_type: cf.new_definition!.field_type,
+          created_by: authData.user.id,
+        })
+        .select("id")
+        .single();
+
+      if (defErr) {
+        // 23505 = unique_violation → un autre utilisateur a créé le même libellé
+        // entre-temps (ou double-clic) : réutiliser la définition existante.
+        if (defErr.code === "23505") {
+          const { data: existingDef } = await supabase
+            .from("custom_field_definitions")
+            .select("id")
+            .eq("section", cf.section)
+            .ilike("label", label)
+            .maybeSingle();
+          if (existingDef) {
+            resolvedIds.set(i, existingDef.id);
+            continue;
+          }
+        }
+        await supabase.from("invoices").delete().eq("id", invoiceId);
+        return NextResponse.json({ error: `Champ personnalisé: ${defErr.message}` }, { status: 500 });
+      }
+      resolvedIds.set(i, inserted.id);
+    }
+
+    // Dédupliquer par definition_id (dernier gagne) pour éviter les conflits (invoice_id, definition_id).
+    const byDefinition = new Map<string, string>();
+    custom_fields.forEach((cf, i) => {
+      const defId = resolvedIds.get(i);
+      if (defId) byDefinition.set(defId, cf.value.trim());
+    });
+
+    const valueRows = Array.from(byDefinition.entries())
+      .filter(([, value]) => value.length > 0)
+      .map(([definition_id, value]) => ({ invoice_id: invoiceId, definition_id, value }));
+
+    if (valueRows.length > 0) {
+      const { error: valuesErr } = await supabase.from("invoice_custom_field_values").insert(valueRows);
+      if (valuesErr) {
+        await supabase.from("invoices").delete().eq("id", invoiceId);
+        return NextResponse.json({ error: `Valeurs champs personnalisés: ${valuesErr.message}` }, { status: 500 });
+      }
+    }
   }
 
   // 5. Tag par défaut "À vérifier".

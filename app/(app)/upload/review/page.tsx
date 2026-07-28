@@ -58,10 +58,22 @@ type OcrResult = {
   validation?: ValidationResult;
 };
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+type CustomFieldSection = "localisation" | "invoice" | "client" | "contract";
+type CustomFieldType = "text" | "number" | "date";
+type CustomFieldDef = { id: string; section: CustomFieldSection; label: string; field_type: CustomFieldType };
+type CustomFieldEntry = {
+  key: string;
+  section: CustomFieldSection;
+  definition_id: string | null;
+  new_label: string | null;
+  new_field_type: CustomFieldType;
+  value: string;
+};
+
+function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">{label}</label>
+      <label htmlFor={htmlFor} className="text-[11px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">{label}</label>
       {children}
     </div>
   );
@@ -83,6 +95,110 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-[var(--kn-text-muted)]">{title}</h2>
       <div className="rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
         {children}
+      </div>
+    </div>
+  );
+}
+
+function CustomFieldsBlock({
+  section, defs, entries, onChange,
+}: {
+  section: CustomFieldSection;
+  defs: CustomFieldDef[];
+  entries: CustomFieldEntry[];
+  onChange: (next: CustomFieldEntry[]) => void;
+}) {
+  const sectionDefs = defs.filter((d) => d.section === section);
+  const usedIds = new Set(entries.filter((e) => e.definition_id).map((e) => e.definition_id));
+  const available = sectionDefs.filter((d) => !usedIds.has(d.id));
+
+  function addExisting(def: CustomFieldDef) {
+    onChange([...entries, {
+      key: crypto.randomUUID(), section, definition_id: def.id,
+      new_label: null, new_field_type: def.field_type, value: "",
+    }]);
+  }
+  function addNew() {
+    onChange([...entries, {
+      key: crypto.randomUUID(), section, definition_id: null,
+      new_label: "", new_field_type: "text", value: "",
+    }]);
+  }
+
+  return (
+    <div className="col-span-2 mt-2 flex flex-col gap-2">
+      {entries.map((e) => {
+        const def = e.definition_id ? sectionDefs.find((d) => d.id === e.definition_id) : null;
+        const fieldType = def?.field_type ?? e.new_field_type;
+        const inputType = fieldType === "number" ? "number" : fieldType === "date" ? "date" : "text";
+        const valueId = `${e.key}-value`;
+        const removeLabel = `Retirer le champ ${def?.label || e.new_label || "personnalisé"}`;
+        return (
+          <div key={e.key} className="flex items-end gap-2">
+            {def ? (
+              <Field label={def.label} htmlFor={valueId}>
+                <input
+                  id={valueId}
+                  className={inputCls}
+                  type={inputType}
+                  value={e.value}
+                  onChange={(ev) => onChange(entries.map((x) => x.key === e.key ? { ...x, value: ev.target.value } : x))}
+                />
+              </Field>
+            ) : (
+              <>
+                <Field label="Nom du champ" htmlFor={`${e.key}-label`}>
+                  <input id={`${e.key}-label`} className={inputCls} value={e.new_label ?? ""}
+                    onChange={(ev) => onChange(entries.map((x) => x.key === e.key ? { ...x, new_label: ev.target.value } : x))} />
+                </Field>
+                <Field label="Type">
+                  <Select value={e.new_field_type} onValueChange={(v) => onChange(entries.map((x) => x.key === e.key ? { ...x, new_field_type: v as CustomFieldType } : x))}>
+                    <SelectTrigger className="h-8 cursor-pointer text-[13px]"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="text" className="cursor-pointer">Texte</SelectItem>
+                      <SelectItem value="number" className="cursor-pointer">Nombre</SelectItem>
+                      <SelectItem value="date" className="cursor-pointer">Date</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Valeur" htmlFor={valueId}>
+                  <input id={valueId} className={inputCls} type={inputType} value={e.value}
+                    onChange={(ev) => onChange(entries.map((x) => x.key === e.key ? { ...x, value: ev.target.value } : x))} />
+                </Field>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => onChange(entries.filter((x) => x.key !== e.key))}
+              aria-label={removeLabel}
+              title={removeLabel}
+              className="mb-0.5 flex h-8 shrink-0 cursor-pointer items-center rounded-lg px-2 text-[11px] font-medium text-red-600 transition-colors hover:bg-red-50"
+            >
+              Retirer
+            </button>
+          </div>
+        );
+      })}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={addNew}
+          className="flex h-8 cursor-pointer items-center rounded-lg px-2 text-[12px] font-medium text-[#f97316] transition-colors hover:bg-orange-50"
+        >
+          + Ajouter un champ
+        </button>
+        {available.length > 0 && (
+          <select
+            aria-label="Réutiliser un champ personnalisé existant"
+            className="h-8 cursor-pointer rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] outline-none focus:border-[#f97316]"
+            onChange={(ev) => { const def = available.find((d) => d.id === ev.target.value); if (def) addExisting(def); }}
+            value=""
+          >
+            <option value="" disabled>Réutiliser un champ existant…</option>
+            {available.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+          </select>
+        )}
       </div>
     </div>
   );
@@ -199,6 +315,8 @@ export default function ReviewPage() {
   const [fileUrlError, setFileUrlError] = useState(false);
   const [overrideComment, setOverrideComment] = useState("");
   const [overrideFlagAnomaly, setOverrideFlagAnomaly] = useState<boolean | null>(null);
+  const [customFieldDefs, setCustomFieldDefs] = useState<CustomFieldDef[]>([]);
+  const [customFieldEntries, setCustomFieldEntries] = useState<CustomFieldEntry[]>([]);
 
   // Garde "modifications non sauvegardées" sur navigation navigateur (fermer onglet, recharger)
   useEffect(() => {
@@ -222,6 +340,11 @@ export default function ReviewPage() {
       .then((r) => r.json())
       .then((j) => { setCommunes(j.communes ?? []); setCommunesLoading(false); })
       .catch(() => setCommunesLoading(false));
+
+    fetch("/api/custom-fields")
+      .then((r) => r.json())
+      .then((j) => setCustomFieldDefs(j.definitions ?? []))
+      .catch(() => {});
 
     // Fetch signed URL for document preview
     const supabase = createClient();
@@ -261,6 +384,13 @@ export default function ReviewPage() {
         body.override_comment = overrideComment.trim();
         body.override_flag_anomaly = overrideFlagAnomaly ?? false;
       }
+      const customFieldsPayload = customFieldEntries
+        .filter((e) => e.value.trim().length > 0 && (e.definition_id || (e.new_label ?? "").trim().length > 0))
+        .map((e) => e.definition_id
+          ? { section: e.section, definition_id: e.definition_id, value: e.value.trim() }
+          : { section: e.section, value: e.value.trim(), new_definition: { label: e.new_label!.trim(), field_type: e.new_field_type } },
+        );
+      if (customFieldsPayload.length > 0) body.custom_fields = customFieldsPayload;
       const res = await fetch("/api/invoices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -453,6 +583,15 @@ export default function ReviewPage() {
               </SelectContent>
             </Select>
           </Field>
+          <CustomFieldsBlock
+            section="localisation"
+            defs={customFieldDefs}
+            entries={customFieldEntries.filter((e) => e.section === "localisation")}
+            onChange={(next) => {
+              setIsDirty(true);
+              setCustomFieldEntries((all) => [...all.filter((e) => e.section !== "localisation"), ...next]);
+            }}
+          />
         </div>
       </Section>
 
@@ -486,6 +625,15 @@ export default function ReviewPage() {
               <span className="text-[13px] text-[var(--kn-text)]">Cette facture est un duplicata</span>
             </div>
           </Field>
+          <CustomFieldsBlock
+            section="invoice"
+            defs={customFieldDefs}
+            entries={customFieldEntries.filter((e) => e.section === "invoice")}
+            onChange={(next) => {
+              setIsDirty(true);
+              setCustomFieldEntries((all) => [...all.filter((e) => e.section !== "invoice"), ...next]);
+            }}
+          />
         </div>
       </Section>
 
@@ -504,6 +652,15 @@ export default function ReviewPage() {
           <Field label="Adresse">
             <input className={inputCls} value={ext.client.adresse ?? ""} onChange={(e) => setClient("adresse", e.target.value)} />
           </Field>
+          <CustomFieldsBlock
+            section="client"
+            defs={customFieldDefs}
+            entries={customFieldEntries.filter((e) => e.section === "client")}
+            onChange={(next) => {
+              setIsDirty(true);
+              setCustomFieldEntries((all) => [...all.filter((e) => e.section !== "client"), ...next]);
+            }}
+          />
         </div>
       </Section>
 
@@ -541,6 +698,15 @@ export default function ReviewPage() {
           <Field label="Type compteur">
             <input className={inputCls} value={ext.contract.type_compteur ?? ""} onChange={(e) => setContract("type_compteur", e.target.value || null)} />
           </Field>
+          <CustomFieldsBlock
+            section="contract"
+            defs={customFieldDefs}
+            entries={customFieldEntries.filter((e) => e.section === "contract")}
+            onChange={(next) => {
+              setIsDirty(true);
+              setCustomFieldEntries((all) => [...all.filter((e) => e.section !== "contract"), ...next]);
+            }}
+          />
         </div>
       </Section>
 

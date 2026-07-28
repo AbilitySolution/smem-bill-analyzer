@@ -80,9 +80,11 @@ async function Detail({ id }: { id: string }) {
     return <div className="flex h-full items-center justify-center text-[13px] text-[var(--kn-text-muted)]">Facture introuvable.</div>;
   }
 
-  const [{ data: consumption }, { data: charges }] = await Promise.all([
+  const [{ data: consumption }, { data: charges }, { data: customFieldDefs }, { data: customFieldValues }] = await Promise.all([
     supabase.from("consumption_periods").select("*").eq("invoice_id", id).order("period_start"),
     supabase.from("invoice_charges").select("*").eq("invoice_id", id),
+    supabase.from("custom_field_definitions").select("id, section, label, field_type").order("label"),
+    supabase.from("invoice_custom_field_values").select("definition_id, value").eq("invoice_id", id),
   ]);
 
   const { data: signed } = invoice.file_path
@@ -168,6 +170,8 @@ async function Detail({ id }: { id: string }) {
       montant_eur: (r.montant_eur as number) ?? 0,
     })),
     communes: (communes ?? []) as { id: string; nom: string }[],
+    customFieldDefs: (customFieldDefs ?? []) as InvoiceEditData["customFieldDefs"],
+    customFieldValues: (customFieldValues ?? []) as InvoiceEditData["customFieldValues"],
   };
 
   return (
