@@ -249,6 +249,10 @@ async function chunkInsert(table: string, rows: Record<string, unknown>[]) {
 }
 
 async function main() {
+  const { data: org, error: orgErr } = await supabase.from("organizations").select("id").eq("nom", "SMEM").maybeSingle();
+  if (orgErr || !org) throw new Error(`Organisation SMEM introuvable (${orgErr?.message ?? "aucune ligne"}) — exécuter la migration multi-tenant avant de seeder.`);
+  const orgId = org.id as string;
+
   if (RESET && !DRY) {
     console.log("— Reset des factures SIM- …");
     const sims = await selectAll<{ id: string }>("invoices", "id", { col: "facture_number", pattern: "SIM-%" });
@@ -265,7 +269,7 @@ async function main() {
   // 1. Communes (upsert par nom)
   const { data: existingCommunes } = await supabase.from("communes").select("id, nom");
   const communeIds = new Map((existingCommunes ?? []).map((c) => [c.nom, c.id]));
-  const newCommunes = COMMUNES.filter((c) => !communeIds.has(c.nom)).map((c) => ({ nom: c.nom }));
+  const newCommunes = COMMUNES.filter((c) => !communeIds.has(c.nom)).map((c) => ({ nom: c.nom, org_id: orgId }));
   if (newCommunes.length && !DRY) {
     const { data, error } = await supabase.from("communes").insert(newCommunes).select("id, nom");
     if (error) throw new Error(error.message);
@@ -282,7 +286,7 @@ async function main() {
     if (!cid || clientByCommune.has(cid)) continue;
     if (DRY) { clientByCommune.set(cid, "dry"); continue; }
     const { data, error } = await supabase.from("clients")
-      .insert({ nom: `Commune de ${c.nom}`, commune_id: cid, adresse: `Hôtel de ville, ${c.nom}, Martinique` })
+      .insert({ nom: `Commune de ${c.nom}`, commune_id: cid, adresse: `Hôtel de ville, ${c.nom}, Martinique`, org_id: orgId })
       .select("id").single();
     if (error) throw new Error(error.message);
     clientByCommune.set(cid, data.id);
@@ -298,7 +302,7 @@ async function main() {
     const cid = communeIds.get(c.nom); if (!cid) continue;
     for (const s of c.sites ?? []) {
       if (siteMap.has(siteKey(cid, s.nom))) continue;
-      newSites.push({ commune_id: cid, nom: s.nom, categorie: s.categorie, kva: s.kva, ampere: s.ampere, pdl: String(pdlSeq + Math.abs(hash(c.nom + s.nom)) % 80000) });
+      newSites.push({ org_id: orgId, commune_id: cid, nom: s.nom, categorie: s.categorie, kva: s.kva, ampere: s.ampere, pdl: String(pdlSeq + Math.abs(hash(c.nom + s.nom)) % 80000) });
     }
   }
   if (newSites.length && !DRY) {
@@ -347,6 +351,7 @@ async function main() {
         const m = computeMoney(def, kwh, s.year, rnd);
         const num = `SIM-${site.pdl}-${fmt(factureDate).replace(/-/g, "")}`;
         invoices.push({
+          org_id: orgId,
           facture_number: num, facture_date: fmt(factureDate), date_limite_paiement: fmt(dateLimite),
           total_ht: m.ht, tva: m.tva, autres_taxes: m.autresTaxes, total_ttc: m.ttc,
           is_duplicata: false, raw_ocr_json: null, precision: null,
@@ -379,7 +384,7 @@ async function main() {
   });
   if (trulyNew.length) {
     const rows = trulyNew.map(({ site, clientId }) => ({
-      client_id: clientId, site_id: site.id, contract_number: String(site.pdl ?? ""),
+      org_id: orgId, client_id: clientId, site_id: site.id, contract_number: String(site.pdl ?? ""),
       espace_livraison: site.nom, offre: "Tarif Bleu Collectivités", service: site.categorie === "eclairage_public" ? "Éclairage public" : "Bâtiment communal",
       puissance_souscrite_kva: site.kva, reglage_protection_a: site.ampere,
       type_compteur: "Électronique", numero_compteur: String(site.pdl ?? ""),

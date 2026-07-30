@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { getUserContext } from "@/lib/auth";
 import { createAnthropicClient, OCR_MODEL, retryWithBackoff } from "@/lib/anthropic/client";
 import {
   invoiceExtractionSchema,
@@ -40,8 +41,8 @@ Autres :
 
 export async function POST(request: Request) {
   const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) {
+  const ctx = await getUserContext();
+  if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -66,7 +67,7 @@ export async function POST(request: Request) {
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .replace(/[^a-zA-Z0-9.-]/g, "_");
-  const storagePath = `${authData.user.id}/${Date.now()}-${safeName}`;
+  const storagePath = `${ctx.orgId}/${ctx.userId}/${Date.now()}-${safeName}`;
   const { error: uploadError } = await supabase.storage
     .from("invoice-files")
     .upload(storagePath, arrayBuffer, { contentType: file.type });
@@ -127,7 +128,7 @@ export async function POST(request: Request) {
     ].filter(Boolean) as string[];
 
     if (hintCandidates.length) {
-      const { data: allCommunes } = await supabase.from("communes").select("id, nom");
+      const { data: allCommunes } = await supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId);
       if (allCommunes?.length) {
         // Normalize: expand abbrevs, neutralize saint/sainte gender, strip accents/punct
         const COMM_STOP = new Set(["de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au"]);
@@ -179,6 +180,7 @@ export async function POST(request: Request) {
       const { data: existingContract } = await supabase
         .from("contracts")
         .select("site_id, sites(id, nom, commune_id)")
+        .eq("org_id", ctx.orgId)
         .eq("contract_number", contractNumber)
         .maybeSingle();
       const rawSite = existingContract?.sites;

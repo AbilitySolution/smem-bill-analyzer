@@ -7,12 +7,13 @@ export type AnomalyType =
 export type AnomalySeverity = "low" | "medium" | "high";
 export type TauxUnit = "eur_per_kwh" | "percent";
 export type Categorie = "batiment" | "eclairage_public";
-export type UserRole = "admin_smem" | "agent_commune";
+export type UserRole = "org_admin" | "org_member";
 export type ChargeCategory = "fixed" | "tax";
 export type TarifType = "BASE" | "HPHC" | "TEMPO" | "EJP";
 
 export interface Commune {
   id: string;
+  org_id: string;
   nom: string;
   code_insee: string | null;
   points_lumineux: number | null;
@@ -20,11 +21,14 @@ export interface Commune {
   travaux_debut: string | null;
   travaux_fin: string | null;
   travaux_estimes: boolean | null;
+  latitude: number | null;
+  longitude: number | null;
   created_at: string;
 }
 
 export interface Site {
   id: string;
+  org_id: string;
   commune_id: string;
   categorie: Categorie;
   nom: string;
@@ -36,6 +40,7 @@ export interface Site {
 
 export interface Client {
   id: string;
+  org_id: string;
   nom: string;
   reference_client: string | null;
   reference_compte: string | null;
@@ -47,6 +52,7 @@ export interface Client {
 
 export interface Contract {
   id: string;
+  org_id: string;
   client_id: string | null;
   site_id: string | null;
   contract_number: string;
@@ -65,6 +71,7 @@ export interface Contract {
 
 export interface Invoice {
   id: string;
+  org_id: string;
   contract_id: string | null;
   client_id: string | null;
   commune_id: string | null;
@@ -150,6 +157,7 @@ export interface Anomaly {
 
 export interface Tag {
   id: string;
+  org_id: string;
   label: string;
   color: string;
   created_at: string;
@@ -166,6 +174,7 @@ export interface Activity {
 
 export interface FileRequestLink {
   id: string;
+  org_id: string;
   commune_id: string;
   token: string;
   label: string | null;
@@ -175,7 +184,9 @@ export interface FileRequestLink {
 }
 
 export interface UserRoleRow {
+  id: string;
   user_id: string;
+  org_id: string;
   role: UserRole;
   commune_id: string | null;
   created_at: string;

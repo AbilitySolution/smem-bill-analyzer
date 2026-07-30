@@ -8,6 +8,7 @@ import {
 } from "recharts";
 import { Gauge, Zap, Euro, FileText, AlertTriangle } from "lucide-react";
 import type { AnalysisData, Metric } from "@/lib/data/consumption";
+import type { ForecastData } from "@/lib/data/forecast";
 
 interface Commune { id: string; nom: string }
 interface Site { id: string; nom: string; commune_id: string | null; categorie: string }
@@ -22,9 +23,10 @@ const METRICS: { id: Metric; label: string; unit: string }[] = [
 const nf = (n: number) => n.toLocaleString("fr-FR");
 
 export function AnalysesView({
-  analysis, communes, sites, filters,
+  analysis, forecast, communes, sites, filters,
 }: {
   analysis: AnalysisData;
+  forecast: ForecastData;
   communes: Commune[];
   sites: Site[];
   filters: Filters;
@@ -134,6 +136,36 @@ export function AnalysesView({
             </BarChart>
           </ResponsiveContainer>
         </Card>
+
+        {/* Prévision */}
+        <div className="lg:col-span-2">
+          <Card title="Prévision de consommation (12 prochains mois)" subtitle="estimation heuristique, pas un modèle prédictif entraîné">
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart data={forecast.months} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--kn-border)" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
+                <YAxis tick={{ fontSize: 12, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
+                <Tooltip formatter={(v) => [`${nf(Number(v))} kWh`, "Prévision"]} contentStyle={{ fontSize: 12, borderRadius: 8, background: "var(--kn-card)", border: "1px solid var(--kn-border)", color: "var(--kn-text)" }} />
+                <Line type="monotone" dataKey="predictedKwh" name="kWh prévus" stroke={C.hp} strokeWidth={2.5} dot={{ r: 3 }} />
+              </LineChart>
+            </ResponsiveContainer>
+            <p className="mt-2 text-[11px] text-[var(--kn-text-muted)]">
+              Estimation heuristique basée sur l&apos;historique du site (pondéré selon son ancienneté) et la longueur de
+              nuit astronomique / la température (normales climatiques Open-Meteo au-delà de ~16 jours) — pas un modèle
+              prédictif entraîné, à affiner avec davantage d&apos;historique.
+            </p>
+            {forecast.sitesWithoutHistory > 0 && (
+              <p className="mt-1 text-[11px] text-[var(--kn-text-muted)]">
+                {forecast.sitesWithoutHistory} site{forecast.sitesWithoutHistory > 1 ? "s" : ""} sans facture propre — estimé sur la moyenne de la catégorie uniquement.
+              </p>
+            )}
+            {forecast.weatherUnavailable && (
+              <p className="mt-1 flex items-center gap-1 text-[11px] text-[#9a3412]">
+                <AlertTriangle className="size-3.5 shrink-0" /> Service météo indisponible — estimation sans ajustement saisonnier.
+              </p>
+            )}
+          </Card>
+        </div>
       </div>
     </div>
   );

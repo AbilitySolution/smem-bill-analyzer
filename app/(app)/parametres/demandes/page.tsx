@@ -16,19 +16,17 @@ export default async function DemandesPage() {
   const supabase = await createClient();
   const { data: communes } = await supabase.from("communes").select("id, nom").order("nom");
 
-  let linksQuery = supabase
+  const { data: links } = await supabase
     .from("file_request_links")
     .select("*, communes(nom)")
+    .eq("org_id", ctx.orgId)
     .order("created_at", { ascending: false });
-  if (ctx.role !== "admin_smem" && ctx.communeId) {
-    linksQuery = linksQuery.eq("commune_id", ctx.communeId);
-  }
-  const { data: links } = await linksQuery;
 
   const { data: pending } = await supabase
     .from("pending_uploads")
     .select("*, communes(nom)")
-    .eq("processed", false)
+    .eq("org_id", ctx.orgId)
+    .eq("status", "pending")
     .order("created_at", { ascending: false });
 
   return (

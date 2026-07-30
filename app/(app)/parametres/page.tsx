@@ -9,8 +9,8 @@ import { Building2, Lightbulb } from "lucide-react";
 export default async function ParametresPage() {
   const ctx = await getUserContext();
   if (!ctx) redirect("/login");
-  if (ctx.role !== "admin_smem") {
-    return <p className="text-sm text-slate-500">Réservé aux administrateurs SMEM.</p>;
+  if (ctx.role !== "org_admin") {
+    return <p className="text-sm text-slate-500">Réservé aux administrateurs.</p>;
   }
 
   const supabase = await createClient();
@@ -18,9 +18,13 @@ export default async function ParametresPage() {
   const { data: sites } = await supabase.from("sites").select("commune_id, categorie");
 
   const admin = createAdminClient();
-  const { data: usersData } = await admin.auth.admin.listUsers();
-  const { data: roles } = await admin.from("user_roles").select("*");
+  const { data: roles } = await admin.from("user_roles").select("*").eq("org_id", ctx.orgId);
   const roleMap = new Map((roles ?? []).map((r) => [r.user_id, r]));
+  // listUsers() liste tout le projet Supabase Auth — on borne aux membres de
+  // cette org (résolus individuellement, le volume par org reste petit).
+  const users = await Promise.all(
+    (roles ?? []).map((r) => admin.auth.admin.getUserById(r.user_id).then((res) => res.data.user)),
+  );
 
   return (
     <div className="space-y-6">
@@ -69,14 +73,14 @@ export default async function ParametresPage() {
               </tr>
             </thead>
             <tbody>
-              {(usersData?.users ?? []).map((u) => {
+              {users.filter((u) => u != null).map((u) => {
                 const r = roleMap.get(u.id);
                 return (
                   <RoleRow
                     key={u.id}
                     userId={u.id}
                     email={u.email ?? u.id}
-                    role={(r?.role as "admin_smem" | "agent_commune") ?? "agent_commune"}
+                    role={(r?.role as "org_admin" | "org_member") ?? "org_member"}
                     communeId={r?.commune_id ?? null}
                     communes={communes ?? []}
                   />

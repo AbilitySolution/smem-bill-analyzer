@@ -10,14 +10,18 @@ export async function GET(request: Request) {
 
   const supabase = await createClient();
   const { searchParams } = new URL(request.url);
-  const communeId = searchParams.get("commune_id");
+  const section = searchParams.get("section");
 
-  let query = supabase.from("sites").select("*").eq("org_id", ctx.orgId).order("nom");
-  if (communeId) query = query.eq("commune_id", communeId);
+  let query = supabase
+    .from("custom_field_definitions")
+    .select("id, section, label, field_type")
+    .eq("org_id", ctx.orgId)
+    .order("label");
+  if (section) query = query.eq("section", section);
 
   const { data, error } = await query;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  return NextResponse.json({ sites: data });
+  return NextResponse.json({ definitions: data });
 }

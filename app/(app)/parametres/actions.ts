@@ -4,12 +4,22 @@ import { revalidatePath } from "next/cache";
 import { getUserContext } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export async function assignUserRole(userId: string, role: "admin_smem" | "agent_commune", communeId: string | null) {
+export async function assignUserRole(userId: string, role: "org_admin" | "org_member", communeId: string | null) {
   const ctx = await getUserContext();
-  if (!ctx || ctx.role !== "admin_smem") return { error: "Non autorisé." };
+  if (!ctx || ctx.role !== "org_admin") return { error: "Non autorisé." };
 
   const admin = createAdminClient();
-  await admin.from("user_roles").upsert({ user_id: userId, role, commune_id: role === "admin_smem" ? null : communeId });
+  const { data: existing } = await admin.from("user_roles").select("org_id").eq("user_id", userId).maybeSingle();
+  if (existing && existing.org_id !== ctx.orgId) {
+    return { error: "Cet utilisateur appartient déjà à une autre organisation." };
+  }
+
+  await admin.from("user_roles").upsert({
+    user_id: userId,
+    role,
+    org_id: ctx.orgId,
+    commune_id: role === "org_admin" ? null : communeId,
+  });
 
   revalidatePath("/parametres");
   return { success: true };
@@ -18,14 +28,11 @@ export async function assignUserRole(userId: string, role: "admin_smem" | "agent
 export async function createFileRequestLink(communeId: string, label: string) {
   const ctx = await getUserContext();
   if (!ctx) return { error: "Non autorisé." };
-  if (ctx.role !== "admin_smem" && ctx.communeId !== communeId) {
-    return { error: "Non autorisé pour cette commune." };
-  }
 
   const admin = createAdminClient();
   const { error } = await admin
     .from("file_request_links")
-    .insert({ commune_id: communeId, label, created_by: ctx.userId });
+    .insert({ commune_id: communeId, label, created_by: ctx.userId, org_id: ctx.orgId });
 
   if (error) return { error: error.message };
   revalidatePath("/parametres/demandes");

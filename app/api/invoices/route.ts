@@ -1,8 +1,22 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { getUserContext } from "@/lib/auth";
 import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice, normalizePosteTarifaire } from "@/lib/anthropic/invoice-validation";
 import { z } from "zod";
+
+const customFieldEntrySchema = z.object({
+  section: z.enum(["localisation", "invoice", "client", "contract"]),
+  value: z.string().min(1),
+  definition_id: z.string().uuid().optional(),
+  new_definition: z.object({
+    label: z.string().min(1),
+    field_type: z.enum(["text", "number", "date"]),
+  }).optional(),
+}).refine(
+  (v) => Boolean(v.definition_id) !== Boolean(v.new_definition),
+  { message: "Fournir soit definition_id, soit new_definition, pas les deux." },
+);
 
 const saveRequestSchema = z.object({
   extraction: invoiceExtractionSchema,
@@ -12,12 +26,13 @@ const saveRequestSchema = z.object({
   new_site_categorie: z.enum(["batiment", "eclairage_public"]).optional(),
   override_comment: z.string().min(1).optional(),
   override_flag_anomaly: z.boolean().optional(),
+  custom_fields: z.array(customFieldEntrySchema).optional().default([]),
 });
 
 export async function POST(request: Request) {
   const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) {
+  const ctx = await getUserContext();
+  if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -30,7 +45,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly } = parsed.data;
+  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly, custom_fields } = parsed.data;
 
   if (!site_id && !commune_id) {
     return NextResponse.json({ error: "Commune non détectée — sélectionnez-la manuellement." }, { status: 400 });
@@ -40,7 +55,7 @@ export async function POST(request: Request) {
   let site: { id: string; commune_id: string; categorie: string };
 
   if (site_id) {
-    const { data, error } = await supabase.from("sites").select("id, commune_id, categorie").eq("id", site_id).single();
+    const { data, error } = await supabase.from("sites").select("id, commune_id, categorie").eq("id", site_id).eq("org_id", ctx.orgId).single();
     if (error || !data) return NextResponse.json({ error: "Site introuvable." }, { status: 400 });
     site = data;
   } else {
@@ -72,7 +87,7 @@ export async function POST(request: Request) {
         normalizeSite(s).split(" ").filter((w) => w.length > 2 && !SITE_STOP.has(w));
 
       const { data: sitesInCommune } = await supabase.from("sites").select("id, nom, commune_id, categorie")
-        .eq("commune_id", commune_id!);
+        .eq("commune_id", commune_id!).eq("org_id", ctx.orgId);
 
       const nkw = siteKeywords(nom);
       const matched = nkw.length > 0
@@ -91,7 +106,7 @@ export async function POST(request: Request) {
         site = matched;
       } else {
         const { data: newSite, error: siteErr } = await supabase.from("sites")
-          .insert({ commune_id: commune_id!, categorie, nom, pdl: null })
+          .insert({ org_id: ctx.orgId, commune_id: commune_id!, categorie, nom, pdl: null })
           .select("id, commune_id, categorie").single();
         if (siteErr || !newSite) return NextResponse.json({ error: `Création site: ${siteErr?.message}` }, { status: 500 });
         site = newSite;
@@ -103,19 +118,20 @@ export async function POST(request: Request) {
   const clientLookup = extraction.client.reference_compte
     ? supabase.from("clients").select("id").eq("reference_compte", extraction.client.reference_compte)
     : supabase.from("clients").select("id").eq("nom", extraction.client.nom);
-  const { data: existingClient } = await clientLookup.limit(1).maybeSingle();
+  const { data: existingClient } = await clientLookup.eq("org_id", ctx.orgId).limit(1).maybeSingle();
 
   let clientId = existingClient?.id as string | undefined;
   if (!clientId) {
     const { data: newClient, error: clientError } = await supabase
       .from("clients")
       .insert({
+        org_id: ctx.orgId,
         nom: extraction.client.nom,
         reference_client: extraction.client.reference_client,
         reference_compte: extraction.client.reference_compte,
         adresse: extraction.client.adresse,
         commune_id: site.commune_id,
-        created_by: authData.user.id,
+        created_by: ctx.userId,
       })
       .select("id")
       .single();
@@ -126,11 +142,12 @@ export async function POST(request: Request) {
     clientId = newClient.id;
   }
 
-  // 2. Upsert contract (unique on contract_number), rattaché au site choisi.
+  // 2. Upsert contract (unique on org_id+contract_number), rattaché au site choisi.
   const { data: existingContract } = await supabase
     .from("contracts")
     .select("id")
     .eq("contract_number", extraction.contract.contract_number)
+    .eq("org_id", ctx.orgId)
     .maybeSingle();
 
   let contractId = existingContract?.id as string | undefined;
@@ -139,11 +156,12 @@ export async function POST(request: Request) {
       .from("contracts")
       .insert({
         ...extraction.contract,
+        org_id: ctx.orgId,
         pdl: null,
         tarif_type: extraction.contract.tarif_type ?? null,
         client_id: clientId,
         site_id: site.id,
-        created_by: authData.user.id,
+        created_by: ctx.userId,
       })
       .select("id")
       .single();
@@ -167,6 +185,7 @@ export async function POST(request: Request) {
     .from("invoices")
     .select("id")
     .eq("facture_number", extraction.invoice.facture_number)
+    .eq("org_id", ctx.orgId)
     .maybeSingle();
 
   if (existingInvoice) {
@@ -190,6 +209,7 @@ export async function POST(request: Request) {
     .from("invoices")
     .insert({
       ...extraction.invoice,
+      org_id: ctx.orgId,
       contract_id: contractId,
       client_id: clientId,
       commune_id: site.commune_id,
@@ -197,7 +217,7 @@ export async function POST(request: Request) {
       categorie: site.categorie,
       file_path,
       status: initialStatus,
-      created_by: authData.user.id,
+      created_by: ctx.userId,
       raw_ocr_json: isOverride
         ? { ...extraction, _override: { comment: override_comment, flag_anomaly: override_flag_anomaly } }
         : extraction,
@@ -271,10 +291,76 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `Détails facture: ${childError.message}` }, { status: 500 });
   }
 
+  // 4.5. Résoudre/créer les définitions de champs personnalisés puis insérer les valeurs.
+  if (custom_fields.length > 0) {
+    const resolvedIds = new Map<number, string>(); // index dans custom_fields -> definition_id
+
+    for (let i = 0; i < custom_fields.length; i++) {
+      const cf = custom_fields[i];
+      if (cf.definition_id) {
+        resolvedIds.set(i, cf.definition_id);
+        continue;
+      }
+      const label = cf.new_definition!.label.trim();
+      const { data: inserted, error: defErr } = await supabase
+        .from("custom_field_definitions")
+        .insert({
+          org_id: ctx.orgId,
+          section: cf.section,
+          label,
+          field_type: cf.new_definition!.field_type,
+          created_by: ctx.userId,
+        })
+        .select("id")
+        .single();
+
+      if (defErr) {
+        // 23505 = unique_violation → un autre utilisateur a créé le même libellé
+        // entre-temps (ou double-clic) : réutiliser la définition existante.
+        if (defErr.code === "23505") {
+          const { data: existingDef } = await supabase
+            .from("custom_field_definitions")
+            .select("id")
+            .eq("org_id", ctx.orgId)
+            .eq("section", cf.section)
+            .ilike("label", label)
+            .maybeSingle();
+          if (existingDef) {
+            resolvedIds.set(i, existingDef.id);
+            continue;
+          }
+        }
+        await supabase.from("invoices").delete().eq("id", invoiceId);
+        return NextResponse.json({ error: `Champ personnalisé: ${defErr.message}` }, { status: 500 });
+      }
+      resolvedIds.set(i, inserted.id);
+    }
+
+    // Dédupliquer par definition_id (dernier gagne) pour éviter les conflits (invoice_id, definition_id).
+    const byDefinition = new Map<string, string>();
+    custom_fields.forEach((cf, i) => {
+      const defId = resolvedIds.get(i);
+      if (defId) byDefinition.set(defId, cf.value.trim());
+    });
+
+    const valueRows = Array.from(byDefinition.entries())
+      .filter(([, value]) => value.length > 0)
+      .map(([definition_id, value]) => ({ invoice_id: invoiceId, definition_id, value }));
+
+    if (valueRows.length > 0) {
+      const { error: valuesErr } = await supabase.from("invoice_custom_field_values").insert(valueRows);
+      if (valuesErr) {
+        await supabase.from("invoices").delete().eq("id", invoiceId);
+        return NextResponse.json({ error: `Valeurs champs personnalisés: ${valuesErr.message}` }, { status: 500 });
+      }
+    }
+  }
+
   // 5. Tag par défaut "À vérifier".
   const { data: defaultTag } = await supabase
     .from("tags")
     .select("id")
+    .eq("org_id", ctx.orgId)
     .eq("label", "À vérifier")
     .maybeSingle();
   if (defaultTag) {
@@ -296,7 +382,7 @@ export async function POST(request: Request) {
     );
     // Taguer "Anomalie" si erreur bloquante
     if (idpIssues.some((i) => i.severity === "error")) {
-      const { data: anomalyTag } = await supabase.from("tags").select("id").eq("label", "Anomalie").maybeSingle();
+      const { data: anomalyTag } = await supabase.from("tags").select("id").eq("org_id", ctx.orgId).eq("label", "Anomalie").maybeSingle();
       if (anomalyTag) await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: anomalyTag.id });
     }
   }
@@ -310,7 +396,7 @@ export async function POST(request: Request) {
       severity: "medium",
       description: `Validation ignorée manuellement. Justification : ${override_comment}`,
     });
-    const { data: anomalyTag } = await supabase.from("tags").select("id").eq("label", "Anomalie").maybeSingle();
+    const { data: anomalyTag } = await supabase.from("tags").select("id").eq("org_id", ctx.orgId).eq("label", "Anomalie").maybeSingle();
     if (anomalyTag) {
       await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: anomalyTag.id });
     }
@@ -338,6 +424,7 @@ export async function POST(request: Request) {
   const { data: pastInvoices } = await supabase
     .from("invoices")
     .select("id")
+    .eq("org_id", ctx.orgId)
     .eq("site_id", site.id)
     .neq("id", invoiceId);
 
@@ -388,6 +475,7 @@ export async function POST(request: Request) {
         const { data: anomalyTag } = await supabase
           .from("tags")
           .select("id")
+          .eq("org_id", ctx.orgId)
           .eq("label", "Anomalie")
           .maybeSingle();
         if (anomalyTag) {
@@ -401,12 +489,12 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
-  const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) {
+  const ctx = await getUserContext();
+  if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const supabase = await createClient();
   const { searchParams } = new URL(request.url);
   const communeId = searchParams.get("commune_id");
   const categorie = searchParams.get("categorie");
@@ -417,6 +505,7 @@ export async function GET(request: Request) {
     .select(
       "*, sites(nom, categorie, commune_id), communes(nom), invoice_tags(tags(id, label, color))",
     )
+    .eq("org_id", ctx.orgId)
     .order("facture_date", { ascending: false });
 
   if (communeId) query = query.eq("commune_id", communeId);

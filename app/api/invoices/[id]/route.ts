@@ -4,6 +4,19 @@ import { z } from "zod";
 
 const n = z.number().nullable();
 
+const customFieldEntrySchema = z.object({
+  section: z.enum(["localisation", "invoice", "client", "contract"]),
+  value: z.string().min(1),
+  definition_id: z.string().uuid().optional(),
+  new_definition: z.object({
+    label: z.string().min(1),
+    field_type: z.enum(["text", "number", "date"]),
+  }).optional(),
+}).refine(
+  (v) => Boolean(v.definition_id) !== Boolean(v.new_definition),
+  { message: "Fournir soit definition_id, soit new_definition, pas les deux." },
+);
+
 const updateSchema = z.object({
   commune_id: z.string().uuid(),
   categorie: z.enum(["batiment", "eclairage_public"]),
@@ -62,6 +75,7 @@ const updateSchema = z.object({
     tarif_kva_an: n,
     montant_eur: z.number(),
   })),
+  custom_fields: z.array(customFieldEntrySchema).optional().default([]),
 });
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -76,7 +90,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Données invalides.", details: parsed.error.format() }, { status: 400 });
   }
 
-  const { commune_id, categorie, client_id, contract_id, invoice, client, contract, consumption_lines, charges } = parsed.data;
+  const { commune_id, categorie, client_id, contract_id, invoice, client, contract, consumption_lines, charges, custom_fields } = parsed.data;
 
   const { data: existing } = await supabase
     .from("invoices")
@@ -119,6 +133,65 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   const childErr = childInserts.find((r) => r.error)?.error;
   if (childErr) return NextResponse.json({ error: childErr.message }, { status: 500 });
+
+  // Résoudre/créer les définitions de champs personnalisés puis remplacer les valeurs (delete-puis-réinsère,
+  // même convention que consumption_periods/invoice_charges ci-dessus).
+  await supabase.from("invoice_custom_field_values").delete().eq("invoice_id", id);
+
+  if (custom_fields.length > 0) {
+    const resolvedIds = new Map<number, string>();
+
+    for (let i = 0; i < custom_fields.length; i++) {
+      const cf = custom_fields[i];
+      if (cf.definition_id) {
+        resolvedIds.set(i, cf.definition_id);
+        continue;
+      }
+      const label = cf.new_definition!.label.trim();
+      const { data: inserted, error: defErr } = await supabase
+        .from("custom_field_definitions")
+        .insert({
+          section: cf.section,
+          label,
+          field_type: cf.new_definition!.field_type,
+          created_by: authData.user.id,
+        })
+        .select("id")
+        .single();
+
+      if (defErr) {
+        if (defErr.code === "23505") {
+          const { data: existingDef } = await supabase
+            .from("custom_field_definitions")
+            .select("id")
+            .eq("section", cf.section)
+            .ilike("label", label)
+            .maybeSingle();
+          if (existingDef) {
+            resolvedIds.set(i, existingDef.id);
+            continue;
+          }
+        }
+        return NextResponse.json({ error: `Champ personnalisé: ${defErr.message}` }, { status: 500 });
+      }
+      resolvedIds.set(i, inserted.id);
+    }
+
+    const byDefinition = new Map<string, string>();
+    custom_fields.forEach((cf, i) => {
+      const defId = resolvedIds.get(i);
+      if (defId) byDefinition.set(defId, cf.value.trim());
+    });
+
+    const valueRows = Array.from(byDefinition.entries())
+      .filter(([, value]) => value.length > 0)
+      .map(([definition_id, value]) => ({ invoice_id: id, definition_id, value }));
+
+    if (valueRows.length > 0) {
+      const { error: valuesErr } = await supabase.from("invoice_custom_field_values").insert(valueRows);
+      if (valuesErr) return NextResponse.json({ error: `Valeurs champs personnalisés: ${valuesErr.message}` }, { status: 500 });
+    }
+  }
 
   return NextResponse.json({ success: true });
 }
