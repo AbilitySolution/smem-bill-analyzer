@@ -115,6 +115,7 @@ export async function getConsumptionForecast(filters: ForecastFilters): Promise<
   let weatherUnavailable = false;
   const climatologyCache = new Map<string, Map<number, number>>();
   const forecastCache = new Map<string, DailyTemp[]>();
+  const referenceTempCache = new Map<string, number | null>();
 
   async function getClimatology(lat: number, lon: number): Promise<Map<number, number>> {
     const key = `${lat},${lon}`;
@@ -157,10 +158,32 @@ export async function getConsumptionForecast(filters: ForecastFilters): Promise<
     }
   }
 
-  const monthlyTotals = new Array(12).fill(0) as number[];
-  const monthlyIsClimatological = new Array(12).fill(true) as boolean[];
+  /** Température historique moyenne sur la fenêtre de référence — mémoïsée par (lat, lon, span), plusieurs sites d'une même commune/pool partagent souvent la même clé. */
+  async function getReferenceTemp(lat: number, lon: number, span: { start: string; end: string }): Promise<number | null> {
+    const key = `${lat},${lon},${span.start},${span.end}`;
+    if (referenceTempCache.has(key)) return referenceTempCache.get(key)!;
+    try {
+      const temps = await fetchHistoricalDailyTemps(lat, lon, span.start, span.end);
+      const avg = averageTemp(temps);
+      referenceTempCache.set(key, avg);
+      return avg;
+    } catch {
+      weatherUnavailable = true;
+      referenceTempCache.set(key, null);
+      return null;
+    }
+  }
+
+  // Phase 1 (synchrone) : préparer le contexte par site, sans appel réseau.
+  interface SiteContext {
+    site: SiteRow;
+    blendedRate: number;
+    lat: number;
+    lon: number;
+    referenceSpan: { start: string; end: string } | null;
+  }
+  const siteContexts: SiteContext[] = [];
   let sitesWithoutHistory = 0;
-  let sitesContributed = 0;
 
   for (const site of sites) {
     const rates = computeInvoiceRates(periodsBySite.get(site.id) ?? []);
@@ -177,25 +200,44 @@ export async function getConsumptionForecast(filters: ForecastFilters): Promise<
       : weight * siteRate + (1 - weight) * pool.rate;
 
     if (blendedRate == null) continue; // aucune donnée exploitable, ni site ni pool
-    sitesContributed++;
 
-    const lat = site.communes?.latitude ?? DEFAULT_LAT;
-    const lon = site.communes?.longitude ?? DEFAULT_LON;
-    const referenceSpan = historicalSpan(rates) ?? pool.span;
+    siteContexts.push({
+      site,
+      blendedRate,
+      lat: site.communes?.latitude ?? DEFAULT_LAT,
+      lon: site.communes?.longitude ?? DEFAULT_LON,
+      referenceSpan: historicalSpan(rates) ?? pool.span,
+    });
+  }
 
+  if (siteContexts.length === 0) return null;
+
+  // Phase 2 (réseau, en parallèle) : préchauffer tous les appels météo distincts
+  // AVANT la boucle mensuelle — évite un aller-retour Open-Meteo séquentiel par
+  // site/mois (c'était la cause d'un chargement très lent de /analyses).
+  const uniqueCoords = new Map<string, { lat: number; lon: number }>();
+  for (const ctx of siteContexts) {
+    if (ctx.site.categorie === "batiment") uniqueCoords.set(`${ctx.lat},${ctx.lon}`, { lat: ctx.lat, lon: ctx.lon });
+  }
+  await Promise.all([
+    ...siteContexts
+      .filter((c) => c.site.categorie === "batiment" && c.referenceSpan)
+      .map((c) => getReferenceTemp(c.lat, c.lon, c.referenceSpan!)),
+    ...[...uniqueCoords.values()].flatMap(({ lat, lon }) => [getClimatology(lat, lon), getForecastTemps(lat, lon)]),
+  ]);
+
+  // Phase 3 (synchrone, tout est en cache) : agréger les 12 mois.
+  const monthlyTotals = new Array(12).fill(0) as number[];
+  const monthlyIsClimatological = new Array(12).fill(true) as boolean[];
+
+  for (const { site, blendedRate, lat, lon, referenceSpan } of siteContexts) {
     let referenceCondition: number | null = null;
     if (site.categorie === "eclairage_public") {
       referenceCondition = referenceSpan
         ? averageNightLengthHours(lat, new Date(referenceSpan.start), new Date(referenceSpan.end))
         : null;
     } else if (referenceSpan) {
-      try {
-        const temps = await fetchHistoricalDailyTemps(lat, lon, referenceSpan.start, referenceSpan.end);
-        referenceCondition = averageTemp(temps);
-      } catch {
-        weatherUnavailable = true;
-        referenceCondition = null;
-      }
+      referenceCondition = await getReferenceTemp(lat, lon, referenceSpan); // déjà en cache (phase 2)
     }
 
     for (let i = 0; i < monthStarts.length; i++) {
@@ -212,13 +254,13 @@ export async function getConsumptionForecast(filters: ForecastFilters): Promise<
         // éviter un mélange partiel prévision/climatologie au sein d'un même mois.
         const isClimatological = differenceInCalendarDays(monthEnd, now) > 16;
         if (!isClimatological) {
-          const temps = await getForecastTemps(lat, lon);
+          const temps = await getForecastTemps(lat, lon); // déjà en cache (phase 2)
           const monthTemps = temps.filter((t) => t.date >= format(monthStart, "yyyy-MM-dd") && t.date <= format(monthEnd, "yyyy-MM-dd"));
           targetCondition = averageTemp(monthTemps);
           if (targetCondition == null) monthlyIsClimatological[i] = true;
           else monthlyIsClimatological[i] = false;
         } else {
-          const climatology = await getClimatology(lat, lon);
+          const climatology = await getClimatology(lat, lon); // déjà en cache (phase 2)
           targetCondition = climatology.get(monthStart.getUTCMonth()) ?? null;
         }
       }
@@ -230,8 +272,6 @@ export async function getConsumptionForecast(filters: ForecastFilters): Promise<
       monthlyTotals[i] += blendedRate * daysInMonth * factor;
     }
   }
-
-  if (sitesContributed === 0) return null;
 
   const months: ForecastMonthRow[] = monthStarts.map((d, i) => ({
     label: format(d, "yyyy-MM"),
