@@ -8,6 +8,9 @@ const EMPTY: AnalysisData = {
   byYear: [],
   hpHc: { hpKwh: 0, hcKwh: 0, hpEur: 0, hcEur: 0, hpPx: 0, hcPx: 0 },
   kpis: { totalKwh: 0, totalCost: 0, avgPrice: 0, invoiceCount: 0 },
+  yoy: { currentYear: null, previousYear: null, byMonth: [] },
+  heatmap: { year: null, rows: [] },
+  availableYears: [],
 };
 
 const EMPTY_FORECAST: ForecastData = { months: [], siteCount: 0, sitesWithoutHistory: 0 };
@@ -15,7 +18,7 @@ const EMPTY_FORECAST: ForecastData = { months: [], siteCount: 0, sitesWithoutHis
 export default async function AnalysesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ commune?: string; site?: string; cat?: string }>;
+  searchParams: Promise<{ commune?: string; site?: string; cat?: string; year?: string }>;
 }) {
   const sp = await searchParams;
   const cat = sp.cat === "batiment" || sp.cat === "eclairage_public" ? sp.cat : undefined;
@@ -32,7 +35,7 @@ export default async function AnalysesPage({
         forecast={DEMO_FORECAST}
         communes={[]}
         sites={[]}
-        filters={{ commune: sp.commune ?? "", site: sp.site ?? "", cat: sp.cat ?? "" }}
+        filters={{ commune: sp.commune ?? "", site: sp.site ?? "", cat: sp.cat ?? "", year: sp.year ?? "" }}
       />
     );
   }
@@ -49,7 +52,7 @@ export default async function AnalysesPage({
     : { data: [] };
 
   const [analysisResult, forecastResult] = await Promise.allSettled([
-    getConsumptionAnalysis({ orgId: ctx.orgId, communeId: sp.commune, siteId: sp.site, categorie: cat }),
+    getConsumptionAnalysis({ orgId: ctx.orgId, communeId: sp.commune, siteId: sp.site, categorie: cat, year: sp.year }),
     getConsumptionForecast({ orgId: ctx.orgId, communeId: sp.commune, siteId: sp.site, categorie: cat }),
   ]);
 
@@ -66,7 +69,7 @@ export default async function AnalysesPage({
       forecast={forecast}
       communes={communesRes.data ?? []}
       sites={sitesRes.data ?? []}
-      filters={{ commune: sp.commune ?? "", site: sp.site ?? "", cat: sp.cat ?? "" }}
+      filters={{ commune: sp.commune ?? "", site: sp.site ?? "", cat: sp.cat ?? "", year: sp.year ?? "" }}
     />
   );
 }
