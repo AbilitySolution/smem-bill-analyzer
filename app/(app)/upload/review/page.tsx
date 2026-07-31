@@ -375,6 +375,10 @@ export default function ReviewPage() {
     try {
       const body: Record<string, unknown> = {
         extraction: ext,
+        // `ocr.extraction` reste l'extraction brute de l'IA : toutes les éditions passent par
+        // setExt en immuable, donc l'original n'est jamais muté. Le serveur en déduit les
+        // corrections humaines → mesure de la précision réelle du modèle.
+        original_extraction: ocr.extraction,
         file_path: ocr.file_path,
         commune_id: communeId,
         new_site_categorie: categorie,

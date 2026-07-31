@@ -1,30 +1,29 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   Search, Download, Building2, Lightbulb, ChevronsUpDown, ChevronUp, ChevronDown,
-  ChevronRight, Layers, List, LayoutGrid, Columns3, FileText,
-  Check, Eye, EyeOff, Zap, Euro, CalendarRange, Hash, AlertTriangle,
+  List, LayoutGrid, Columns3, FileText, Loader2,
+  Check, Eye, EyeOff, Zap, Euro, CalendarRange, Hash, AlertTriangle, X,
 } from "lucide-react";
-import type { InvoiceDoc } from "@/lib/data/invoices";
-import { downloadCsv } from "@/lib/csv";
+import type { InvoiceDoc, InvoiceListPage } from "@/lib/data/invoices";
+import type { SortKey } from "@/lib/data/invoice-list-params";
 import { SelectionBar } from "./selection-bar";
 import { DocumentCard } from "./document-card";
 import { ColumnsView } from "./columns-view";
 import { ConfidenceBadge } from "./confidence-badge";
 import { AnomalyTicker } from "./anomaly-ticker";
+import { PaginationBar } from "./pagination-bar";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
-const eur = (n: number) => n.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
 const eurShort = (n: number) => n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
 const kwhFmt = (n: number) => n.toLocaleString("fr-FR") + " kWh";
 const catLabel = (c: string) => (c === "batiment" ? "Bâtiment" : "Éclairage public");
 const frDate = (d: string) => { const [y, m, j] = d.split("-"); return `${j}/${m}/${y}`; };
 
-type SortKey = "date" | "number" | "site" | "commune" | "kwh" | "totalTtc";
-type CatFilter = "all" | "batiment" | "eclairage_public";
-type GroupBy = "none" | "commune" | "site" | "categorie";
+type CatFilter = "" | "batiment" | "eclairage_public";
 type View = "liste" | "galerie" | "colonnes";
 
 const VIEWS: { id: View; label: string; icon: typeof List }[] = [
@@ -33,98 +32,107 @@ const VIEWS: { id: View; label: string; icon: typeof List }[] = [
   { id: "colonnes", label: "Colonnes", icon: Columns3 },
 ];
 
-export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: boolean }) {
-  const [query, setQuery] = useState("");
-  const [cat, setCat] = useState<CatFilter>("all");
-  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "date", dir: -1 });
-  const [groupBy, setGroupBy] = useState<GroupBy>("commune");
+interface Commune { id: string; nom: string }
+interface Site { id: string; nom: string; commune_id: string | null }
+
+export interface HubFilters {
+  query?: string;
+  categorie?: "batiment" | "eclairage_public";
+  communeId?: string;
+  siteId?: string;
+  onlyAnomalies?: boolean;
+  showArchived?: boolean;
+  sort: SortKey;
+  dir: "asc" | "desc";
+  page: number;
+  pageSize: number;
+}
+
+export function DocumentsHub({
+  result, communes, sites, filters,
+}: {
+  result: InvoiceListPage;
+  communes: Commune[];
+  sites: Site[];
+  filters: HubFilters;
+}) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [pending, startTransition] = useTransition();
+
   const [view, setView] = useState<View>("liste");
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [showArchived, setShowArchived] = useState(false);
-  const [onlyAnomalies, setOnlyAnomalies] = useState(false);
+  // Miroir local du champ recherche : l'URL est la source de vérité mais on ne peut pas
+  // attendre l'aller-retour serveur à chaque frappe (perte de focus + requête inutile).
+  const [queryDraft, setQueryDraft] = useState(filters.query ?? "");
 
-  const openAnoms = (d: InvoiceDoc) => (d.anomalies ?? []).filter((a) => !a.resolved);
-  const hasAnomaly = (d: InvoiceDoc) => openAnoms(d).length > 0;
+  const { docs, kpis, page, pageSize, pageCount, isDemo } = result;
 
-  const archivedCount = useMemo(() => docs.filter((d) => d.archived).length, [docs]);
-  const anomalyCount = useMemo(() => docs.filter((d) => !d.archived && hasAnomaly(d)).length, [docs]);
+  /** Écrit les filtres dans l'URL — état partageable, bouton retour fonctionnel. */
+  function setParams(next: Record<string, string | number | boolean | undefined>, resetPage = true) {
+    const params = new URLSearchParams(searchParams.toString());
+    for (const [k, v] of Object.entries(next)) {
+      if (v === undefined || v === "" || v === false) params.delete(k);
+      else params.set(k, v === true ? "1" : String(v));
+    }
+    if (resetPage) params.delete("page"); // un filtre modifié invalide la page courante
+    startTransition(() => router.push(`/documents${params.toString() ? "?" + params : ""}`, { scroll: false }));
+  }
 
-  const rows = useMemo(() => {
-    const q = query.toLowerCase();
-    const list = docs.filter(
-      (d) => (showArchived ? true : !d.archived) &&
-        (cat === "all" || d.categorie === cat) &&
-        (!onlyAnomalies || hasAnomaly(d)) &&
-        (d.number.toLowerCase().includes(q) || d.site.toLowerCase().includes(q) || d.commune.toLowerCase().includes(q)),
-    );
-    return [...list].sort((a, b) => {
-      let c = 0;
-      if (sort.key === "number") c = a.number.localeCompare(b.number);
-      else if (sort.key === "site") c = a.site.localeCompare(b.site);
-      else if (sort.key === "commune") c = a.commune.localeCompare(b.commune);
-      else if (sort.key === "kwh") c = a.kwh - b.kwh;
-      else if (sort.key === "totalTtc") c = a.totalTtc - b.totalTtc;
-      else c = a.date.localeCompare(b.date);
-      return c * sort.dir;
-    });
-  }, [docs, query, cat, sort, showArchived, onlyAnomalies]);
+  // Recherche : on ne pousse dans l'URL qu'après une pause de frappe.
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) { firstRender.current = false; return; }
+    const id = setTimeout(() => {
+      if (queryDraft !== (filters.query ?? "")) setParams({ q: queryDraft || undefined });
+    }, 350);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryDraft]);
 
-  const groupKey = (d: InvoiceDoc) => (groupBy === "commune" ? d.commune : groupBy === "site" ? d.site : catLabel(d.categorie));
-  const groups = useMemo(() => {
-    if (groupBy === "none") return null;
-    const map = new Map<string, InvoiceDoc[]>();
-    for (const d of rows) { const k = groupKey(d); (map.get(k) ?? map.set(k, []).get(k)!).push(d); }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [rows, groupBy]);
+  // Changer de page/filtre remplace le contenu : une sélection portant sur des lignes
+  // qui ne sont plus affichées serait invisible et dangereuse (actions en masse).
+  useEffect(() => { setSelected(new Set()); }, [page, filters.query, filters.categorie, filters.communeId, filters.siteId, filters.onlyAnomalies, filters.showArchived]);
 
-  // KPIs (sur le périmètre filtré)
-  const kpis = useMemo(() => {
-    const totalTtc = rows.reduce((s, d) => s + d.totalTtc, 0);
-    const totalKwh = rows.reduce((s, d) => s + d.kwh, 0);
-    const years = rows.map((d) => Number(d.date.slice(0, 4))).filter((y) => !Number.isNaN(y));
-    const min = years.length ? Math.min(...years) : null;
-    const max = years.length ? Math.max(...years) : null;
-    return { count: rows.length, totalTtc, totalKwh, periode: min ? (min === max ? `${min}` : `${min}–${max}`) : "—" };
-  }, [rows]);
+  const sitesForCommune = useMemo(
+    () => (filters.communeId ? sites.filter((s) => s.commune_id === filters.communeId) : sites),
+    [sites, filters.communeId],
+  );
 
-  const toggleSort = (key: SortKey) => setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
-  const toggleGroup = (k: string) => setCollapsed((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+  const toggleSort = (key: SortKey) =>
+    setParams({ sort: key, dir: filters.sort === key && filters.dir === "desc" ? "asc" : "desc" }, false);
 
   const toggleSel = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const setMany = (ids: string[], on: boolean) => setSelected((s) => { const n = new Set(s); ids.forEach((id) => (on ? n.add(id) : n.delete(id))); return n; });
   const clearSel = () => setSelected(new Set());
 
-  const allVisibleIds = rows.map((d) => d.id);
-  const allSelected = allVisibleIds.length > 0 && allVisibleIds.every((id) => selected.has(id));
+  const pageIds = docs.map((d) => d.id);
+  const allSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
   const selectedDocs = useMemo(() => docs.filter((d) => selected.has(d.id)), [docs, selected]);
 
+  const hasFilters = !!(filters.query || filters.categorie || filters.communeId || filters.siteId || filters.onlyAnomalies || filters.showArchived);
+
+  /** L'export porte sur tout le périmètre filtré, pas sur la page affichée. */
   function exportCsv() {
-    const headers = ["N° facture", "Date", "Site", "Commune", "Catégorie", "Duplicata", "Total HT (€)", "TVA (€)", "Total TTC (€)", "Conso (kWh)"];
-    const data: (string | number | null)[][] = [headers];
-    const rowOf = (d: InvoiceDoc) => [d.number, frDate(d.date), d.site, d.commune, catLabel(d.categorie), d.isDuplicata ? "Oui" : "Non", d.totalHt, d.tva, d.totalTtc, d.kwh];
-    if (groups) {
-      for (const [label, items] of groups) {
-        data.push([`▸ ${label} (${items.length})`]);
-        items.forEach((d) => data.push(rowOf(d)));
-        data.push(["", "", "", "", "", `Sous-total ${label}`, items.reduce((s, d) => s + d.totalHt, 0), items.reduce((s, d) => s + d.tva, 0), items.reduce((s, d) => s + d.totalTtc, 0), items.reduce((s, d) => s + d.kwh, 0)]);
-      }
-    } else {
-      rows.forEach((d) => data.push(rowOf(d)));
-    }
-    downloadCsv("mes-documents.csv", data);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("page");
+    params.delete("size");
+    window.location.href = `/api/export/invoices${params.toString() ? "?" + params : ""}`;
   }
 
   const SortBtn = ({ k, label, align }: { k: SortKey; label: string; align?: "right" }) => (
-    <button onClick={() => toggleSort(k)} className={cx("inline-flex items-center gap-1 hover:text-[var(--kn-text)]", align === "right" && "flex-row-reverse")}>
+    <button onClick={() => toggleSort(k)}
+      className={cx("inline-flex cursor-pointer items-center gap-1 hover:text-[var(--kn-text)]", align === "right" && "flex-row-reverse")}>
       {label}
-      {sort.key === k ? (sort.dir === 1 ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />) : <ChevronsUpDown className="size-3 opacity-40" />}
+      {filters.sort === k
+        ? (filters.dir === "asc" ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />)
+        : <ChevronsUpDown className="size-3 opacity-40" />}
     </button>
   );
 
   const Tick = ({ on, onClick }: { on: boolean; onClick: (e: React.MouseEvent) => void }) => (
     <button onClick={onClick} aria-label={on ? "Désélectionner" : "Sélectionner"}
-      className={cx("flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
+      className={cx("flex size-4 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors",
         on ? "border-[#f97316] bg-[#f97316] text-white" : "border-[var(--kn-border)] text-transparent hover:border-[#f97316]")}>
       <Check className="size-3" strokeWidth={3} />
     </button>
@@ -135,9 +143,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
       <td className="px-3 py-2.5"><Tick on={selected.has(d.id)} onClick={() => toggleSel(d.id)} /></td>
       <td className="px-4 py-0">
         <div className="flex items-center gap-2 py-2.5">
-          <Link href={`/documents/extraction?id=${d.id}`} className="font-medium text-[var(--kn-text)]">
-            {d.number}
-          </Link>
+          <Link href={`/documents/extraction?id=${d.id}`} className="font-medium text-[var(--kn-text)]">{d.number}</Link>
           <AnomalyTicker invoiceId={d.id} anomalies={d.anomalies} label={false} />
           {d.archived && <span className="rounded bg-[var(--kn-value-box)] px-1.5 text-[10px] text-[var(--kn-text-muted)]">masqué</span>}
         </div>
@@ -152,61 +158,17 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
       </td>
       <td className="px-4 py-2.5"><ConfidenceBadge value={d.confidence} /></td>
       <td className="px-4 py-2.5 text-right tabular-nums text-[var(--kn-text-muted)]">{d.kwh > 0 ? kwhFmt(d.kwh) : "—"}</td>
-      <td className="px-4 py-2.5 text-right font-medium tabular-nums">{eur(d.totalTtc)}</td>
+      <td className="px-4 py-2.5 text-right font-medium tabular-nums">{eurShort(d.totalTtc)}</td>
     </tr>
   );
-
-  const GroupHeaderRow = ({ label, items }: { label: string; items: InvoiceDoc[] }) => {
-    const ids = items.map((i) => i.id);
-    const allOn = ids.every((id) => selected.has(id));
-    const isCollapsed = collapsed.has(label);
-    return (
-      <tr className="border-b border-[var(--kn-border)] bg-[var(--kn-panel)]">
-        <td className="px-3 py-2"><Tick on={allOn} onClick={(e) => { e.stopPropagation(); setMany(ids, !allOn); }} /></td>
-        <td colSpan={6} className="cursor-pointer px-4 py-2" onClick={() => toggleGroup(label)}>
-          <span className="flex items-center gap-1.5 font-semibold text-[var(--kn-text)]">
-            <ChevronRight className={cx("size-4 transition-transform", !isCollapsed && "rotate-90")} />
-            {label}
-            <span className="rounded-full bg-[var(--kn-card)] px-2 py-0.5 text-[11px] font-medium text-[var(--kn-text-muted)]">{items.length}</span>
-          </span>
-        </td>
-        <td className="px-4 py-2 text-right text-[12px] tabular-nums text-[var(--kn-text-muted)]">{items.reduce((s, d) => s + d.kwh, 0) > 0 ? kwhFmt(items.reduce((s, d) => s + d.kwh, 0)) : "—"}</td>
-        <td className="px-4 py-2 text-right text-[13px] font-semibold tabular-nums text-[var(--kn-text)]">{eur(items.reduce((s, d) => s + d.totalTtc, 0))}</td>
-      </tr>
-    );
-  };
-
-  // Galerie / icônes : segments [label|null, items]
-  const segments: [string | null, InvoiceDoc[]][] = groups ? groups.map(([l, i]) => [l, i]) : [[null, rows]];
-
-  const GalleryGrid = ({ items }: { items: InvoiceDoc[] }) => (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-      {items.map((d) => <DocumentCard key={d.id} doc={d} selected={selected.has(d.id)} onToggle={() => toggleSel(d.id)} />)}
-    </div>
-  );
-
-  const GroupBanner = ({ label, items }: { label: string; items: InvoiceDoc[] }) => {
-    const ids = items.map((i) => i.id);
-    const allOn = ids.every((id) => selected.has(id));
-    return (
-      <div className="mb-2 mt-1 flex items-center gap-2">
-        <Tick on={allOn} onClick={(e) => { e.stopPropagation(); setMany(ids, !allOn); }} />
-        <h3 className="text-[13px] font-semibold text-[var(--kn-text)]">{label}</h3>
-        <span className="rounded-full bg-[var(--kn-value-box)] px-2 py-0.5 text-[11px] text-[var(--kn-text-muted)]">{items.length}</span>
-        <span className="ml-auto text-[12px] font-medium tabular-nums text-[var(--kn-text-muted)]">{eur(items.reduce((s, d) => s + d.totalTtc, 0))}</span>
-      </div>
-    );
-  };
-
-  const scroll = view === "colonnes" ? "overflow-hidden" : "overflow-y-auto";
 
   return (
     <div className="flex h-full flex-col">
       {/* En-tête : KPIs + barre d'outils */}
       <div className="shrink-0 px-8 pb-3 pt-5">
-        {/* Bandeau KPI orange */}
+        {/* KPIs — calculés en SQL sur tout le périmètre filtré, pas sur la page affichée */}
         <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <Kpi icon={<Hash className="size-4" />} label="Factures" value={String(kpis.count)} />
+          <Kpi icon={<Hash className="size-4" />} label="Factures" value={kpis.count.toLocaleString("fr-FR")} />
           <Kpi icon={<Euro className="size-4" />} label="Total TTC" value={eurShort(kpis.totalTtc)} />
           <Kpi icon={<Zap className="size-4" />} label="Consommation" value={kwhFmt(kpis.totalKwh)} />
           <Kpi icon={<CalendarRange className="size-4" />} label="Période" value={kpis.periode} />
@@ -214,74 +176,105 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
 
         <div className="flex flex-wrap items-center gap-2.5">
           {isDemo && <span className="rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] font-medium text-[#9a3412]">Aperçu — vraies données une fois connecté</span>}
-          {/* Sélecteur de vue */}
+
           <div className="flex items-center gap-0.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] p-0.5">
             {VIEWS.map((v) => (
               <button key={v.id} onClick={() => setView(v.id)} title={v.label}
-                className={cx("flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors",
+                className={cx("flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors",
                   view === v.id ? "bg-[#f97316] text-white" : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
                 <v.icon className="size-3.5" /> <span className="hidden sm:inline">{v.label}</span>
               </button>
             ))}
           </div>
 
-          <div className="relative min-w-[200px] flex-1 max-w-xs">
+          <div className="relative min-w-[200px] max-w-xs flex-1">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--kn-text-muted)]" strokeWidth={1.75} />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher (n°, site, commune)"
-              className="h-9 w-full rounded-lg border border-[var(--kn-border)] pl-9 pr-3 text-sm focus:border-[#f97316] focus:outline-none" />
+            <input value={queryDraft} onChange={(e) => setQueryDraft(e.target.value)}
+              placeholder="Rechercher (n°, site, commune)"
+              className="h-9 w-full rounded-lg border border-[var(--kn-border)] pl-9 pr-8 text-sm focus:border-[#f97316] focus:outline-none" />
+            {queryDraft && (
+              <button onClick={() => setQueryDraft("")} aria-label="Effacer la recherche"
+                className="absolute right-2 top-1/2 flex size-5 -translate-y-1/2 cursor-pointer items-center justify-center rounded text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]">
+                <X className="size-3.5" />
+              </button>
+            )}
           </div>
 
+          <FilterSelect label="Commune" value={filters.communeId ?? ""}
+            onChange={(v) => setParams({ commune: v || undefined, site: undefined })}
+            options={[{ value: "", label: "Toutes les communes" }, ...communes.map((c) => ({ value: c.id, label: c.nom }))]} />
+
+          <FilterSelect label="Site" value={filters.siteId ?? ""}
+            onChange={(v) => setParams({ site: v || undefined })}
+            options={[{ value: "", label: "Tous les sites" }, ...sitesForCommune.map((s) => ({ value: s.id, label: s.nom }))]} />
+
           <div className="flex items-center gap-1 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] p-1 text-[13px]">
-            {([["all", "Toutes"], ["batiment", "Bâtiments"], ["eclairage_public", "Éclairage"]] as [CatFilter, string][]).map(([v, label]) => (
-              <button key={v} onClick={() => setCat(v)} className={cx("rounded-md px-2.5 py-1 font-medium transition-colors", cat === v ? "bg-[var(--kn-solid)] text-white" : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>{label}</button>
+            {([["", "Toutes"], ["batiment", "Bâtiments"], ["eclairage_public", "Éclairage"]] as [CatFilter, string][]).map(([v, label]) => (
+              <button key={v || "all"} onClick={() => setParams({ cat: v || undefined })}
+                className={cx("cursor-pointer rounded-md px-2.5 py-1 font-medium transition-colors",
+                  (filters.categorie ?? "") === v ? "bg-[var(--kn-solid)] text-white" : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
+                {label}
+              </button>
             ))}
           </div>
 
-          {anomalyCount > 0 && (
-            <button onClick={() => setOnlyAnomalies((s) => !s)} title="Factures avec anomalie détectée"
-              className={cx("flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-medium transition-colors",
-                onlyAnomalies ? "border-[#f59e0b] bg-[#f59e0b]/10 text-[#b45309]" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
-              <AlertTriangle className="size-3.5 text-[#f59e0b]" /> Anomalies ({anomalyCount})
+          {kpis.anomalyCount > 0 && (
+            <button onClick={() => setParams({ anomalies: !filters.onlyAnomalies })} title="Factures avec anomalie ouverte"
+              className={cx("flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                filters.onlyAnomalies ? "border-[#f59e0b] bg-[#f59e0b]/10 text-[#b45309]" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
+              <AlertTriangle className="size-3.5 text-[#f59e0b]" /> Anomalies ({kpis.anomalyCount})
             </button>
           )}
 
-          <div className="flex items-center gap-1.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 py-1.5 text-[13px]">
-            <Layers className="size-3.5 text-[var(--kn-text-muted)]" />
-            <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)} className="bg-transparent font-medium text-[var(--kn-text)] focus:outline-none">
-              <option value="none">Aucun regroupement</option>
-              <option value="commune">Par commune</option>
-              <option value="site">Par site</option>
-              <option value="categorie">Par catégorie</option>
-            </select>
-          </div>
-
-          {archivedCount > 0 && (
-            <button onClick={() => setShowArchived((s) => !s)}
-              className={cx("flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-medium transition-colors",
-                showArchived ? "border-[#f97316] bg-[var(--kn-yellow-soft)] text-[#9a3412]" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
-              {showArchived ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />} Masqués ({archivedCount})
+          {kpis.archivedCount > 0 && (
+            <button onClick={() => setParams({ archived: !filters.showArchived })}
+              className={cx("flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                filters.showArchived ? "border-[#f97316] bg-[var(--kn-yellow-soft)] text-[#9a3412]" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]")}>
+              {filters.showArchived ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />} Masqués ({kpis.archivedCount})
             </button>
           )}
 
-          <button onClick={exportCsv} className="ml-auto flex items-center gap-1.5 rounded-lg bg-[var(--kn-solid)] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90">
+          {hasFilters && (
+            <button onClick={() => startTransition(() => router.push("/documents", { scroll: false }))}
+              className="cursor-pointer rounded-lg px-2 py-1.5 text-[12px] font-medium text-[var(--kn-text-muted)] underline-offset-2 hover:text-[var(--kn-text)] hover:underline">
+              Réinitialiser
+            </button>
+          )}
+
+          <button onClick={exportCsv} title="Exporte l'ensemble du périmètre filtré, pas seulement la page affichée"
+            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-lg bg-[var(--kn-solid)] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90">
             <Download className="size-3.5" /> Exporter CSV
           </button>
         </div>
       </div>
 
       {/* Contenu */}
-      <div className={cx("min-h-0 flex-1 px-8 pb-24", scroll)}>
-        {rows.length === 0 ? (
+      <div className={cx("relative min-h-0 flex-1 px-8", view === "colonnes" ? "overflow-hidden" : "overflow-y-auto", pending && "opacity-60")}>
+        {pending && (
+          <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center">
+            <span className="flex items-center gap-2 rounded-full border border-[var(--kn-border)] bg-[var(--kn-card)] px-3 py-1.5 text-[12px] text-[var(--kn-text-muted)] shadow-sm">
+              <Loader2 className="size-3.5 animate-spin text-[#f97316]" /> Chargement…
+            </span>
+          </div>
+        )}
+
+        {docs.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--kn-text-muted)]">
             <FileText className="size-8" strokeWidth={1.4} />
-            <p className="text-[13px]">Aucune facture ne correspond.</p>
+            <p className="text-[13px]">{hasFilters ? "Aucune facture ne correspond à ces filtres." : "Aucune facture pour le moment."}</p>
+            {hasFilters && (
+              <button onClick={() => startTransition(() => router.push("/documents", { scroll: false }))}
+                className="cursor-pointer text-[13px] font-medium text-[#ea580c] underline underline-offset-2">
+                Réinitialiser les filtres
+              </button>
+            )}
           </div>
         ) : view === "liste" ? (
-          <div className="overflow-hidden rounded-xl border border-[var(--kn-border)]">
-            <table className="w-full text-[13px]">
+          <div className="overflow-x-auto rounded-xl border border-[var(--kn-border)]">
+            <table className="w-full min-w-[900px] text-[13px]">
               <thead>
                 <tr className="border-b border-[var(--kn-border)] bg-[var(--kn-panel)] text-left text-[var(--kn-text-muted)]">
-                  <th className="px-3 py-2.5"><Tick on={allSelected} onClick={() => setMany(allVisibleIds, !allSelected)} /></th>
+                  <th className="px-3 py-2.5"><Tick on={allSelected} onClick={() => setMany(pageIds, !allSelected)} /></th>
                   <th className="px-4 py-2.5 font-medium"><SortBtn k="number" label="N° facture" /></th>
                   <th className="px-4 py-2.5 font-medium"><SortBtn k="date" label="Date" /></th>
                   <th className="px-4 py-2.5 font-medium"><SortBtn k="site" label="Site" /></th>
@@ -292,26 +285,24 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
                   <th className="px-4 py-2.5 text-right font-medium"><SortBtn k="totalTtc" label="Total TTC" align="right" /></th>
                 </tr>
               </thead>
-              <tbody>
-                {!groups && rows.map((d) => <Row key={d.id} d={d} />)}
-                {groups && groups.map(([label, items]) => (
-                  <GroupRows key={label} label={label} items={items} collapsed={collapsed.has(label)} Header={GroupHeaderRow} RowComp={Row} />
-                ))}
-              </tbody>
+              <tbody>{docs.map((d) => <Row key={d.id} d={d} />)}</tbody>
             </table>
           </div>
         ) : view === "colonnes" ? (
-          <ColumnsView docs={rows} selected={selected} onToggle={toggleSel} />
+          <ColumnsView docs={docs} selected={selected} onToggle={toggleSel} />
         ) : (
-          <div className="space-y-5">
-            {segments.map(([label, items]) => (
-              <section key={label ?? "_all"}>
-                {label && <GroupBanner label={label} items={items} />}
-                <GalleryGrid items={items} />
-              </section>
-            ))}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {docs.map((d) => <DocumentCard key={d.id} doc={d} selected={selected.has(d.id)} onToggle={() => toggleSel(d.id)} />)}
           </div>
         )}
+      </div>
+
+      <div className="shrink-0">
+        <PaginationBar
+          page={page} pageCount={pageCount} pageSize={pageSize} total={kpis.count} pending={pending}
+          onPage={(p) => setParams({ page: p }, false)}
+          onPageSize={(s) => setParams({ size: s })}
+        />
       </div>
 
       {selected.size > 0 && <SelectionBar selectedDocs={selectedDocs} onClear={clearSel} />}
@@ -319,16 +310,14 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
   );
 }
 
-function GroupRows({ label, items, collapsed, Header, RowComp }: {
-  label: string; items: InvoiceDoc[]; collapsed: boolean;
-  Header: (p: { label: string; items: InvoiceDoc[] }) => React.JSX.Element;
-  RowComp: (p: { d: InvoiceDoc }) => React.JSX.Element;
+function FilterSelect({ label, value, onChange, options }: {
+  label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[];
 }) {
   return (
-    <>
-      <Header label={label} items={items} />
-      {!collapsed && items.map((d) => <RowComp key={d.id} d={d} />)}
-    </>
+    <select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}
+      className="h-9 max-w-[190px] cursor-pointer rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2.5 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none">
+      {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
   );
 }
 

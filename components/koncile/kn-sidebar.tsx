@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Plug,
   BookOpen,
+  Target,
   UploadCloud,
   Settings,
   LogOut,
@@ -30,6 +31,7 @@ const mainNav: NavItem[] = [
   { href: "/rapport-excel", label: "Rapports", icon: FileSpreadsheet },
   { href: "/analyses", label: "Analyse de consommation", icon: Gauge },
   { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
+  { href: "/qualite-extraction", label: "Qualité d'extraction", icon: Target },
   { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true },
 ];
 

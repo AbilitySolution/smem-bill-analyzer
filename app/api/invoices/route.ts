@@ -4,6 +4,7 @@ import { getUserContext } from "@/lib/auth";
 import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice, normalizePosteTarifaire } from "@/lib/anthropic/invoice-validation";
 import { recomputeAndPersistAnomalies } from "@/lib/anomalies/persist";
+import { diffExtraction } from "@/lib/extraction/diff";
 import { z } from "zod";
 
 const customFieldEntrySchema = z.object({
@@ -21,6 +22,12 @@ const customFieldEntrySchema = z.object({
 
 const saveRequestSchema = z.object({
   extraction: invoiceExtractionSchema,
+  /**
+   * Extraction brute de l'IA, avant corrections humaines. Optionnelle (rétro-compat), mais
+   * c'est elle qui permet de journaliser les corrections de revue initiale — la vérité
+   * terrain sur la précision réelle du modèle.
+   */
+  original_extraction: invoiceExtractionSchema.optional(),
   file_path: z.string(),
   site_id: z.string().uuid().optional(),
   commune_id: z.string().uuid().optional(),
@@ -46,7 +53,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly, custom_fields } = parsed.data;
+  const { extraction, original_extraction, file_path, site_id, commune_id, new_site_categorie, override_comment, override_flag_anomaly, custom_fields } = parsed.data;
 
   if (!site_id && !commune_id) {
     return NextResponse.json({ error: "Commune non détectée — sélectionnez-la manuellement." }, { status: 400 });
@@ -290,6 +297,32 @@ export async function POST(request: Request) {
   if (childError) {
     await supabase.from("invoices").delete().eq("id", invoiceId);
     return NextResponse.json({ error: `Détails facture: ${childError.message}` }, { status: 500 });
+  }
+
+  // 4.2. Journaliser les corrections faites pendant la revue initiale (avant enregistrement).
+  // C'est la vérité terrain qui alimente les métriques de précision d'extraction : sans ça,
+  // seules les ré-éditions post-enregistrement seraient mesurées — échantillon biaisé.
+  // Non bloquant : un échec ici ne doit pas faire perdre la facture à l'utilisateur.
+  if (original_extraction) {
+    const corrections = diffExtraction(original_extraction, extraction);
+    if (corrections.length > 0) {
+      const { error: logError } = await supabase.from("corrections_log").insert(
+        corrections.map((c) => ({
+          invoice_id: invoiceId,
+          table_name: c.table_name,
+          field_name: c.field_name,
+          old_value: c.old_value,
+          new_value: c.new_value,
+          corrected_by: ctx.userId,
+          source: "initial_review",
+        })),
+      );
+      if (logError) {
+        console.error("[invoices] journalisation des corrections de revue échouée", {
+          invoiceId, orgId: ctx.orgId, count: corrections.length, error: logError.message,
+        });
+      }
+    }
   }
 
   // 4.5. Résoudre/créer les définitions de champs personnalisés puis insérer les valeurs.
