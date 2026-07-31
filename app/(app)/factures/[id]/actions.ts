@@ -73,6 +73,7 @@ export async function updateExtractionField(
     old_value: oldValue,
     new_value: newValue,
     corrected_by: authData.user.id,
+    source: "post_save",
   });
 
   revalidatePath(`/factures/${invoiceId}`);
