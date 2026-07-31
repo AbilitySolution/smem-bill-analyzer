@@ -1,15 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
   BarChart, Bar, Cell, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { AlertTriangle, ShieldAlert, MapPin, CheckCircle2, Info, ExternalLink, RotateCcw, History } from "lucide-react";
+import { AlertTriangle, ShieldAlert, MapPin, CheckCircle2, Info, ExternalLink, RotateCcw, History, Euro } from "lucide-react";
 import type { InvoiceDoc } from "@/lib/data/invoices";
-import {
-  loadResolved, saveResolved, anomalyKey, SEVERITY_LABEL, SEVERITY_COLOR, type Severity,
-} from "@/lib/data/anomalies";
+import { SEVERITY_LABEL, SEVERITY_COLOR, type Severity } from "@/lib/data/anomalies";
+import { setAnomalyResolved } from "@/app/(app)/anomalies/actions";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 const eur = (n: number) => n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
@@ -17,8 +16,8 @@ const kwhFmt = (n: number) => n.toLocaleString("fr-FR") + " kWh";
 const SEV_ORDER: Severity[] = ["high", "medium", "low"];
 
 interface FeedItem {
-  key: string; invoiceId: string; number: string; site: string; commune: string;
-  severity: Severity; message: string; type: string;
+  id: string; invoiceId: string; number: string; site: string; commune: string;
+  severity: Severity; message: string; type: string; valueEur?: number; resolved: boolean;
 }
 
 // Extracteurs tolérants pour les survols recharts (payload selon la version).
@@ -32,33 +31,39 @@ const barSeverity = (d: unknown): Severity | null => {
 };
 
 export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: string }) {
-  const [resolved, setResolved] = useState<Set<string>>(new Set());
+  // Surcharge optimiste locale (id -> resolved) le temps que la server action
+  // écrive en DB et que la page se revalide — la vérité reste toujours la DB.
+  const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
   const [filter, setFilter] = useState<Severity | "all">("all");
   const [hoverInvoice, setHoverInvoice] = useState<string | null>(null);
   const [hoverSeverity, setHoverSeverity] = useState<Severity | null>(null);
-  useEffect(() => { setResolved(loadResolved()); }, []);
 
   const allItems: FeedItem[] = useMemo(() => {
     const items: FeedItem[] = [];
     for (const d of docs) {
       for (const a of d.anomalies ?? []) {
-        items.push({ key: anomalyKey(d.id, a.type), invoiceId: d.id, number: d.number, site: d.site, commune: d.commune, severity: a.severity, message: a.message, type: a.type });
+        items.push({
+          id: a.id, invoiceId: d.id, number: d.number, site: d.site, commune: d.commune,
+          severity: a.severity, message: a.message, type: a.type, valueEur: a.valueEur,
+          resolved: overrides.get(a.id) ?? a.resolved,
+        });
       }
     }
     return items;
-  }, [docs]);
+  }, [docs, overrides]);
 
   const rank: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
   const open = useMemo(() => {
-    return allItems.filter((i) => !resolved.has(i.key))
+    return allItems.filter((i) => !i.resolved)
       .sort((a, b) => (a.invoiceId === focus ? -1 : b.invoiceId === focus ? 1 : rank[a.severity] - rank[b.severity]));
-  }, [allItems, resolved, focus]);
-  const history = useMemo(() => allItems.filter((i) => resolved.has(i.key)), [allItems, resolved]);
+  }, [allItems, focus]);
+  const history = useMemo(() => allItems.filter((i) => i.resolved), [allItems]);
 
   const shown = filter === "all" ? open : open.filter((i) => i.severity === filter);
 
   const sites = new Set(open.map((i) => i.site)).size;
   const highCount = open.filter((i) => i.severity === "high").length;
+  const valueFound = open.reduce((s, i) => s + Math.abs(i.valueEur ?? 0), 0);
 
   const distribution = SEV_ORDER.map((s) => ({ label: SEVERITY_LABEL[s], severity: s, value: open.filter((i) => i.severity === s).length }))
     .filter((d) => d.value > 0);
@@ -70,11 +75,13 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
       .map((d) => ({ id: d.id, kwh: d.kwh, amount: d.totalTtc, flagged: flaggedIds.has(d.id), severity: flaggedIds.has(d.id) ? (d.anomalySeverity ?? null) : null }));
   }, [docs, open]);
 
-  function resolve(key: string) {
-    setResolved((prev) => { const n = new Set(prev); n.add(key); saveResolved(n); return n; });
+  function resolve(id: string) {
+    setOverrides((prev) => new Map(prev).set(id, true));
+    void setAnomalyResolved(id, true);
   }
-  function reopen(key: string) {
-    setResolved((prev) => { const n = new Set(prev); n.delete(key); saveResolved(n); return n; });
+  function reopen(id: string) {
+    setOverrides((prev) => new Map(prev).set(id, false));
+    void setAnomalyResolved(id, false);
   }
 
   const isHot = (it: FeedItem) => it.invoiceId === focus || it.invoiceId === hoverInvoice || it.severity === hoverSeverity;
@@ -92,8 +99,8 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
       <div className="mb-5 mt-3 flex items-start gap-2.5 rounded-xl border border-[#fed7aa] bg-[var(--kn-yellow-soft)] px-4 py-3">
         <Info className="mt-0.5 size-4 shrink-0 text-[#ea580c]" />
         <p className="text-[13px] text-[var(--kn-text)]">
-          Module en <strong>version bêta</strong> — la détection présentée ici est un <strong>contrôle automatique de démonstration</strong> (cohérence des totaux, coût unitaire atypique…).
-          La version complète (détection avancée, suivi en base, règles configurables) arrive prochainement.
+          Module en <strong>version bêta</strong> — détection automatique par règles (cohérence des totaux, coût unitaire vs médiane par catégorie, pic de consommation saisonnier vs historique du site).
+          Suivi partagé en base entre les membres de l&apos;organisation ; règles configurables à venir.
         </p>
       </div>
 
@@ -103,6 +110,20 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
         <>
           {open.length > 0 && (
             <>
+              {/* Valeur détectée — métrique phare du portefeuille */}
+              {valueFound > 0 && (
+                <div className="mb-5 flex items-center gap-4 rounded-xl border border-[#fed7aa] bg-gradient-to-br from-[var(--kn-yellow-soft)] to-transparent px-5 py-4">
+                  <span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-[#f97316] text-white">
+                    <Euro className="size-6" />
+                  </span>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-[#9a3412]">Valeur détectée sur le portefeuille</p>
+                    <p className="font-heading text-2xl font-bold tabular-nums text-[var(--kn-text)]">{eur(valueFound)}</p>
+                    <p className="text-[12px] text-[var(--kn-text-muted)]">Écarts de totaux et surcoûts au kWh vs médiane, cumulés sur les alertes ouvertes.</p>
+                  </div>
+                </div>
+              )}
+
               {/* KPIs */}
               <div className="mb-5 grid grid-cols-3 gap-3">
                 <Kpi icon={<AlertTriangle className="size-4" />} label="Alertes ouvertes" value={String(open.length)} />
@@ -159,20 +180,25 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
               {/* Liste d'actions */}
               <div className="space-y-2">
                 {shown.map((it) => (
-                  <div key={it.key}
+                  <div key={it.id}
                     onMouseEnter={() => setHoverInvoice(it.invoiceId)} onMouseLeave={() => setHoverInvoice(null)}
                     className={cx("relative flex items-center justify-between gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-3 transition-all",
                       isHot(it) && "z-10 scale-[1.02] shadow-lg")}>
                     <div className="flex min-w-0 items-start gap-3">
                       <SeverityBadge severity={it.severity} />
                       <div className="min-w-0">
-                        <p className="text-[13px] text-[var(--kn-text)]">{it.message}</p>
+                        <p className="text-[13px] text-[var(--kn-text)]">
+                          {it.message}
+                          {it.valueEur != null && Math.abs(it.valueEur) >= 1 && (
+                            <span className="ml-1.5 font-semibold text-[#ea580c]">({eur(Math.abs(it.valueEur))})</span>
+                          )}
+                        </p>
                         <Link href={`/documents/extraction?id=${it.invoiceId}`} className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-[var(--kn-text-muted)] hover:text-[#ea580c]">
                           {it.number} · {it.site} · {it.commune} <ExternalLink className="size-3" />
                         </Link>
                       </div>
                     </div>
-                    <button onClick={() => resolve(it.key)}
+                    <button onClick={() => resolve(it.id)}
                       className="shrink-0 rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]">
                       Marquer résolue
                     </button>
@@ -192,7 +218,7 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
               </h2>
               <div className="space-y-2">
                 {history.map((it) => (
-                  <div key={it.key} className="flex items-center justify-between gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-panel)] p-3">
+                  <div key={it.id} className="flex items-center justify-between gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-panel)] p-3">
                     <div className="flex min-w-0 items-start gap-3">
                       <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full bg-[#dcfce7] px-2 py-0.5 text-[11px] font-medium text-[#15803d]">
                         <CheckCircle2 className="size-3" /> Résolue
@@ -202,7 +228,7 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
                         <span className="text-[12px] text-[var(--kn-text-muted)]">{it.number} · {it.site} · {it.commune}</span>
                       </div>
                     </div>
-                    <button onClick={() => reopen(it.key)}
+                    <button onClick={() => reopen(it.id)}
                       className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]">
                       <RotateCcw className="size-3.5" /> Rouvrir
                     </button>

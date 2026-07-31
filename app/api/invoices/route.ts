@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getUserContext } from "@/lib/auth";
 import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice, normalizePosteTarifaire } from "@/lib/anthropic/invoice-validation";
+import { recomputeAndPersistAnomalies } from "@/lib/anomalies/persist";
 import { z } from "zod";
 
 const customFieldEntrySchema = z.object({
@@ -378,6 +379,9 @@ export async function POST(request: Request) {
         type: iss.code.toLowerCase(),
         severity: iss.severity === "error" ? "high" : "medium",
         description: iss.message,
+        detected_value: iss.delta ?? null,
+        expected_range_min: iss.expected ?? null,
+        expected_range_max: iss.actual ?? null,
       })),
     );
     // Taguer "Anomalie" si erreur bloquante
@@ -402,86 +406,22 @@ export async function POST(request: Request) {
     }
   }
 
-  // 6. Détection d'anomalie de consommation vs historique du site.
-  // On compare en kWh/jour plutôt qu'en kWh bruts : une facture multi-périodes couvre plus de jours
-  // qu'une facture mensuelle, ce qui provoquerait un faux positif sur les kWh totaux.
-  const newTotalKwh = extraction.consumption_lines.reduce((s, l) => s + l.consommation_kwh, 0);
-
-  // Borne min/max des dates de la facture courante pour calculer sa durée
-  const newMinStart = extraction.consumption_lines.reduce<string | null>(
-    (m, l) => l.date_debut && (!m || l.date_debut < m) ? l.date_debut : m, null,
-  );
-  const newMaxEnd = extraction.consumption_lines.reduce<string | null>(
-    (m, l) => l.date_fin && (!m || l.date_fin > m) ? l.date_fin : m, null,
-  );
-  const newDays = (newMinStart && newMaxEnd)
-    ? (new Date(newMaxEnd).getTime() - new Date(newMinStart).getTime()) / 86_400_000
-    : 0;
-  // kWh/jour de la facture courante (0 si dates absentes → skip comparaison)
-  const newKwhPerDay = newDays > 0 ? newTotalKwh / newDays : 0;
-
-  // Utiliser site.id (résolu) et non site_id du body — site_id peut être undefined si site auto-créé
-  const { data: pastInvoices } = await supabase
-    .from("invoices")
-    .select("id")
-    .eq("org_id", ctx.orgId)
-    .eq("site_id", site.id)
-    .neq("id", invoiceId);
-
-  if (pastInvoices && pastInvoices.length >= 2 && newKwhPerDay > 0) {
-    // Récupérer les dates de période pour normaliser l'historique par durée aussi
-    const { data: pastConsumption } = await supabase
-      .from("consumption_periods")
-      .select("invoice_id, consommation_kwh, period_start, period_end")
-      .in("invoice_id", pastInvoices.map((p) => p.id));
-
-    // Agréger par facture : kWh total + borne min/max des périodes
-    const byInvoice = new Map<string, { kwh: number; start: string | null; end: string | null }>();
-    for (const row of pastConsumption ?? []) {
-      const cur = byInvoice.get(row.invoice_id) ?? { kwh: 0, start: null, end: null };
-      byInvoice.set(row.invoice_id, {
-        kwh: cur.kwh + (row.consommation_kwh ?? 0),
-        start: !cur.start || (row.period_start && row.period_start < cur.start) ? row.period_start : cur.start,
-        end: !cur.end || (row.period_end && row.period_end > cur.end) ? row.period_end : cur.end,
-      });
-    }
-
-    // Convertir chaque facture historique en kWh/jour
-    const historicalRates = Array.from(byInvoice.values())
-      .map(({ kwh, start, end }) => {
-        const days = (start && end)
-          ? (new Date(end).getTime() - new Date(start).getTime()) / 86_400_000
-          : 0;
-        return days > 0 ? kwh / days : 0;
-      })
-      .filter((v) => v > 0);
-
-    if (historicalRates.length >= 2) {
-      const avgRate = historicalRates.reduce((s, v) => s + v, 0) / historicalRates.length;
-      const deviation = avgRate ? (newKwhPerDay - avgRate) / avgRate : 0;
-      if (Math.abs(deviation) > 0.4) {
-        await supabase.from("anomalies").insert({
-          invoice_id: invoiceId,
-          contract_id: contractId,
-          type: "consumption_spike",
-          severity: Math.abs(deviation) > 0.8 ? "high" : "medium",
-          description: `Consommation ${deviation > 0 ? "en hausse" : "en baisse"} de ${Math.round(Math.abs(deviation) * 100)}% vs historique du site (${newKwhPerDay.toFixed(1)} kWh/j vs moy. ${avgRate.toFixed(1)} kWh/j).`,
-          detected_value: newTotalKwh,
-          // expected_range exprimé en kWh absolus pour la durée de cette facture
-          expected_range_min: avgRate * 0.6 * newDays,
-          expected_range_max: avgRate * 1.4 * newDays,
-        });
-        await supabase.from("invoices").update({ status: "anomaly_flagged" }).eq("id", invoiceId);
-        const { data: anomalyTag } = await supabase
-          .from("tags")
-          .select("id")
-          .eq("org_id", ctx.orgId)
-          .eq("label", "Anomalie")
-          .maybeSingle();
-        if (anomalyTag) {
-          await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: anomalyTag.id });
-        }
-      }
+  // 6. Anomalies "portefeuille" (coût kWh vs médiane catégorie/année, pic de
+  // consommation saisonnier vs historique du site, conso manquante) — recalculées
+  // sur TOUTE l'org à chaque facture ajoutée, pas seulement estimées sur celle-ci :
+  // une nouvelle facture change aussi le contexte (médiane, historique) des autres.
+  const { computed: portfolioAnomalies } = await recomputeAndPersistAnomalies(supabase, ctx.orgId);
+  const thisInvoiceAnomalies = portfolioAnomalies.filter((a) => a.invoiceId === invoiceId);
+  if (thisInvoiceAnomalies.some((a) => a.severity === "high")) {
+    await supabase.from("invoices").update({ status: "anomaly_flagged" }).eq("id", invoiceId);
+    const { data: anomalyTag } = await supabase
+      .from("tags")
+      .select("id")
+      .eq("org_id", ctx.orgId)
+      .eq("label", "Anomalie")
+      .maybeSingle();
+    if (anomalyTag) {
+      await supabase.from("invoice_tags").insert({ invoice_id: invoiceId, tag_id: anomalyTag.id });
     }
   }
 

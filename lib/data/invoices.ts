@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { getUserContext } from "@/lib/auth";
-import { detectAnomalies, topSeverity, median, costPerKwh, type AnomalyLite, type Severity } from "./anomalies";
+import { topSeverity, type AnomalyLite, type Severity } from "./anomalies";
 
 export interface InvoiceLine {
   poste: string;
@@ -124,22 +124,29 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
         .in("invoice_id", invoiceIds)
         .range(from, to),
     ),
-    selectAll<{ invoice_id: string; type: string; severity: string; description: string }>((from, to) =>
+    selectAll<{ id: string; invoice_id: string; type: string; severity: string; description: string; resolved: boolean; detected_value: number | null }>((from, to) =>
       supabase
         .from("anomalies")
-        .select("invoice_id, type, severity, description")
+        .select("id, invoice_id, type, severity, description, resolved, detected_value")
         .in("invoice_id", invoiceIds)
         .range(from, to),
     ),
   ]);
 
-  // Index DB anomalies by invoice_id
-  type RawAnomaly = { invoice_id: string; type: string; severity: string; description: string };
+  // Index DB anomalies by invoice_id — source unique (plus de recalcul client).
+  // detected_value n'est en € que pour certains types (ttc_mismatch, cout_kwh) —
+  // pour consumption_spike c'est un total en kWh : ne PAS l'exposer comme valueEur,
+  // ça fausserait la somme du KPI "valeur détectée" du portefeuille.
+  const EUR_VALUE_TYPES = new Set(["ttc_mismatch", "cout_kwh"]);
+  type RawAnomaly = { id: string; invoice_id: string; type: string; severity: string; description: string; resolved: boolean; detected_value: number | null };
   const dbAnomaliesByInvoice = new Map<string, AnomalyLite[]>();
   for (const a of (dbAnomalies ?? []) as RawAnomaly[]) {
     const sev: Severity = a.severity === "high" ? "high" : a.severity === "medium" ? "medium" : "low";
     const arr = dbAnomaliesByInvoice.get(a.invoice_id) ?? [];
-    arr.push({ type: a.type, severity: sev, message: a.description });
+    arr.push({
+      id: a.id, type: a.type, severity: sev, message: a.description, resolved: !!a.resolved,
+      valueEur: EUR_VALUE_TYPES.has(a.type) && a.detected_value != null ? Math.abs(a.detected_value) : undefined,
+    });
     dbAnomaliesByInvoice.set(a.invoice_id, arr);
   }
 
@@ -178,29 +185,10 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
     };
   });
 
-  // Passe anomalies : la médiane du coût/kWh nécessite l'ensemble du portefeuille.
-  // Médiane du coût/kWh PAR ANNÉE : les tarifs ont plus que doublé entre 2019 et 2024,
-  // une médiane globale marquerait toutes les factures anciennes comme « coût bas ».
-  const byYear = new Map<string, number[]>();
+  // Anomalies : source unique DB (persistées à l'insertion ou par le recalcul
+  // portefeuille lib/anomalies/persist.ts — plus de recalcul/merge côté client).
   for (const d of docs) {
-    const c = costPerKwh(d.totalTtc, d.kwh);
-    if (c == null) continue;
-    const y = d.date.slice(0, 4);
-    (byYear.get(y) ?? byYear.set(y, []).get(y)!).push(c);
-  }
-  const medianByYear = new Map<string, number | null>();
-  for (const [y, vals] of byYear) medianByYear.set(y, median(vals));
-  for (const d of docs) {
-    const computed = detectAnomalies(
-      { totalHt: d.totalHt, tva: d.tva, autresTaxes: d.autresTaxes ?? 0, totalTtc: d.totalTtc, kwh: d.kwh, isDuplicata: d.isDuplicata },
-      { medianCostPerKwh: medianByYear.get(d.date.slice(0, 4)) ?? null },
-    );
-    const persisted = dbAnomaliesByInvoice.get(d.id) ?? [];
-    // Merge: DB anomalies first (IDP + override), then computed business rules
-    // Dedupe by type: DB wins over computed for the same type
-    const seenTypes = new Set(persisted.map((a) => a.type));
-    const newComputed = computed.filter((a) => !seenTypes.has(a.type));
-    d.anomalies = [...persisted, ...newComputed];
+    d.anomalies = dbAnomaliesByInvoice.get(d.id) ?? [];
     d.anomalySeverity = topSeverity(d.anomalies);
   }
 

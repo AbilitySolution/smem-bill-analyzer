@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
   Search, Download, Building2, Lightbulb, ChevronsUpDown, ChevronUp, ChevronDown,
@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import type { InvoiceDoc } from "@/lib/data/invoices";
 import { downloadCsv } from "@/lib/csv";
-import { loadResolved, anomalyKey } from "@/lib/data/anomalies";
 import { SelectionBar } from "./selection-bar";
 import { DocumentCard } from "./document-card";
 import { ColumnsView } from "./columns-view";
@@ -44,15 +43,12 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showArchived, setShowArchived] = useState(false);
   const [onlyAnomalies, setOnlyAnomalies] = useState(false);
-  const [resolved, setResolved] = useState<Set<string>>(new Set());
 
-  useEffect(() => { setResolved(loadResolved()); }, []);
-
-  const openAnoms = (d: InvoiceDoc) => (d.anomalies ?? []).filter((a) => !resolved.has(anomalyKey(d.id, a.type)));
+  const openAnoms = (d: InvoiceDoc) => (d.anomalies ?? []).filter((a) => !a.resolved);
   const hasAnomaly = (d: InvoiceDoc) => openAnoms(d).length > 0;
 
   const archivedCount = useMemo(() => docs.filter((d) => d.archived).length, [docs]);
-  const anomalyCount = useMemo(() => docs.filter((d) => !d.archived && hasAnomaly(d)).length, [docs, resolved]);
+  const anomalyCount = useMemo(() => docs.filter((d) => !d.archived && hasAnomaly(d)).length, [docs]);
 
   const rows = useMemo(() => {
     const q = query.toLowerCase();
@@ -72,7 +68,7 @@ export function DocumentsHub({ docs, isDemo }: { docs: InvoiceDoc[]; isDemo?: bo
       else c = a.date.localeCompare(b.date);
       return c * sort.dir;
     });
-  }, [docs, query, cat, sort, showArchived, onlyAnomalies, resolved]);
+  }, [docs, query, cat, sort, showArchived, onlyAnomalies]);
 
   const groupKey = (d: InvoiceDoc) => (groupBy === "commune" ? d.commune : groupBy === "site" ? d.site : catLabel(d.categorie));
   const groups = useMemo(() => {
