@@ -19,6 +19,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import ws from "ws";
 
 // ── Env (.env.local) ────────────────────────────────────────────────────────
 function loadEnv(): Record<string, string> {
@@ -33,6 +34,7 @@ function loadEnv(): Record<string, string> {
 const env = loadEnv();
 const supabase = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
+  realtime: { transport: ws as never },
 });
 
 const DRY = process.argv.includes("--dry");

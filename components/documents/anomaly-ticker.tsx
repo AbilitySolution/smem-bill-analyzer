@@ -1,22 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { loadResolved, anomalyKey, type AnomalyLite } from "@/lib/data/anomalies";
+import type { AnomalyLite } from "@/lib/data/anomalies";
 
 /**
  * Indicateur d'anomalie : triangle + lien « Résoudre l'anomalie » (ambre) près du n° de facture.
- * Survol = résumé ; clic = module Anomalies. Tient compte des résolutions (localStorage).
+ * Survol = résumé ; clic = module Anomalies. Tient compte des résolutions (persistées en DB).
  * `label=false` : version compacte (triangle seul) pour les espaces étroits.
  */
 export function AnomalyTicker({
   invoiceId, anomalies, label = true, size = "size-3.5",
 }: { invoiceId: string; anomalies?: AnomalyLite[]; label?: boolean; size?: string }) {
-  const [resolved, setResolved] = useState<Set<string>>(new Set());
-  useEffect(() => { setResolved(loadResolved()); }, []);
-
-  const open = (anomalies ?? []).filter((a) => !resolved.has(anomalyKey(invoiceId, a.type)));
+  const open = (anomalies ?? []).filter((a) => !a.resolved);
   if (!open.length) return null;
 
   const summary = `${open.length} anomalie${open.length > 1 ? "s" : ""} détectée${open.length > 1 ? "s" : ""} :\n` + open.map((a) => `• ${a.message}`).join("\n");
