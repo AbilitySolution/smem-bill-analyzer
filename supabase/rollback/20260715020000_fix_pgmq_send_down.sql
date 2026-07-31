@@ -1,0 +1,14 @@
+-- ROLLBACK 4/6 — annule 20260715020000_fix_pgmq_send_column_reference.sql
+--
+-- NO-OP VOLONTAIRE. Ne rien exécuter.
+--
+-- Cette migration était un correctif : pgmq 1.5.1 renvoie SETOF bigint (colonne
+-- sans nom) et non une ligne avec « msg_id ». Annuler ce correctif réintroduirait
+-- une erreur 42703 sur CHAQUE mise en file et CHAQUE relance.
+--
+-- Le correctif est de toute façon rétro-intégré dans 20260715000000 et
+-- 20260715010000 : sur une base fraîche, cette migration ne change rien.
+--
+-- Les rollbacks 2, 3 et 5 restaurent chacun une version de retry_document_job qui
+-- intègre déjà la forme correcte « SELECT * INTO message_id FROM pgmq.send(...) ».
+-- Aucune action n'est donc requise ici.
