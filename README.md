@@ -4,19 +4,7 @@ Outil de centralisation de documents et d'**extraction intelligente des factures
 
 Stack : **Next.js 16** (App Router) · **React 19** · **Tailwind CSS v4** · **Supabase** (Postgres + Auth + Storage) · **Anthropic Claude** (OCR/extraction) · **Recharts** · **openpyxl (Python)** · **pdf.js** · **JSZip**.
 
----
 
-## ⚠️ Important — la nouvelle app est sur la branche `outil_v0`
-
-La branche `main` contient l'**ancienne** version du dashboard. La version actuelle de l'outil vit sur la branche **`outil_v0`**. Si vous lancez `main`, vous tomberez sur l'ancienne interface.
-
-```bash
-git clone https://github.com/AbilitySolution/smem-bill-analyzer.git
-cd smem-bill-analyzer
-git checkout outil_v0
-```
-
----
 
 ## Prérequis
 
