@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, AlertCircle, Save, CheckCircle2, AlertTriangle } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -56,6 +56,16 @@ type OcrResult = {
   suggested_commune_id: string | null;
   suggested_site_id: string | null;
   validation?: ValidationResult;
+};
+
+/** Le job tel que le renvoie `/api/document-jobs/[id]` quand il est en `needs_review`. */
+type ReviewJob = {
+  id: string;
+  status: string;
+  file_path: string;
+  extraction_json: Extraction;
+  suggested_commune_id: string | null;
+  suggested_site_id: string | null;
 };
 
 type CustomFieldSection = "localisation" | "invoice" | "client" | "contract";
@@ -300,7 +310,20 @@ function ValidationPanel({ result }: { result: ValidationResult }) {
 }
 
 export default function ReviewPage() {
+  return <Suspense><ReviewPageInner /></Suspense>;
+}
+
+/**
+ * Révision d'un document de la file.
+ *
+ * La page est ouverte sur `?job=<id>` depuis `/upload` : elle relit l'extraction
+ * enregistrée sur le job plutôt qu'un résultat volatil de sessionStorage. Recharger ou
+ * partager l'URL retrouve donc exactement le même document.
+ */
+function ReviewPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const jobId = searchParams.get("job");
   const [ocr, setOcr] = useState<OcrResult | null>(null);
   const [ext, setExt] = useState<Extraction | null>(null);
   const [communeId, setCommuneId] = useState("");
@@ -329,34 +352,58 @@ export default function ReviewPage() {
   }, [isDirty]);
 
   useEffect(() => {
-    const raw = sessionStorage.getItem("upload_ocr_result");
-    if (!raw) { router.replace("/upload"); return; }
-    const result: OcrResult = JSON.parse(raw);
-    setOcr(result);
-    setExt(result.extraction);
-    if (result.suggested_commune_id) setCommuneId(result.suggested_commune_id);
-    setCategorie((result.extraction.categorie_hint as "batiment" | "eclairage_public") ?? "batiment");
+    if (!jobId) { router.replace("/upload"); return; }
+    let cancelled = false;
+
+    void (async () => {
+      const res = await fetch(`/api/document-jobs/${jobId}`, { cache: "no-store" });
+      const json = await res.json().catch(() => ({}));
+      if (cancelled) return;
+
+      if (!res.ok) {
+        setError(json.error ?? "Document introuvable.");
+        return;
+      }
+      const job = json.job as ReviewJob;
+      if (job.status !== "needs_review") {
+        // Déjà enregistré (ou en échec) : rien à réviser, on renvoie vers la file.
+        router.replace("/upload");
+        return;
+      }
+
+      const result: OcrResult = {
+        extraction: job.extraction_json,
+        file_path: job.file_path,
+        suggested_commune_id: job.suggested_commune_id,
+        suggested_site_id: job.suggested_site_id,
+      };
+      setOcr(result);
+      setExt(result.extraction);
+      if (result.suggested_commune_id) setCommuneId(result.suggested_commune_id);
+      setCategorie((result.extraction.categorie_hint as "batiment" | "eclairage_public") ?? "batiment");
+
+      // Aperçu du document original, à côté du formulaire.
+      const supabase = createClient();
+      const { data, error: signedError } = await supabase.storage
+        .from("invoice-files")
+        .createSignedUrl(result.file_path, 3600);
+      if (cancelled) return;
+      if (signedError || !data?.signedUrl) setFileUrlError(true);
+      else setFileUrl(data.signedUrl);
+    })();
+
     fetch("/api/communes")
       .then((r) => r.json())
-      .then((j) => { setCommunes(j.communes ?? []); setCommunesLoading(false); })
-      .catch(() => setCommunesLoading(false));
+      .then((j) => { if (!cancelled) { setCommunes(j.communes ?? []); setCommunesLoading(false); } })
+      .catch(() => { if (!cancelled) setCommunesLoading(false); });
 
     fetch("/api/custom-fields")
       .then((r) => r.json())
-      .then((j) => setCustomFieldDefs(j.definitions ?? []))
+      .then((j) => { if (!cancelled) setCustomFieldDefs(j.definitions ?? []); })
       .catch(() => {});
 
-    // Fetch signed URL for document preview
-    const supabase = createClient();
-    supabase.storage
-      .from("invoice-files")
-      .createSignedUrl(result.file_path, 3600)
-      .then(({ data, error }) => {
-        if (error || !data?.signedUrl) { setFileUrlError(true); return; }
-        setFileUrl(data.signedUrl);
-      })
-      .catch(() => setFileUrlError(true));
-  }, [router]);
+    return () => { cancelled = true; };
+  }, [jobId, router]);
 
   // Real-time validation re-run whenever ext changes
   const validation = useMemo<ValidationResult | null>(() => {
@@ -402,11 +449,21 @@ export default function ReviewPage() {
       });
       const json = await res.json();
       if (!res.ok || json.error) { setError(json.error ?? "Erreur enregistrement."); setSaving(false); return; }
-      sessionStorage.removeItem("upload_ocr_result");
+
+      // Le job sort de la file en pointant la facture créée. Non bloquant : la facture
+      // est enregistrée, un job resté en `needs_review` se re-révise sans dommage.
+      if (jobId && json.invoice_id) {
+        await fetch(`/api/document-jobs/${jobId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "complete", invoice_id: json.invoice_id }),
+        }).catch(() => {});
+      }
+
       setIsDirty(false);
       setSavedBanner(true);
-      // Laisser le banner visible 1.5s avant redirect
-      setTimeout(() => router.push("/documents"), 1500);
+      // Retour à la file : il reste probablement d'autres documents à réviser.
+      setTimeout(() => router.push("/upload"), 1500);
     } catch {
       setError("Erreur réseau.");
       setSaving(false);
@@ -430,7 +487,26 @@ export default function ReviewPage() {
   const isPdf = !ocr?.file_path || ocr.file_path.toLowerCase().endsWith(".pdf")
     || (!ocr.file_path.match(/\.(png|jpe?g|webp)$/i));
 
-  if (!ext) return null;
+  if (!ext) {
+    // Chargement, ou job illisible (extraction incomplète, document supprimé).
+    return error ? (
+      <div className="mx-auto max-w-lg px-8 py-10">
+        <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <AlertCircle className="size-4 shrink-0" /> {error}
+        </div>
+        <button
+          onClick={() => router.push("/upload")}
+          className="mt-4 cursor-pointer rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]"
+        >
+          Retour à la file
+        </button>
+      </div>
+    ) : (
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="size-6 animate-spin text-[var(--kn-text-muted)]" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full">

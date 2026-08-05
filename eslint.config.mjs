@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Edge Functions Supabase : code Deno (imports `npm:`/`jsr:`, globale `Deno`),
+    // hors du périmètre du bundle Next et de ses règles.
+    "supabase/functions/**",
   ]),
 ]);
 

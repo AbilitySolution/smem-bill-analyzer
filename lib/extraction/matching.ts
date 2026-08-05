@@ -55,34 +55,60 @@ export function communeCandidates(extraction: InvoiceExtraction): string[] {
 /** Seuil en deçà duquel on préfère ne rien proposer plutôt que rattacher à la mauvaise commune. */
 export const COMMUNE_MATCH_THRESHOLD = 0.5;
 
-/** Meilleure commune parmi une liste déjà chargée. Pur — c'est la partie testable. */
-export function pickBestCommune(
+/**
+ * Meilleure commune parmi une liste déjà chargée, **avec son score**. Pur — c'est la
+ * partie testable.
+ *
+ * Le score est ramené sur 0-1 : `scoreCommune` renvoie 100 pour une correspondance
+ * exacte ou incluse, une fraction sinon. L'enregistrement automatique compare ce score
+ * à un seuil (0,96), il a donc besoin d'une échelle unique.
+ */
+export function pickBestCommuneScored(
   candidates: string[],
   communes: Array<{ id: string; nom: string }>,
-): { id: string; nom: string } | null {
+): { id: string; nom: string; score: number } | null {
   let bestScore = 0;
   let best: { id: string; nom: string } | null = null;
   for (const c of communes) {
     const s = Math.max(...candidates.map((h) => scoreCommune(h, c.nom)));
     if (s > bestScore) { bestScore = s; best = c; }
   }
-  return best && bestScore >= COMMUNE_MATCH_THRESHOLD ? best : null;
+  if (!best || bestScore < COMMUNE_MATCH_THRESHOLD) return null;
+  return { ...best, score: Math.min(1, bestScore) };
+}
+
+/** Meilleure commune parmi une liste déjà chargée. Pur — c'est la partie testable. */
+export function pickBestCommune(
+  candidates: string[],
+  communes: Array<{ id: string; nom: string }>,
+): { id: string; nom: string } | null {
+  const best = pickBestCommuneScored(candidates, communes);
+  return best ? { id: best.id, nom: best.nom } : null;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-export async function matchCommune(
+export async function matchCommuneScored(
   supabase: any,
   orgId: string,
   extraction: InvoiceExtraction,
-): Promise<{ id: string; nom: string } | null> {
+): Promise<{ id: string; nom: string; score: number } | null> {
   const candidates = communeCandidates(extraction);
   if (!candidates.length) return null;
 
   const { data: allCommunes } = await supabase.from("communes").select("id, nom").eq("org_id", orgId);
   if (!allCommunes?.length) return null;
 
-  return pickBestCommune(candidates, allCommunes as Array<{ id: string; nom: string }>);
+  return pickBestCommuneScored(candidates, allCommunes as Array<{ id: string; nom: string }>);
+}
+
+export async function matchCommune(
+  supabase: any,
+  orgId: string,
+  extraction: InvoiceExtraction,
+): Promise<{ id: string; nom: string } | null> {
+  const best = await matchCommuneScored(supabase, orgId, extraction);
+  return best ? { id: best.id, nom: best.nom } : null;
 }
 
 /**

@@ -69,11 +69,14 @@ export interface SaveInvoiceOptions {
   skipPortfolioRecompute?: boolean;
   /** Valeur écrite dans `corrections_log.source`. */
   correctionSource?: string;
+  /** Facture créée sans relecture humaine par la file de traitement. */
+  autoSaved?: boolean;
 }
 
 export type SaveInvoiceResult =
   | { ok: true; invoiceId: string }
-  | { ok: false; status: number; error: string };
+  /** `existingInvoiceId` n'est renseigné que sur un 409 (facture déjà en base). */
+  | { ok: false; status: number; error: string; existingInvoiceId?: string };
 
 /** Pose un tag de l'org sur une facture. Silencieux si le tag n'existe pas. */
 async function tagInvoice(
@@ -255,7 +258,12 @@ export async function saveInvoice(
     .maybeSingle();
 
   if (existingInvoice) {
-    return { ok: false, status: 409, error: `Facture ${extraction.invoice.facture_number} déjà enregistrée.` };
+    return {
+      ok: false,
+      status: 409,
+      error: `Facture ${extraction.invoice.facture_number} déjà enregistrée.`,
+      existingInvoiceId: existingInvoice.id as string,
+    };
   }
 
   const isOverride = !!override_comment;
@@ -284,6 +292,7 @@ export async function saveInvoice(
       categorie: site.categorie,
       file_path,
       status: initialStatus,
+      auto_saved: opts.autoSaved ?? false,
       created_by: ctx.userId,
       raw_ocr_json: isOverride
         ? { ...extraction, _override: { comment: override_comment, flag_anomaly: override_flag_anomaly } }
