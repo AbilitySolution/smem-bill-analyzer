@@ -28,8 +28,11 @@ NEXT_PUBLIC_SUPABASE_URL=https://<votre-projet>.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<clé anon publique>
 SUPABASE_SERVICE_ROLE_KEY=<clé service role (serveur uniquement)>
 ANTHROPIC_API_KEY=<clé API Anthropic (sk-ant-...)>
-CRON_SECRET=<chaîne aléatoire — protège /api/cron/*, requis pour l'import en lot>
 ```
+
+> La file de traitement des documents tourne dans Supabase (Edge Functions + pg_cron)
+> et non dans Next.js : sa configuration est décrite dans
+> [File de traitement des documents](#file-de-traitement-des-documents).
 
 > `.env.local` est ignoré par git — ne le committez jamais.
 > Les clés Supabase se trouvent dans _Project Settings → API_ ; la clé Anthropic sur console.anthropic.com.
@@ -82,6 +85,11 @@ ANTHROPIC_API_KEY=<clé API Anthropic>
 
 6. Déployez
 
+> **Aucun Vercel Cron n'est nécessaire.** La reprise des documents en attente est
+> assurée par `pg_cron` **dans Supabase**, pas par une route `/api/cron/*`. Si un cron
+> Vercel pointe encore sur `/api/cron/sync-batches` (ancien import en lot), supprimez-le :
+> la route n'existe plus.
+
 Votre application sera alors disponible sur une URL du type :
 
 ```text
@@ -105,64 +113,93 @@ Un fichier exemple est disponible dans [.env.example](.env.example).
 - **Barre supérieure** globale : recherche de navigation (⌘K) vers n'importe quelle page, bascule **thème clair/sombre** (persistée).
 - **Hub « Mes documents »** : vues **Liste / Galerie** (vignette réelle de la 1ʳᵉ page du PDF) **/ Colonnes**, regroupement (commune/site/catégorie), recherche, **scores de confiance** OCR, **tickers d'anomalie**, sélection multiple → actions groupées (masquer/démasquer, supprimer, télécharger les PDF en ZIP, exporter), export **CSV** filtré.
 - **Extraction** : sélecteur de facture + visionneuse PDF redimensionnable + **tous les champs éditables** (corrections journalisées).
-- **Import en lot** (`/upload/batch`) : dépôt d'une **archive ZIP** de factures, extraites en une passe via l'**API Message Batches** d'Anthropic (**−50 % sur les tokens**, asynchrone). Voir [Import en lot](#import-en-lot-zip).
+- **Import** (`/upload`) : fichiers, **dossier** ou **archive ZIP**, de 1 à 200 documents. Le mode de traitement est choisi automatiquement (rapide en deçà de 20 documents, par lots à **−50 % sur les tokens** au-delà), le suivi est en **temps réel**, et les factures à haute confiance sont **enregistrées automatiquement**. Voir [File de traitement des documents](#file-de-traitement-des-documents).
 - **Rapports** : flux unique « Générer un rapport Excel » — 3 rapports (Par commune, Avant/après travaux, Synthèse) générés en **Python/openpyxl** : **séries temporelles** (axes et unités affichés, fenêtre de travaux marquée), **TCD natifs** actualisés à l'ouverture, décomposition Base/HP/HC/part fixe/taxes, avant/après aux **dates de travaux réelles SMEM** (fenêtre exclue, moyennes annualisées), périodes ventilées au pro-rata des jours ; case « données du connecteur data logger » (démo / placeholder) ; présélection de factures depuis Mes documents.
 - **Connecteurs** (version bêta) : aperçu des sources externes à venir (EDF, dépôt des communes, data loggers d'armoires, IPPER) — non fonctionnel à ce stade.
 - **Analyse de consommation** : évolution + répartition heures pleines/creuses (kWh / € / c€).
 - **Anomalies** (version bêta) : détection par règles (cohérence des totaux, coût unitaire atypique…), graphiques interactifs, résolution + **historique**.
 - **Documentation** : guide d'utilisation page par page + onglet « Champs d'extraction » (modèle OCR).
 
-## Import en lot (ZIP)
+## File de traitement des documents
 
-L'import unitaire (`/upload`) fait un appel Claude **synchrone** : une facture, l'utilisateur attend. Sur du volume c'est le goulot. L'import en lot (`/upload/batch`) utilise l'**API Message Batches**, qui traite N documents en une soumission à **moitié prix**, mais de façon **asynchrone**.
+L'extraction est une file durable hébergée dans Supabase. **L'état métier vit dans
+`public.document_jobs` ; pgmq ne transporte que des identifiants de job.** Un message
+perdu ne perd donc jamais de document : la ligne reste en base et reste relançable.
+
+### Deux modes, choisis automatiquement
+
+| | **rapide** (`direct`) | **par lots** (`batch`) |
+|---|---|---|
+| Déclencheur | ≤ 20 documents | > 20 documents |
+| API | Messages (synchrone) | Message Batches (asynchrone) |
+| Passe par pgmq | non | oui |
+| Worker | `process-direct-documents` | `process-document-queue` + `collect-document-batches` |
+| Latence | quelques secondes par document | minutes à heures |
+| Coût | plein tarif | **−50 %** |
 
 ### Le parcours
 
-1. Le ZIP est **dézippé dans le navigateur** (JSZip) et chaque facture est téléversée **directement** vers le bucket `invoice-files`. L'archive ne transite jamais par le serveur : aucune limite de taille de requête, et une barre de progression réelle.
-2. `POST /api/batches` lit les fichiers, les encode et soumet un lot à Anthropic (`extraction_batches` + `extraction_batch_items`).
-3. `POST /api/batches/[id]/sync` sonde le lot et, une fois terminé, importe les résultats. La page l'appelle toutes les 30 s ; le cron fait le même travail en arrière-plan.
-4. Les factures sont créées en **`pending_review`** et se relisent dans `/documents/extraction`, l'éditeur existant.
+1. `/upload` accepte des fichiers, un **dossier** ou une **archive ZIP** (dézippée dans
+   le navigateur avec JSZip). Extension, taille et **magic bytes** sont vérifiés côté
+   client pour un retour immédiat.
+2. `POST /api/document-jobs` revérifie tout — un `.pdf` qui n'en est pas un est rejeté
+   ici — écrit le fichier sous `invoice-files/{org_id}/{user_id}/queue/…` et crée le job.
+   En mode `batch`, le job est mis en file pgmq.
+3. Les workers (Edge Functions Deno) **pré-filtrent** avec un modèle bon marché : un
+   bordereau récapitulatif ou un courrier est marqué `rejected_non_invoice` sans payer
+   l'extraction complète. Le pré-filtre en panne laisse passer — il ne perd rien.
+4. Le résultat passe le job en `needs_review`. La page suit la progression en
+   **Realtime** ; un sondage prend le relais si le canal décroche.
+5. `POST /api/document-jobs/auto-save` enregistre automatiquement les factures dont
+   **l'extraction ET le rapprochement de commune sont ≥ 96 %** (statut `pending_review`,
+   `auto_saved = true`). Le reste part en révision manuelle sur `/upload/review?job=…`,
+   commune pré-remplie.
 
 ### Ce qu'il faut savoir
 
-- **Ce n'est pas du temps réel.** Anthropic garantit 24 h ; en pratique c'est bien plus court. L'onglet peut être fermé, le cron reprend le lot.
-- **Commune non reconnue** → la facture n'est pas créée : elle attend une affectation manuelle sur la page du lot. L'extraction est conservée, aucun appel au modèle n'est repayé.
-- **Facture déjà en base** → marquée `skipped_duplicate` (contrôle sur `facture_number`), le reste du lot passe.
-- **Plafond : 100 fichiers par import.** Contrôlé côté client et côté serveur, avec un message invitant à scinder.
-- **Le coût est mesuré, pas estimé** : `input_tokens` / `output_tokens` sont stockés par document et affichés en fin de lot.
+- **L'onglet peut être fermé.** Trois `pg_cron` (une par worker, toutes les minutes)
+  reprennent le travail. Les invocations depuis le navigateur ne sont qu'un
+  raccourci pour ne pas attendre le tick suivant.
+- **Facture déjà en base** → le job est clos en pointant la facture existante
+  (contrôle sur `facture_number`), aucun doublon créé.
+- **Rejet à tort** → « Traiter quand même » relance en forçant l'extraction
+  (`skip_prefilter`), sans repasser par le classifieur.
+- **Plafonds** : 20 Mo par document, 200 documents et 500 Mo par sélection, 100 Mo par
+  archive. Contrôlés des deux côtés.
+- **Les fichiers distants sont toujours supprimés** après extraction, et le fichier du
+  bucket l'est à la suppression d'un job : pas d'orphelin.
 
-### Configuration du cron
+### Mise en service
 
-Le sondage depuis la page suffit tant que l'utilisateur reste devant. Pour que les lots aboutissent même onglet fermé, planifiez un appel régulier (toutes les 10–15 min).
-
-**`CRON_SECRET` n'est fourni par personne : vous le générez.** C'est un secret partagé, présent des deux côtés — dans les variables d'environnement, et dans l'en-tête `Authorization` de l'appelant.
-
-```bash
-openssl rand -base64 32
-```
-
-Sans cette variable, la route répond `500` et **ne traite rien** : elle échoue fermé.
-
-**Sur Vercel** — le nom `CRON_SECRET` est reconnu : dès que la variable existe, Vercel ajoute lui-même `Authorization: Bearer <valeur>` aux invocations. Rien à écrire, il suffit de déclarer la planification :
-
-```json
-{ "crons": [{ "path": "/api/cron/sync-batches", "schedule": "*/15 * * * *" }] }
-```
-
-> ⚠️ **Plan Hobby : un seul déclenchement par jour.** Une expression plus fréquente fait échouer le déploiement. Sur Hobby, comptez sur le sondage de la page et gardez le cron comme rattrapage quotidien.
-
-**Ailleurs** (Render, cron système, GitHub Actions) — envoyez l'en-tête vous-même :
+Le code applicatif ne suffit pas — la file a trois dépendances côté Supabase.
 
 ```bash
-curl -X POST https://<votre-domaine>/api/cron/sync-batches \
-  -H "Authorization: Bearer $CRON_SECRET"
+# 1. Schéma (crée document_jobs, la file pgmq, les fonctions et les 3 cron)
+supabase db push
+
+# 2. Workers
+supabase functions deploy process-document-queue
+supabase functions deploy collect-document-batches
+supabase functions deploy process-direct-documents
+supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-La route accepte `GET` **et** `POST` : Vercel invoque en GET, un appel manuel se fait plus naturellement en POST.
+3. **Secrets Vault** — sans eux, les `pg_cron` s'exécutent mais n'appellent rien, et
+   **l'échec est silencieux** :
 
-> Deux points non négociables, sinon le cron ne s'exécute jamais :
-> - `proxy.ts` laisse passer `/api/cron/` sans session — ces routes s'authentifient par le secret. Toute nouvelle route sous ce préfixe **doit** vérifier `CRON_SECRET` elle-même.
-> - Les crons Vercel **ne suivent pas les redirections** : une réponse 3xx est considérée comme finale et l'invocation se termine sans rien faire.
+```sql
+select vault.create_secret('https://<votre-projet>.supabase.co', 'project_url');
+select vault.create_secret('<clé service role>', 'service_role_key');
+```
+
+Contrôle rapide :
+
+```sql
+select jobname, schedule, active from cron.job;                 -- 3 lignes actives
+select status, count(*) from public.document_jobs group by 1;   -- rien de bloqué
+```
+
+Retour arrière : voir `supabase/rollback/`.
 
 ## Structure du projet
 
@@ -174,8 +211,8 @@ app/
     analyses/                  # graphiques de consommation
     anomalies/                 # module Anomalies (version bêta)
     documentation/             # guide + onglet champs/ (modèle d'extraction)
-    upload/                    # import + extraction OCR d'une facture
-  api/                         # routes API (extract, invoices, reports, sites, communes…)
+    upload/                    # import des factures + review/ (révision d'un document extrait)
+  api/                         # routes API (document-jobs, invoices, reports, sites, communes…)
   login/                       # authentification
 components/
   app-shell/                   # barre supérieure (recherche nav + thème)
@@ -189,8 +226,12 @@ components/
 lib/
   data/                        # requêtes Supabase agrégées (factures, consommation) + détection d'anomalies
   anthropic/                   # schéma d'extraction + client Claude
+  documents/                   # garde-fous de la file + estimation de durée
   supabase/                    # clients Supabase (server/browser)
-supabase/migrations/           # schéma de la base
+supabase/
+  migrations/                  # schéma de la base
+  rollback/                    # retours arrière, un fichier par migration
+  functions/                   # Edge Functions Deno : workers de la file de traitement
 ```
 
 ## Routes principales
@@ -205,14 +246,17 @@ supabase/migrations/           # schéma de la base
 | `/analyses`                                                   | analyses de consommation (filtres commune/site/catégorie, kWh/€/c€)                                                                    |
 | `/anomalies`                                                  | module Anomalies (version bêta) : alertes, graphiques, résolution + historique                                                         |
 | `/documentation` · `/documentation/champs`                    | guide d'utilisation + champs du modèle d'extraction                                                                                    |
-| `/upload`                                                     | import et extraction OCR d'une facture                                                                                                 |
+| `/upload`                                                     | import des factures (fichiers, dossier ou ZIP) + file de traitement en temps réel                                                      |
+| `/upload/review?job=`                                         | révision d'un document extrait avant enregistrement                                                                                    |
 | `/factures`, `/factures/[id]`, `/documents/export`, `/champs` | anciennes routes — redirigent vers les nouvelles                                                                                       |
 
 ## Base de données
 
 Le schéma (tables `invoices`, `clients`, `contracts`, `sites`, `communes`, `consumption_periods`, `invoice_charges`, `anomalies`, …) est dans `supabase/migrations/`. Appliquez les migrations sur votre projet Supabase (CLI Supabase ou dashboard) avant le premier lancement.
 
-Colonnes notables sur `invoices` : `archived` (masquage), `precision` (jsonb — score de précision par champ, renseigné aux nouveaux imports), `file_path` (PDF dans le bucket `invoice-files`).
+Colonnes notables sur `invoices` : `archived` (masquage), `precision` (jsonb — score de précision par champ, renseigné aux nouveaux imports), `file_path` (PDF dans le bucket `invoice-files`), `auto_saved` (facture créée par la file sans relecture humaine).
+
+`document_jobs` / `document_batches` portent la file de traitement — voir [File de traitement des documents](#file-de-traitement-des-documents).
 
 > **Détection d'anomalies & résolutions** : la détection actuelle est un _fallback_ par règles (cohérence des totaux, coût/kWh atypique vs médiane annuelle) calculé à la volée ; les résolutions sont mémorisées côté navigateur (localStorage). Le suivi en base arrivera avec la version complète du module.
 

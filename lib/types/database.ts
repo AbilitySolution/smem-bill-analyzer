@@ -92,6 +92,8 @@ export interface Invoice {
   status: InvoiceStatus;
   archived: boolean;
   precision: Record<string, number> | null;
+  /** Créée par la file de traitement sans relecture humaine (extraction et commune ≥ 96 %). */
+  auto_saved: boolean;
   created_by: string | null;
   created_at: string;
 }
