@@ -2,6 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { UploadCloud, Loader2, AlertCircle } from "lucide-react";
 
 export default function UploadPage() {
@@ -125,6 +126,11 @@ function UploadPageInner() {
           {error}
         </div>
       )}
+
+      <p className="mt-4 text-[13px] text-[var(--kn-text-muted)]">
+        Plusieurs factures à traiter ?{" "}
+        <Link href="/upload/batch" className="text-[#ea580c] underline">Import en lot par archive ZIP</Link>
+      </p>
     </div>
   );
 }
