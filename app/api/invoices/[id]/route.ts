@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { getUserContext } from "@/lib/auth";
 import { z } from "zod";
 
 const n = z.number().nullable();
@@ -81,8 +82,10 @@ const updateSchema = z.object({
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // getUserContext plutôt que getUser seul : la création d'une définition de champ
+  // personnalisé a besoin de l'org (colonne NOT NULL, et exigée par la policy RLS).
+  const ctx = await getUserContext();
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
   const parsed = updateSchema.safeParse(body);
@@ -151,10 +154,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       const { data: inserted, error: defErr } = await supabase
         .from("custom_field_definitions")
         .insert({
+          // org_id et created_by sont tous deux exigés par la policy RLS
+          // "org_create_custom_field_definitions" — en omettre un fait échouer
+          // l'insert avec une violation de politique de sécurité.
+          org_id: ctx.orgId,
           section: cf.section,
           label,
           field_type: cf.new_definition!.field_type,
-          created_by: authData.user.id,
+          created_by: ctx.userId,
         })
         .select("id")
         .single();
@@ -164,6 +171,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           const { data: existingDef } = await supabase
             .from("custom_field_definitions")
             .select("id")
+            .eq("org_id", ctx.orgId)
             .eq("section", cf.section)
             .ilike("label", label)
             .maybeSingle();
