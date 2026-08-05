@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Générateur de rapports Excel Ability (démo SMEM) — version simplifiée.
+Générateur de rapports Excel Ability (SMEM) — données réelles extraites.
 
 Usage : python3 generate_report.py '<params-json>' <sortie.xlsx>
 Env   : SUPABASE_URL, SUPABASE_SERVICE_KEY
@@ -12,16 +12,21 @@ params-json :
   "siteIds": ["uuid", ...] (optionnel),
   "ids": ["uuid", ...] (optionnel — factures présélectionnées depuis Mes documents),
   "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" (optionnels),
+  "cutover": "YYYY-MM-DD" (optionnel — date de bascule avant/après quand le référentiel
+              travaux de la commune est vide),
   "dataLogger": true|false
 }
 
 Principes :
 - Séries temporelles chronologiques partout (X = semestres 2019-S1 → …), axes titrés avec unités.
-- Périodes de facturation ventilées PRO-RATA JOURS sur les semestres calendaires.
-- Avant/après travaux : dates RÉELLES SMEM par commune (mail du 03/07/2026), fenêtre de
-  travaux EXCLUE, moyennes annualisées.
+- Périodes de facturation ventilées PRO-RATA JOURS sur les semestres calendaires — y compris
+  les factures de rattrapage couvrant plusieurs années (cas signalé par le SMEM).
+- Avoirs (montants négatifs) conservés tels quels : ils réduisent les totaux, les axes des
+  graphiques acceptent les valeurs négatives.
+- Avant/après travaux : dates du référentiel SMEM par commune, fenêtre de travaux EXCLUE,
+  moyennes annualisées ; à défaut, date de bascule saisie par l'utilisateur.
 - Feuille « Données » masquée (source des TCD), triée chronologiquement → TCD ordonnés.
-- Données simulées : disclaimers explicites sur la page de garde.
+- Page de garde : indicateurs de qualité (lignes sans période détaillée, avoirs détectés).
 """
 import json
 import math
@@ -109,20 +114,28 @@ def load_data(p: dict):
     site_ids = set(p.get("siteIds") or [])
     if site_ids:
         invoices = [i for i in invoices if i.get("site_id") in site_ids]
-    inv_ids = {i["id"] for i in invoices}
-    periods = [r for r in sb_get("consumption_periods", {
-        "select": "invoice_id,poste_tarifaire,period_start,period_end,consommation_kwh,prix_unitaire_ckwh,montant_eur"}) if r["invoice_id"] in inv_ids]
-    charges = [r for r in sb_get("invoice_charges", {
-        "select": "invoice_id,category,libelle,period_start,period_end,montant_eur"}) if r["invoice_id"] in inv_ids]
+    # Filtrage CÔTÉ SERVEUR par lots d'invoice_id : on ne télécharge jamais les tables
+    # entières (data-minimization — la service-role key voit toutes les organisations).
+    inv_ids = sorted(i["id"] for i in invoices)
+    periods, charges = [], []
+    for i in range(0, len(inv_ids), 60):  # limite de longueur d'URL PostgREST
+        chunk = f"in.({','.join(inv_ids[i:i + 60])})"
+        periods.extend(sb_get("consumption_periods", {
+            "select": "invoice_id,poste_tarifaire,period_start,period_end,consommation_kwh,prix_unitaire_ckwh,montant_eur",
+            "invoice_id": chunk}))
+        charges.extend(sb_get("invoice_charges", {
+            "select": "invoice_id,category,libelle,period_start,period_end,montant_eur",
+            "invoice_id": chunk}))
     communes = sb_get("communes", {"select": "id,nom,points_lumineux,armoires,travaux_debut,travaux_fin,travaux_estimes", "org_id": f"eq.{org_id}"})
     return invoices, periods, charges, {c["id"]: c for c in communes}
 
 # ── Normalisation pro-rata (semestres calendaires) ───────────────────────────
 def classify(poste: str) -> str:
-    s = (poste or "").lower()
-    if "pleine" in s or s.startswith("hp"):
+    # Aligné sur lib/data/consumption.ts : hp/hpn/hph…, ejp_hp/tempo_hp, « heures pleines ».
+    s = (poste or "").lower().strip()
+    if "pleine" in s or s.startswith("hp") or "_hp" in s:
         return "HP"
-    if "creuse" in s or s.startswith("hc"):
+    if "creuse" in s or s.startswith("hc") or "_hc" in s:
         return "HC"
     return "Base"
 
@@ -144,8 +157,9 @@ def fallback_range(inv):
     fd = d(inv["facture_date"])
     return fd - timedelta(days=181), fd
 
-def normalize(invoices, periods, charges):
-    """→ lignes longues (facture × poste × bucket semestriel), pro-rata jours, TRIÉES chronologiquement."""
+def normalize(invoices, periods, charges, stats=None):
+    """→ lignes longues (facture × poste × bucket semestriel), pro-rata jours, TRIÉES chronologiquement.
+    `stats` (dict optionnel) collecte les indicateurs de qualité affichés en page de garde."""
     inv_by_id = {i["id"]: i for i in invoices}
     period_range = {}
     for r in periods:
@@ -154,10 +168,21 @@ def normalize(invoices, periods, charges):
             lo, hi = d(r["period_start"]), d(r["period_end"])
             period_range[r["invoice_id"]] = (min(lo, cur[0]) if cur else lo, max(hi, cur[1]) if cur else hi)
     rows = []
+    if stats is None:
+        stats = {}
+    stats.setdefault("approx_lines", 0)   # lignes sans période détaillée → fenêtre estimée
+    stats.setdefault("credit_lines", 0)   # avoirs (montants ou kWh négatifs)
+    stats.setdefault("swapped_dates", 0)  # période avec bornes inversées (corrigée)
 
     def push(inv, type_, poste, start, end, kwh, eur):
+        if kwh < 0 or eur < 0:
+            stats["credit_lines"] += 1
         if not start or not end:
+            stats["approx_lines"] += 1
             start, end = fallback_range(inv)
+        if end < start:  # données incohérentes → on rétablit l'ordre plutôt que de diviser par ≤ 0
+            stats["swapped_dates"] += 1
+            start, end = end, start
         total_days = (end - start).days + 1
         for (yy, hh, days) in semester_buckets(start, end):
             f = days / total_days
@@ -192,38 +217,53 @@ def periods_sorted(rows):
     return sorted({r["periode"] for r in rows})
 
 def trim_partial_semesters(rows):
-    """Retire les semestres calendaires de bord partiellement couverts (artefacts de
-    ventilation pro-rata : demi-hauteur en début/fin de série → chute trompeuse).
-    Un semestre est conservé si sa couverture (somme des jours ventilés) atteint
-    ≥ 85 % de la couverture médiane (intérieurs ~100 %, demi-semestres de bord ~50-80 %)."""
+    """Retire uniquement les semestres calendaires de BORD (premier/dernier de la série)
+    partiellement couverts — artefacts de ventilation pro-rata (demi-hauteur trompeuse
+    en début/fin de courbe). Les semestres INTÉRIEURS sont toujours conservés : une
+    facture de rattrapage couvrant plusieurs années produit des semestres à faible
+    couverture qui sont de vraies données (cas Gros-Morne signalé par le SMEM)."""
     if not rows:
         return rows
     dsum = defaultdict(float)
     for r in rows:
         dsum[r["periode"]] += r.get("days", 0)
+    pers = sorted(dsum)
+    if len(pers) < 3:
+        return rows
     vals = sorted(dsum.values())
-    med = vals[len(vals) // 2] if vals else 0
+    med = vals[len(vals) // 2]
     if med <= 0:
         return rows
-    keep = {p for p, v in dsum.items() if v >= 0.85 * med}
-    return [r for r in rows if r["periode"] in keep]
+    drop = set()
+    if dsum[pers[0]] < 0.85 * med:
+        drop.add(pers[0])
+    if dsum[pers[-1]] < 0.85 * med:
+        drop.add(pers[-1])
+    return [r for r in rows if r["periode"] not in drop]
 
 # ── Avant/après : allocation par fenêtres de dates RÉELLES ───────────────────
 TODAY = date.today()
-BEFORE_START = date(2017, 1, 1)  # les données simulées démarrent en 2017
+
+def data_start(invoices, periods):
+    """Première date réellement couverte par les données (période de conso ou date de facture) :
+    borne le début de la fenêtre « avant » sur les données, pas sur une constante."""
+    cands = [d(p["period_start"]) for p in periods if p.get("period_start")]
+    cands += [d(i["facture_date"]) for i in invoices if i.get("facture_date")]
+    return min(cands) if cands else TODAY
 
 def overlap_days(a0, a1, b0, b1):
     lo, hi = max(a0, b0), min(a1, b1)
     return max(0, (hi - lo).days + 1)
 
 def alloc_windows(invoices, periods, charges, debut: date, fin: date, keyf):
-    """Ventile kWh (conso) et € (toutes composantes) sur AVANT [2019, debut) et APRÈS (fin, auj.],
-    pro-rata jours ; la fenêtre de travaux est exclue. Rend {key: {kb,ka,eb,ea}} annualisés ensuite."""
+    """Ventile kWh (conso) et € (toutes composantes) sur AVANT [début des données, debut) et
+    APRÈS (fin, dernière facture], pro-rata jours ; la fenêtre de travaux est exclue.
+    Rend {key: {kb,ka,eb,ea}} annualisés ensuite."""
     inv_by_id = {i["id"]: i for i in invoices}
     # Borne « après » = dernière période réellement facturée (et non aujourd'hui) : sinon
     # l'annualisation diviserait par une fenêtre plus large que les données → moyenne sous-estimée.
     last_end = max((d(p["period_end"]) for p in periods if p.get("period_end")), default=TODAY)
-    before = (BEFORE_START, debut - timedelta(days=1))
+    before = (data_start(invoices, periods), debut - timedelta(days=1))
     after = (fin + timedelta(days=1), min(TODAY, last_end))
     out = defaultdict(lambda: {"kb": 0.0, "ka": 0.0, "eb": 0.0, "ea": 0.0})
 
@@ -275,12 +315,14 @@ def _subtle_gridlines():
     return gl
 
 def _fit_y_axis(chart, vmin, vmax):
-    """Calage de l'axe Y sur l'amplitude réelle des courbes (supprime l'espace vide en bas)."""
+    """Calage de l'axe Y sur l'amplitude réelle des courbes (supprime l'espace vide en bas).
+    Les minima négatifs (avoirs) sont conservés — on ne tronque plus l'axe à 0."""
     if vmin is None or vmax is None or vmax <= vmin:
         return
     span = vmax - vmin
-    pad = span * 0.12 or (vmax * 0.05)
-    chart.y_axis.scaling.min = max(0, round(vmin - pad))
+    pad = span * 0.12 or (abs(vmax) * 0.05)
+    lo = vmin - pad
+    chart.y_axis.scaling.min = round(lo) if vmin < 0 else max(0, round(lo))
     chart.y_axis.scaling.max = round(vmax + pad)
 
 def _style_axes(chart, x_title, y_title):
@@ -380,7 +422,7 @@ def travaux_label(ci):
     est = " (estimé)" if ci.get("travaux_estimes") else ""
     return f"{datetime.fromisoformat(ci['travaux_debut']).strftime('%d/%m/%Y')} → {datetime.fromisoformat(ci['travaux_fin']).strftime('%d/%m/%Y')}{est}"
 
-def sheet_garde(wb, p, invoices, scope_label, ci=None):
+def sheet_garde(wb, p, invoices, scope_label, ci=None, stats=None):
     ws = wb.active
     ws.title = "Garde"
     ws.merge_cells("A1:D1")
@@ -407,6 +449,13 @@ def sheet_garde(wb, p, invoices, scope_label, ci=None):
         items.insert(2, ("Travaux d'éclairage public", travaux_label(ci)))
         if ci.get("points_lumineux"):
             items.insert(3, ("Parc EP (référentiel SMEM)", f"{ci['points_lumineux']} points lumineux · {ci['armoires']} armoires"))
+    stats = stats or {}
+    if stats.get("approx_lines"):
+        items.append(("Lignes sans période détaillée", f"{stats['approx_lines']} (rattachées à une fenêtre estimée de 6 mois avant la date de facture)"))
+    if stats.get("credit_lines"):
+        items.append(("Avoirs détectés", f"{stats['credit_lines']} ligne(s) à montant négatif — déduites des totaux"))
+    if stats.get("swapped_dates"):
+        items.append(("Périodes aux bornes inversées", f"{stats['swapped_dates']} (ordre des dates rétabli automatiquement)"))
     ws["A4"] = "Synthèse du périmètre"
     style_header_row(ws, 4, 2)
     r = 5
@@ -418,9 +467,11 @@ def sheet_garde(wb, p, invoices, scope_label, ci=None):
     note_row = r + 1
     ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row + 2, end_column=6)
     ws.cell(row=note_row, column=1, value=(
-        "AVERTISSEMENT : rapport de démonstration. Les factures sont simulées mais calibrées sur des ordres de grandeur réels ; "
-        "les dates de travaux proviennent du référentiel SMEM du 03/07/2026 et les communes non documentées restent marquées « estimé ». "
-        "La feuille masquée « Données » contient le détail normalisé utilisé par les tableaux croisés dynamiques."
+        "Méthode : rapport construit sur les champs réellement extraits des factures (périodes de consommation, "
+        "postes tarifaires, part fixe, taxes). Les périodes de facturation sont ventilées au pro-rata des jours sur les "
+        "semestres calendaires — y compris les factures de rattrapage couvrant plusieurs années. Les avoirs (montants "
+        "négatifs) sont déduits des totaux. La feuille masquée « Données » contient le détail normalisé utilisé par les "
+        "tableaux croisés dynamiques."
     ))
     ws.cell(row=note_row, column=1).font = SUB_FONT
     ws.cell(row=note_row, column=1).fill = PatternFill("solid", fgColor="FFF7ED")
@@ -515,14 +566,17 @@ def sheet_evolution(wb, rows, ci=None, title_suffix=""):
         ws.cell(row=anchor_row + 38, column=1,
                 value=f"Bande grisée = fenêtre de travaux d'éclairage public : {travaux_label(ci)}.").font = SUB_FONT
 
-    # Décomposition tarifaire compacte (par année, en €)
+    # Décomposition tarifaire compacte (par année, en €) + ligne HP+HC et TOTAL
     years = sorted({r["annee"] for r in rows})
     postes = ["Base", "HP", "HC", "Part fixe", "Taxes"]
     def poste_of(r):
         return r["poste"] if r["type"] == "Consommation" else ("Part fixe" if r["type"] == "Part fixe" else "Taxes")
     dec = defaultdict(float)
+    kdec = defaultdict(float)  # kWh par poste de consommation
     for r in rows:
         dec[(poste_of(r), r["annee"])] += r["eur"]
+        if r["type"] == "Consommation":
+            kdec[(r["poste"], r["annee"])] += r["kwh"]
     top = anchor_row + 40
     ws.cell(row=top, column=1, value="Décomposition de la dépense par composante tarifaire (€)").font = Font(bold=True, size=12, color=ORANGE_DARK)
     ws.cell(row=top + 1, column=1, value="Composante")
@@ -534,9 +588,53 @@ def sheet_evolution(wb, rows, ci=None, title_suffix=""):
         for j, y in enumerate(years):
             c = ws.cell(row=top + 2 + i, column=2 + j, value=round(dec.get((po, y), 0), 2))
             c.number_format = EUR0_FMT
+    tot_row = top + 2 + len(postes)
+    ws.cell(row=tot_row, column=1, value="TOTAL (€)").font = Font(bold=True)
+    for j, y in enumerate(years):
+        c = ws.cell(row=tot_row, column=2 + j, value=round(sum(dec.get((po, y), 0) for po in postes), 2))
+        c.number_format = EUR0_FMT
+        c.font = Font(bold=True)
+        c.fill = KPI_FILL
+
+    # Consommation par poste (kWh) : HP+HC additionnés (demande SMEM) + ratio HC/HP =
+    # test de cohérence éclairage public (HC censé dominer, ratio déterminé par les horloges).
+    top2 = tot_row + 2
+    ws.cell(row=top2, column=1, value="Consommation par poste tarifaire (kWh)").font = Font(bold=True, size=12, color=ORANGE_DARK)
+    ws.cell(row=top2 + 1, column=1, value="Poste")
+    for j, y in enumerate(years):
+        ws.cell(row=top2 + 1, column=2 + j, value=y)
+    style_header_row(ws, top2 + 1, 1 + len(years))
+    klines = [
+        ("Base", lambda y: kdec.get(("Base", y), 0)),
+        ("HP", lambda y: kdec.get(("HP", y), 0)),
+        ("HC", lambda y: kdec.get(("HC", y), 0)),
+        ("HP + HC", lambda y: kdec.get(("HP", y), 0) + kdec.get(("HC", y), 0)),
+        ("TOTAL (kWh)", lambda y: kdec.get(("Base", y), 0) + kdec.get(("HP", y), 0) + kdec.get(("HC", y), 0)),
+    ]
+    for i, (label, fn) in enumerate(klines):
+        bold = label.startswith(("HP +", "TOTAL"))
+        cell = ws.cell(row=top2 + 2 + i, column=1, value=label)
+        if bold:
+            cell.font = Font(bold=True)
+        for j, y in enumerate(years):
+            c = ws.cell(row=top2 + 2 + i, column=2 + j, value=round(fn(y)))
+            c.number_format = EUR0_FMT
+            if bold:
+                c.font = Font(bold=True)
+                c.fill = KPI_FILL
+    ratio_row = top2 + 2 + len(klines)
+    ws.cell(row=ratio_row, column=1, value="Ratio HC / HP")
+    for j, y in enumerate(years):
+        hp, hc = kdec.get(("HP", y), 0), kdec.get(("HC", y), 0)
+        c = ws.cell(row=ratio_row, column=2 + j, value=round(hc / hp, 2) if hp > 0 else None)
+        c.number_format = "0.00"
+    ws.cell(row=ratio_row + 1, column=1, value=(
+        "Cohérence éclairage public : HC doit dominer HP (allumage nocturne) ; le ratio HC/HP, déterminé par les horloges, "
+        "doit rester stable d'une année sur l'autre. Une variation marquée signale une anomalie de facturation ou d'horloge."
+    )).font = SUB_FONT
     ws.column_dimensions["A"].width = 24
-    for col in "BCDE":
-        ws.column_dimensions[col].width = 16
+    for col in "BCDEFGHIJ":
+        ws.column_dimensions[col].width = 14
     return ws
 
 def write_matrix(ws, top, left_label, col_keys, line_keys, values, fmt, title):
@@ -550,7 +648,9 @@ def write_matrix(ws, top, left_label, col_keys, line_keys, values, fmt, title):
         ws.cell(row=hr + 1 + i, column=1, value=lk)
         for j, ck in enumerate(col_keys):
             v = values.get((lk, ck))
-            cell = ws.cell(row=hr + 1 + i, column=2 + j, value=round(v, 2) if v else None)
+            # `v is not None` (et non truthiness) : un avoir peut produire un total négatif
+            # ou nul qui doit rester visible dans la matrice.
+            cell = ws.cell(row=hr + 1 + i, column=2 + j, value=round(v, 2) if v is not None else None)
             cell.number_format = fmt
     tr = hr + 1 + len(line_keys)
     ws.cell(row=tr, column=1, value="TOTAL").font = Font(bold=True)
@@ -582,9 +682,9 @@ def sheet_avant_apres(wb, rows, alloc_site, ci, commune_nom):
     ws["A1"] = f"Avant / après travaux d'éclairage public — {commune_nom}"
     ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
     meth = [
-        f"Travaux : {travaux_label(ci)} (référentiel SMEM).",
-        "Méthode : AVANT = début des données (2017) → veille du lancement ; APRÈS = lendemain de l'achèvement → dernière facture.",
-        "La fenêtre de travaux est EXCLUE. Moyennes annualisées (pro-rata jours). € = toutes composantes.",
+        f"Travaux : {travaux_label(ci)}" + (" — date de bascule saisie (référentiel travaux vide)." if ci.get("travaux_estimes") else " (référentiel SMEM)."),
+        "Méthode : AVANT = début des données → veille du lancement ; APRÈS = lendemain de l'achèvement → dernière facture.",
+        "La fenêtre de travaux est EXCLUE. Moyennes annualisées (pro-rata jours). € = toutes composantes. Avoirs déduits.",
     ]
     for i, m in enumerate(meth):
         ws.cell(row=2 + i, column=1, value=m).font = SUB_FONT
@@ -669,12 +769,13 @@ def style_header_row_range(ws, row, c0, c1):
         cell.fill = HDR_FILL
         cell.font = HDR_FONT
 
-def sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info):
-    """Synthèse : avant/après PAR COMMUNE (dates réelles propres à chacune) + histogramme X = communes."""
+def sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info, cutover=None):
+    """Synthèse : avant/après PAR COMMUNE (dates réelles propres à chacune, repli sur la
+    date de bascule saisie) + histogramme X = communes."""
     ws = wb.create_sheet("Avant-Après communes")
-    ws["A1"] = "Avant / après travaux — comparaison par commune (dates réelles SMEM)"
+    ws["A1"] = "Avant / après travaux — comparaison par commune"
     ws["A1"].font = Font(bold=True, size=13, color=ORANGE_DARK)
-    ws["A2"] = "AVANT = début des données (2017) → lancement ; APRÈS = achèvement → dernière facture ; fenêtre de travaux exclue ; moyennes annualisées."
+    ws["A2"] = "AVANT = début des données → lancement ; APRÈS = achèvement → dernière facture ; fenêtre de travaux exclue ; moyennes annualisées."
     ws["A2"].font = SUB_FONT
     headers = ["Commune", "Travaux (SMEM)", "Points lum.", "Armoires", "kWh/an avant", "kWh/an après", "Δ conso (%)", "€/an avant", "€/an après", "Δ dépense (%)"]
     hr = 4
@@ -686,9 +787,9 @@ def sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info):
         by_commune[i.get("commune_id")].append(i)
     ri = hr + 1
     for cid, invs in sorted(by_commune.items(), key=lambda kv: (kv[1][0].get("communes") or {}).get("nom", "")):
-        ci = communes_info.get(cid)
+        ci = effective_travaux(communes_info.get(cid), cutover)
         nom = (invs[0].get("communes") or {}).get("nom", "—")
-        if not ci or not ci.get("travaux_debut"):
+        if not ci:
             ws.append([nom, "n.d."] + [None] * 8)
             ri += 1
             continue
@@ -1126,11 +1227,24 @@ def inject_pivots(xlsx_path: str, n_data_rows: int, pivots: list):
     shutil.move(tmp, xlsx_path)
 
 # ── Assemblage ────────────────────────────────────────────────────────────────
+def effective_travaux(ci, cutover=None):
+    """Fenêtre de travaux effective d'une commune : dates du référentiel SMEM si présentes,
+    sinon la date de bascule saisie par l'utilisateur (fenêtre ponctuelle, marquée estimée)."""
+    if ci and ci.get("travaux_debut") and ci.get("travaux_fin"):
+        return ci
+    if cutover:
+        base = dict(ci or {})
+        base.update({"travaux_debut": cutover, "travaux_fin": cutover, "travaux_estimes": True})
+        return base
+    return None
+
 def build(p: dict, out_path: str):
     invoices, periods, charges, communes_info = load_data(p)
     if not invoices:
         raise SystemExit("Aucune facture dans le périmètre demandé.")
-    rows = trim_partial_semesters(normalize(invoices, periods, charges))
+    stats = {}
+    rows = trim_partial_semesters(normalize(invoices, periods, charges, stats))
+    cutover = p.get("cutover")
 
     ci = communes_info.get(p.get("communeId")) if p.get("communeId") else None
     if p["report"] in ("commune", "avant_apres"):
@@ -1141,28 +1255,33 @@ def build(p: dict, out_path: str):
         scope += f" · {len(invoices)} factures sélectionnées manuellement"
 
     wb = Workbook()
-    sheet_garde(wb, p, invoices, scope, ci if p["report"] in ("commune", "avant_apres") else None)
+    sheet_garde(wb, p, invoices, scope, ci if p["report"] in ("commune", "avant_apres") else None, stats)
 
     if p["report"] == "commune":
-        sheet_evolution(wb, rows, ci, f" — {scope}")
+        sheet_evolution(wb, rows, effective_travaux(ci, cutover), f" — {scope}")
         sheet_par_site(wb, rows)
     elif p["report"] == "avant_apres":
-        if not ci or not ci.get("travaux_debut"):
-            raise SystemExit("Dates de travaux inconnues pour cette commune.")
-        alloc_site = alloc_windows(invoices, periods, charges, d(ci["travaux_debut"]), d(ci["travaux_fin"]),
+        ci_eff = effective_travaux(ci, cutover)
+        if not ci_eff:
+            raise SystemExit("Dates de travaux inconnues pour cette commune — saisissez une date de bascule avant/après.")
+        alloc_site = alloc_windows(invoices, periods, charges, d(ci_eff["travaux_debut"]), d(ci_eff["travaux_fin"]),
                                    lambda inv: (inv.get("sites") or {}).get("nom", "—"))
-        sheet_avant_apres(wb, rows, alloc_site, ci, scope)
+        sheet_avant_apres(wb, rows, alloc_site, ci_eff, scope)
     else:  # synthese
-        # Bande grise = fenêtre de travaux GLOBALE (min lancement → max achèvement des communes présentes).
+        # Bande grise = fenêtre de travaux GLOBALE (min lancement → max achèvement des communes
+        # présentes) ; repli sur la date de bascule saisie si le référentiel est vide.
         present = {i.get("commune_id") for i in invoices}
         debuts = [d(c["travaux_debut"]) for cid, c in communes_info.items()
                   if cid in present and c.get("travaux_debut")]
         fins = [d(c["travaux_fin"]) for cid, c in communes_info.items()
                 if cid in present and c.get("travaux_fin")]
-        global_ci = {"nom": "toutes communes", "travaux_debut": min(debuts).isoformat(),
-                     "travaux_fin": max(fins).isoformat(), "travaux_estimes": False} if debuts and fins else None
+        if debuts and fins:
+            global_ci = {"nom": "toutes communes", "travaux_debut": min(debuts).isoformat(),
+                         "travaux_fin": max(fins).isoformat(), "travaux_estimes": False}
+        else:
+            global_ci = effective_travaux(None, cutover)
         sheet_evolution(wb, rows, global_ci, "")
-        sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info)
+        sheet_synthese_avant_apres(wb, invoices, periods, charges, communes_info, cutover)
 
     tcd = wb.create_sheet("TCD")
     tcd["A1"] = "Tableau croisé dynamique (€ et kWh) — actualisé automatiquement à l'ouverture dans Excel."

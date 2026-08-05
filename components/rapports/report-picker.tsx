@@ -14,9 +14,9 @@ interface Site { id: string; nom: string; commune_id: string }
 type ReportType = "commune" | "avant_apres" | "synthese";
 
 const REPORTS: { id: ReportType; label: string; desc: string; icon: typeof MapPin }[] = [
-  { id: "commune", label: "Par commune", desc: "Séries temporelles kWh/€ (fenêtre de travaux marquée), détail par site, décomposition tarifaire, TCD.", icon: MapPin },
-  { id: "avant_apres", label: "Avant / après travaux", desc: "Une feuille d'analyse : moyennes annualisées par site (dates réelles SMEM, fenêtre de travaux exclue) + histogrammes.", icon: Wrench },
-  { id: "synthese", label: "Synthèse", desc: "Portefeuille consolidé : évolution temporelle + avant/après par commune (dates réelles SMEM), TCD.", icon: Layers3 },
+  { id: "commune", label: "Par commune", desc: "Séries temporelles kWh/€, détail par site, décomposition tarifaire (HP+HC, ratio HC/HP), TCD.", icon: MapPin },
+  { id: "avant_apres", label: "Avant / après travaux", desc: "Moyennes annualisées par site, fenêtre de travaux exclue (dates SMEM ou date de bascule saisie) + histogrammes.", icon: Wrench },
+  { id: "synthese", label: "Synthèse", desc: "Portefeuille consolidé : évolution temporelle + avant/après par commune, TCD.", icon: Layers3 },
 ];
 
 /** Générateur de rapport Excel — flux unique : type de rapport + périmètre + data logger. */
@@ -27,6 +27,7 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
   const [siteIds, setSiteIds] = useState<Set<string>>(new Set());
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [cutover, setCutover] = useState("");
   const [dataLogger, setDataLogger] = useState(false);
   const [usePre, setUsePre] = useState(preselectedIds.length > 0);
   const [busy, setBusy] = useState(false);
@@ -38,10 +39,17 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
     [sites, communeId],
   );
   const selectedCommune = communes.find((c) => c.id === communeId);
-  const ready = !needsCommune || !!communeId;
+  // Avant/après sans dates de travaux au référentiel → date de bascule obligatoire.
+  const needsCutover = report === "avant_apres" && !!selectedCommune && !selectedCommune.travaux_debut;
+  const ready = (!needsCommune || !!communeId) && (!needsCutover || !!cutover);
 
   const toggleSite = (id: string) =>
-    setSiteIds((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setSiteIds((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
 
   async function generate() {
     if (!ready) return;
@@ -56,6 +64,7 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
           ids: usePre ? preselectedIds : undefined,
           from: from || undefined,
           to: to || undefined,
+          cutover: cutover || undefined,
           dataLogger,
         }),
       });
@@ -137,6 +146,16 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
             <Info className="size-3" /> dates de travaux estimées pour cette commune
           </span>
         )}
+        {needsCutover && (
+          <label className="flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
+            <Wrench className="size-3.5" /> Date de bascule avant/après
+            <input type="date" value={cutover} onChange={(e) => setCutover(e.target.value)}
+              className="h-9 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none" />
+            <span className="flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
+              <Info className="size-3" /> pas de dates de travaux au référentiel — indiquez la fin des travaux
+            </span>
+          </label>
+        )}
       </div>
 
       {report !== "avant_apres" && (
@@ -179,13 +198,18 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
           {busy ? "Génération…" : "Générer le rapport Excel"}
         </button>
       </div>
-      {!ready && <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">Choisissez une commune pour ce type de rapport.</p>}
+      {!ready && (
+        <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">
+          {needsCutover && communeId ? "Saisissez une date de bascule avant/après pour cette commune." : "Choisissez une commune pour ce type de rapport."}
+        </p>
+      )}
       {error && <p className="mt-2 text-[13px] text-[#d33]">{error}</p>}
 
       <p className="mt-3 text-[11px] text-[var(--kn-text-muted)]">
-        Classeurs Excel : séries temporelles (axes et unités affichés), tableaux croisés dynamiques natifs (actualisés à l&apos;ouverture),
-        décomposition Base / HP / HC / part fixe / taxes. Les périodes de facturation sont ventilées au pro-rata des jours ;
-        l&apos;avant/après utilise les dates de travaux réelles du référentiel SMEM. Données de démonstration (factures simulées).
+        Classeurs Excel construits sur les champs réellement extraits des factures : séries temporelles (axes et unités affichés),
+        tableaux croisés dynamiques natifs (actualisés à l&apos;ouverture), décomposition Base / HP / HC / part fixe / taxes avec
+        totaux HP+HC et ratio HC/HP. Les périodes de facturation sont ventilées au pro-rata des jours — y compris les factures
+        de rattrapage multi-années — et les avoirs sont déduits des totaux.
       </p>
     </section>
   );

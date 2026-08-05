@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   MapPin, Wrench, Layers3, Loader2, Download, Check, Radio, Info, Sparkles, X, Calendar,
@@ -8,7 +8,7 @@ import {
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 
-interface Commune { id: string; nom: string; travaux_estimes?: boolean | null }
+interface Commune { id: string; nom: string; travaux_debut?: string | null; travaux_estimes?: boolean | null }
 type ReportType = "commune" | "avant_apres" | "synthese";
 
 const REPORTS: { id: ReportType; label: string; desc: string; icon: typeof MapPin }[] = [
@@ -29,13 +29,16 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
   const [communeId, setCommuneId] = useState(communes.length === 1 ? communes[0].id : "");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [cutover, setCutover] = useState("");
   const [dataLogger, setDataLogger] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const needsCommune = report === "commune" || report === "avant_apres";
   const selectedCommune = communes.find((c) => c.id === communeId);
-  const ready = !needsCommune || !!communeId;
+  // Avant/après sans dates de travaux au référentiel → date de bascule obligatoire.
+  const needsCutover = report === "avant_apres" && !!selectedCommune && !selectedCommune.travaux_debut;
+  const ready = (!needsCommune || !!communeId) && (!needsCutover || !!cutover);
 
   function close() {
     setOpen(false);
@@ -54,6 +57,7 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
           ids,
           from: from || undefined,
           to: to || undefined,
+          cutover: cutover || undefined,
           dataLogger,
         }),
       });
@@ -126,6 +130,16 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
             <Info className="size-3" /> dates de travaux estimées pour cette commune
           </span>
         )}
+        {needsCutover && (
+          <label className="mt-2 flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
+            <Wrench className="size-3.5" /> Date de bascule avant/après
+            <input type="date" value={cutover} onChange={(e) => setCutover(e.target.value)}
+              className="h-8 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] focus:border-[#f97316] focus:outline-none" />
+            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
+              <Info className="size-3" /> pas de dates de travaux au référentiel
+            </span>
+          </label>
+        )}
 
         {/* Options */}
         <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-[var(--kn-panel)] p-3">
@@ -144,7 +158,11 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
         </div>
 
         {error && <p className="mt-2 text-[13px] text-[#d33]">{error}</p>}
-        {!ready && <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">Choisissez une commune pour ce type de rapport.</p>}
+        {!ready && (
+          <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">
+            {needsCutover && communeId ? "Saisissez une date de bascule avant/après pour cette commune." : "Choisissez une commune pour ce type de rapport."}
+          </p>
+        )}
 
         <div className="mt-4 flex justify-end gap-2">
           <button onClick={close} disabled={busy} className="rounded-lg border border-[var(--kn-border)] px-3 py-2 text-[13px] font-medium hover:bg-[var(--kn-active)]">

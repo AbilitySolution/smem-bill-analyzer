@@ -47,6 +47,8 @@ export async function POST(request: Request) {
   if (siteIds.length) params.siteIds = siteIds;
   if (DATE.test(String(body.from ?? ""))) params.from = body.from;
   if (DATE.test(String(body.to ?? ""))) params.to = body.to;
+  // Date de bascule avant/après quand la commune n'a pas de dates de travaux au référentiel.
+  if (DATE.test(String(body.cutover ?? ""))) params.cutover = body.cutover;
 
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
     return NextResponse.json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant dans les variables d'environnement." }, { status: 500 });
@@ -54,7 +56,9 @@ export async function POST(request: Request) {
 
   const script = join(process.cwd(), "scripts", "reports", "generate_report.py");
   const outPath = join(tmpdir(), `ability-report-${randomUUID()}.xlsx`);
-  const { code, stderr } = await run("python3", [script, JSON.stringify(params), outPath], {
+  // Windows installe l'interpréteur sous « python » (pas de shim python3) ; Linux/Render sous « python3 ».
+  const python = process.platform === "win32" ? "python" : "python3";
+  const { code, stderr } = await run(python, [script, JSON.stringify(params), outPath], {
     ...process.env,
     SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -65,7 +69,9 @@ export async function POST(request: Request) {
       ? "Python/openpyxl introuvable sur le serveur (pip3 install openpyxl)."
       : stderr.includes("Aucune facture")
         ? "Aucune facture dans le périmètre demandé."
-        : "Échec de la génération du rapport.";
+        : stderr.includes("date de bascule")
+          ? "Dates de travaux inconnues pour cette commune — saisissez une date de bascule avant/après."
+          : "Échec de la génération du rapport.";
     return NextResponse.json({ error: friendly }, { status: 500 });
   }
 
