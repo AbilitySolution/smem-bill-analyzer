@@ -18,10 +18,27 @@ export interface InvoiceListFilters {
   siteId?: string;
   onlyAnomalies?: boolean;
   showArchived?: boolean;
+  /** Plage de dates de facture (incluses), au format YYYY-MM-DD — période choisie au calendrier. */
+  from?: string;
+  to?: string;
   sort?: SortKey;
   dir?: "asc" | "desc";
   page?: number;
   pageSize?: number;
+}
+
+/** Un jour du calendrier : nombre de factures et total TTC (agrégé en SQL). */
+export interface CalendarDay {
+  date: string; // YYYY-MM-DD
+  count: number;
+  ttc: number;
+}
+
+/** Période sélectionnée depuis la vue Calendrier. */
+export interface PeriodFilter {
+  from: string;
+  to: string;
+  label: string;
 }
 
 export interface InvoiceListKpis {

@@ -30,6 +30,14 @@ export async function GET(request: Request) {
   const cat = sp.get("cat");
   const sort = SORT_KEYS.includes(sp.get("sort") as SortKey) ? (sp.get("sort") as SortKey) : "date";
 
+  // Plage de dates de la vue Calendrier : sans elle, l'export contiendrait plus de lignes
+  // que la liste affichée alors qu'il promet de correspondre à l'écran.
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const asDate = (v: string | null) => (v && DATE_RE.test(v) ? v : undefined);
+  let from = asDate(sp.get("from"));
+  let to = asDate(sp.get("to"));
+  if (from && to && from > to) [from, to] = [to, from];
+
   const filters: Omit<InvoiceListFilters, "page" | "pageSize"> = {
     query: sp.get("q") ?? undefined,
     categorie: cat === "batiment" || cat === "eclairage_public" ? cat : undefined,
@@ -37,6 +45,8 @@ export async function GET(request: Request) {
     siteId: sp.get("site") ?? undefined,
     onlyAnomalies: sp.get("anomalies") === "1",
     showArchived: sp.get("archived") === "1",
+    from,
+    to,
     sort,
     dir: (sp.get("dir") === "asc" ? "asc" : "desc") as "asc" | "desc",
   };

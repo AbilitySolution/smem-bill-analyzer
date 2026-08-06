@@ -10,7 +10,6 @@ import {
   AlertTriangle,
   Plug,
   BookOpen,
-  Target,
   UploadCloud,
   Settings,
   LogOut,
@@ -25,20 +24,34 @@ export interface SidebarUser {
 }
 
 type NavChild = { href: string; label: string; match: (pathname: string) => boolean };
-type NavItem = { href: string; label: string; icon: typeof FileText; soon?: boolean; children?: NavChild[] };
+type NavItem = {
+  href: string;
+  label: string;
+  icon: typeof FileText;
+  soon?: boolean;
+  children?: NavChild[];
+  /** Racine de la section, quand `href` pointe vers un sous-item (ex. /analyses vs /analyses/consommation). */
+  section?: string;
+};
 
 const mainNav: NavItem[] = [
-  { href: "/documents", label: "Mes documents", icon: FileText },
+  {
+    href: "/documents", label: "Documents", icon: FileText,
+    children: [
+      { href: "/upload", label: "Importer des documents", match: (p) => p.startsWith("/upload") },
+      { href: "/documents", label: "Mes documents", match: (p) => p === "/documents" },
+      { href: "/documents/extraction", label: "Extraction", match: (p) => p.startsWith("/documents/extraction") },
+    ],
+  },
   { href: "/rapport-excel", label: "Rapports", icon: FileSpreadsheet },
   {
-    href: "/analyses/consommation", label: "Analyse", icon: Gauge,
+    href: "/analyses/consommation", label: "Analyse", icon: Gauge, section: "/analyses",
     children: [
       { href: "/analyses/consommation", label: "Consommation", match: (p) => p === "/analyses/consommation" },
       { href: "/analyses/couverture", label: "Couverture", match: (p) => p === "/analyses/couverture" },
     ],
   },
   { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
-  { href: "/qualite-extraction", label: "Qualité d'extraction", icon: Target },
   { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true },
 ];
 
@@ -76,8 +89,11 @@ export function AbilitySidebar({
         </p>
         {mainNav.map((item) => {
           const anyChildActive = item.children?.some((c) => c.match(pathname)) ?? false;
-          // Une entrée à sous-menu englobe toute la section (/analyses, y compris la redirection legacy).
-          const active = item.children ? isActive("/analyses") || anyChildActive : isActive(item.href);
+          // Une entrée à sous-menu englobe toute sa section (ex. /analyses couvre aussi la
+          // redirection legacy /analyses, dont le href pointe sur /analyses/consommation).
+          const active = item.children
+            ? isActive(item.section ?? item.href) || anyChildActive
+            : isActive(item.href);
           return (
             <div key={item.label}>
               <Link
