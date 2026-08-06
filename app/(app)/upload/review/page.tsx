@@ -91,6 +91,21 @@ function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; 
 
 const inputCls = "rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-3 py-1.5 text-[13px] text-[var(--kn-text)] outline-none focus:border-[#f97316] transition-colors";
 
+/**
+ * Lecture d'un champ numérique.
+ *
+ * Un `parseFloat` nu rendait `NaN` dès que l'utilisateur vidait le champ ; `NaN` devient
+ * `null` à la sérialisation JSON et le serveur refusait l'enregistrement avec une erreur
+ * de schéma incompréhensible. Un champ vide vaut `fallback`, pas « pas un nombre ».
+ */
+function parseNumber(value: string, fallback: number): number;
+function parseNumber(value: string, fallback: null): number | null;
+function parseNumber(value: string, fallback: number | null): number | null {
+  if (value.trim() === "") return fallback;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 // Retourne une classe de bordure selon le score de confiance du champ
 function confidenceBorder(score: number | undefined): string {
   if (score == null) return "";
@@ -559,7 +574,7 @@ function ReviewPageInner() {
           <div className="mb-6 flex items-start justify-between gap-4">
             <div>
               <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Vérification de la facture</h1>
-              <p className="mt-1 text-[13px] text-[var(--kn-text-muted)]">Vérifiez et corrigez les données extraites par l'OCR avant d'enregistrer.</p>
+              <p className="mt-1 text-[13px] text-[var(--kn-text-muted)]">Vérifiez et corrigez les données extraites par l&apos;OCR avant d&apos;enregistrer.</p>
             </div>
             <button
               onClick={handleSave}
@@ -685,16 +700,16 @@ function ReviewPageInner() {
             <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.facture_date)}`} type="date" value={ext.invoice.facture_date} onChange={(e) => setInvoice("facture_date", e.target.value)} />
           </Field>
           <Field label="Total HT (€)">
-            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.total_ht)}`} type="number" step="0.01" value={ext.invoice.total_ht} onChange={(e) => setInvoice("total_ht", parseFloat(e.target.value))} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.total_ht)}`} type="number" step="0.01" value={ext.invoice.total_ht} onChange={(e) => setInvoice("total_ht", parseNumber(e.target.value, 0))} />
           </Field>
           <Field label="TVA (€)">
-            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.tva)}`} type="number" step="0.01" value={ext.invoice.tva ?? ""} onChange={(e) => setInvoice("tva", e.target.value ? parseFloat(e.target.value) : null)} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.tva)}`} type="number" step="0.01" value={ext.invoice.tva ?? ""} onChange={(e) => setInvoice("tva", parseNumber(e.target.value, null))} />
           </Field>
           <Field label="Autres taxes (€)">
-            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.autres_taxes)}`} type="number" step="0.01" value={ext.invoice.autres_taxes ?? ""} onChange={(e) => setInvoice("autres_taxes", e.target.value ? parseFloat(e.target.value) : null)} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.autres_taxes)}`} type="number" step="0.01" value={ext.invoice.autres_taxes ?? ""} onChange={(e) => setInvoice("autres_taxes", parseNumber(e.target.value, null))} />
           </Field>
           <Field label="Total TTC (€)">
-            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.total_ttc)}`} type="number" step="0.01" value={ext.invoice.total_ttc} onChange={(e) => setInvoice("total_ttc", parseFloat(e.target.value))} />
+            <input className={`${inputCls} ${confidenceBorder(validation?.fieldConfidence?.total_ttc)}`} type="number" step="0.01" value={ext.invoice.total_ttc} onChange={(e) => setInvoice("total_ttc", parseNumber(e.target.value, 0))} />
           </Field>
           <Field label="Date limite paiement">
             <input className={inputCls} type="date" value={ext.invoice.date_limite_paiement ?? ""} onChange={(e) => setInvoice("date_limite_paiement", e.target.value || null)} />
@@ -764,7 +779,7 @@ function ReviewPageInner() {
             </Select>
           </Field>
           <Field label="Puissance souscrite (kVA)">
-            <input className={inputCls} type="number" step="0.5" value={ext.contract.puissance_souscrite_kva ?? ""} onChange={(e) => setContract("puissance_souscrite_kva", e.target.value ? parseFloat(e.target.value) : null)} />
+            <input className={inputCls} type="number" step="0.5" value={ext.contract.puissance_souscrite_kva ?? ""} onChange={(e) => setContract("puissance_souscrite_kva", parseNumber(e.target.value, null))} />
           </Field>
           <Field label="Espace de livraison">
             <input className={inputCls} value={ext.contract.espace_livraison ?? ""} onChange={(e) => setContract("espace_livraison", e.target.value || null)} />
@@ -822,15 +837,15 @@ function ReviewPageInner() {
                     </td>
                     <td className="py-1.5 pr-3 text-right">
                       <input className={`${inputCls} w-24 text-right`} type="number" value={row.consommation_kwh}
-                        onChange={(e) => setExt((ex) => ex ? { ...ex, consumption_lines: ex.consumption_lines.map((r, j) => j === i ? { ...r, consommation_kwh: parseFloat(e.target.value) || 0 } : r) } : ex)} />
+                        onChange={(e) => setExt((ex) => ex ? { ...ex, consumption_lines: ex.consumption_lines.map((r, j) => j === i ? { ...r, consommation_kwh: parseNumber(e.target.value, 0) } : r) } : ex)} />
                     </td>
                     <td className="py-1.5 pr-3 text-right">
                       <input className={`${inputCls} w-24 text-right`} type="number" step="0.0001" value={row.prix_unitaire_ckwh ?? ""}
-                        onChange={(e) => setExt((ex) => ex ? { ...ex, consumption_lines: ex.consumption_lines.map((r, j) => j === i ? { ...r, prix_unitaire_ckwh: e.target.value ? parseFloat(e.target.value) : null } : r) } : ex)} />
+                        onChange={(e) => setExt((ex) => ex ? { ...ex, consumption_lines: ex.consumption_lines.map((r, j) => j === i ? { ...r, prix_unitaire_ckwh: parseNumber(e.target.value, null) } : r) } : ex)} />
                     </td>
                     <td className="py-1.5 text-right">
                       <input className={`${inputCls} w-24 text-right`} type="number" step="0.01" value={row.montant_eur}
-                        onChange={(e) => setExt((ex) => ex ? { ...ex, consumption_lines: ex.consumption_lines.map((r, j) => j === i ? { ...r, montant_eur: parseFloat(e.target.value) || 0 } : r) } : ex)} />
+                        onChange={(e) => setExt((ex) => ex ? { ...ex, consumption_lines: ex.consumption_lines.map((r, j) => j === i ? { ...r, montant_eur: parseNumber(e.target.value, 0) } : r) } : ex)} />
                     </td>
                   </tr>
                 ))}
@@ -882,7 +897,7 @@ function ReviewPageInner() {
                     </td>
                     <td className="py-1.5 text-right">
                       <input className={`${inputCls} w-24 text-right`} type="number" step="0.01" value={row.montant_eur}
-                        onChange={(e) => setExt((ex) => ex ? { ...ex, fixed_charges: ex.fixed_charges.map((r, j) => j === i ? { ...r, montant_eur: parseFloat(e.target.value) || 0 } : r) } : ex)} />
+                        onChange={(e) => setExt((ex) => ex ? { ...ex, fixed_charges: ex.fixed_charges.map((r, j) => j === i ? { ...r, montant_eur: parseNumber(e.target.value, 0) } : r) } : ex)} />
                     </td>
                   </tr>
                 ))}
@@ -922,7 +937,7 @@ function ReviewPageInner() {
                     <td className="py-1.5 pr-3 text-[var(--kn-text-muted)]">{row.taux ?? "—"}</td>
                     <td className="py-1.5 text-right">
                       <input className={`${inputCls} w-24 text-right`} type="number" step="0.01" value={row.montant_eur}
-                        onChange={(e) => setExt((ex) => ex ? { ...ex, taxes: ex.taxes.map((r, j) => j === i ? { ...r, montant_eur: parseFloat(e.target.value) || 0 } : r) } : ex)} />
+                        onChange={(e) => setExt((ex) => ex ? { ...ex, taxes: ex.taxes.map((r, j) => j === i ? { ...r, montant_eur: parseNumber(e.target.value, 0) } : r) } : ex)} />
                     </td>
                   </tr>
                 ))}

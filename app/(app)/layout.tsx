@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getUserContext } from "@/lib/auth";
+import { getPlatformOperator } from "@/lib/auth-platform";
 import { AbilitySidebar } from "@/components/koncile/kn-sidebar";
 import { TopBar } from "@/components/app-shell/top-bar";
 
@@ -15,6 +16,7 @@ export default async function AppGroupLayout({
 }) {
   const ctx = await getUserContext();
   if (!ctx) redirect("/login");
+  const operator = await getPlatformOperator();
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-[var(--kn-page)] text-[var(--kn-text)]">
@@ -23,6 +25,7 @@ export default async function AppGroupLayout({
         <AbilitySidebar
           user={{ email: ctx.email, roleLabel: ROLE_LABELS[ctx.role] ?? ctx.role }}
           isAdmin={ctx.role === "org_admin"}
+          isPlatformOperator={operator !== null}
         />
         <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
       </div>

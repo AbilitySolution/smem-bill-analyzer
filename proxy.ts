@@ -31,9 +31,13 @@ export async function proxy(request: NextRequest) {
     request.nextUrl.pathname.startsWith("/depot/") ||
     // Les tâches planifiées s'authentifient par un secret partagé (en-tête Bearer),
     // pas par une session Supabase : sans cette exception, le middleware les
-    // redirigerait vers /login et elles ne s'exécuteraient jamais. Chaque route sous
-    // /api/cron/ DOIT vérifier CRON_SECRET elle-même.
-    request.nextUrl.pathname.startsWith("/api/cron/");
+    // redirigerait vers /login et elles ne s'exécuteraient jamais. Chaque route
+    // exemptée ici DOIT vérifier CRON_SECRET elle-même.
+    request.nextUrl.pathname.startsWith("/api/cron/") ||
+    // Auto-save : appelée par le Cron Vercel (Bearer CRON_SECRET, pas de cookie de
+    // session) ET par le navigateur (session). La route distingue les deux elle-même
+    // et échoue fermée sans secret.
+    request.nextUrl.pathname === "/api/document-jobs/auto-save";
 
   if (!data.user && !isPublic) {
     const url = request.nextUrl.clone();

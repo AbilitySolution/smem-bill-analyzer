@@ -9,7 +9,8 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  DIRECT_DOCUMENT_LIMIT, MAX_ARCHIVE_SIZE, MAX_FILES, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
+  DIRECT_DOCUMENT_LIMIT, DIRECT_JOBS_PER_INVOCATION, MAX_ARCHIVE_SIZE, MAX_FILES,
+  MAX_FILE_SIZE, MAX_TOTAL_SIZE,
   chunkForUpload, detectDocumentType, extensionOf, mimeTypeFromName, processingModeFor,
 } from "@/lib/documents/queue";
 import {
@@ -25,8 +26,33 @@ type ToReviewEntry = { jobId: string; factureNumber: string; reason: string };
 const FALLBACK_REFRESH_MS = 60_000;
 /** Suivi du dernier dépôt, conservé pour survivre à un rechargement de page. */
 const ACTIVE_UPLOAD_STORAGE_KEY = "smem-active-document-job-ids";
+/**
+ * Fenêtre de repli quand le suivi du dernier dépôt est perdu (localStorage vidé, dépôt
+ * fait depuis un autre poste). On suit alors les jobs récents — terminés compris, sinon
+ * la barre de progression ne peut jamais avancer : un document qui finit sortirait du
+ * dénominateur au lieu de compter comme fait.
+ */
+const RECENT_TRACKING_WINDOW_MS = 2 * 60 * 60 * 1000;
+/** Documents enregistrés automatiquement par appel : borne la durée d'une requête. */
+const AUTO_SAVE_CHUNK = 25;
+/**
+ * Durée pendant laquelle « Traitement terminé » reste affiché après le dernier document.
+ * Au-delà, le dépôt cesse d'être suivi : sans cette expiration, `activeUploadJobIds`
+ * n'était jamais relâché — les jobs existent toujours une fois terminés, la purge de
+ * `refreshJobs` ne retire que les identifiants inconnus — et le panneau restait à
+ * l'écran indéfiniment, rechargements compris puisque la liste est en localStorage.
+ */
+const FINISHED_PANEL_GRACE_MS = 5 * 60 * 1000;
 
 type RealtimeStatus = "connecting" | "live" | "recovering";
+
+/** Horodatage de la dernière écriture parmi ces jobs. 0 si la liste est vide. */
+function lastActivityOf(jobs: DocumentJob[]): number {
+  return jobs.reduce((latest, job) => {
+    const updatedAt = Date.parse(job.updated_at);
+    return Number.isFinite(updatedAt) && updatedAt > latest ? updatedAt : latest;
+  }, 0);
+}
 
 function isZip(file: File) {
   return file.type === "application/zip"
@@ -70,6 +96,8 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   const [selectedReviewJobIds, setSelectedReviewJobIds] = useState<Set<string>>(new Set());
   const [deletingReviewJobs, setDeletingReviewJobs] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  /** Incrémenté par « Actualiser » : relance aussi l'enregistrement automatique en échec. */
+  const [manualSyncCount, setManualSyncCount] = useState(0);
   const jobsRef = useRef<DocumentJob[]>([]);
   const [autoResult, setAutoResult] = useState<{ autoSaved: AutoSavedEntry[]; toReview: ToReviewEntry[]; duplicates: DuplicateEntry[] }>({ autoSaved: [], toReview: [], duplicates: [] });
   const autoProcessedRef = useRef<Set<string>>(new Set());
@@ -94,12 +122,47 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   }, [jobs]);
 
   const refreshJobs = useCallback(async () => {
-    const response = await fetch("/api/document-jobs", { cache: "no-store" });
-    if (!response.ok) return;
-    const payload = await response.json();
-    setJobs(payload.jobs ?? []);
+    const response = await fetch("/api/document-jobs", { cache: "no-store" }).catch(() => null);
+    if (!response?.ok) return;
+    const payload = await response.json().catch(() => null);
+    if (!payload) return;
+    const nextJobs: DocumentJob[] = payload.jobs ?? [];
+    setJobs(nextJobs);
     if (payload.estimation) setEstimationStats(payload.estimation);
+
+    // Purge du suivi : un identifiant qui ne correspond plus à aucun job (supprimé, ou
+    // sorti de la fenêtre de 200) laisserait un panneau de progression fantôme.
+    const known = new Set(nextJobs.map((job) => job.id));
+    setActiveUploadJobIds((current) => {
+      const kept = current.filter((id) => known.has(id));
+      if (kept.length === current.length) return current;
+      if (kept.length) window.localStorage.setItem(ACTIVE_UPLOAD_STORAGE_KEY, JSON.stringify(kept));
+      else window.localStorage.removeItem(ACTIVE_UPLOAD_STORAGE_KEY);
+      return kept;
+    });
   }, []);
+
+  /**
+   * Démarrage opportuniste des workers. Le mode `direct` réserve au plus
+   * `DIRECT_JOBS_PER_INVOCATION` jobs par invocation : au-delà, il faut plusieurs
+   * appels, sinon la fin du lot attend le tick de Cron.
+   */
+  const startProcessing = useCallback((mode: "direct" | "batch", jobIds: string[]) => {
+    const supabase = createClient();
+    if (mode !== "direct") {
+      void supabase.functions.invoke("process-document-queue", { body: {} })
+        .finally(() => void refreshJobs());
+      return;
+    }
+    void (async () => {
+      for (let index = 0; index < jobIds.length; index += DIRECT_JOBS_PER_INVOCATION) {
+        await supabase.functions.invoke("process-direct-documents", {
+          body: { job_ids: jobIds.slice(index, index + DIRECT_JOBS_PER_INVOCATION) },
+        });
+        await refreshJobs();
+      }
+    })().finally(() => void refreshJobs());
+  }, [refreshJobs]);
 
   // Progression en direct : Realtime pousse chaque transition de statut. Le sondage ne
   // sert que de filet quand le canal décroche.
@@ -194,10 +257,15 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     setError(null);
     const valid: File[] = [];
     const rejected: string[] = [];
-    let inspectedBytes = 0;
+    // Les bornes portent sur la sélection **complète**, pas sur le seul dépôt en cours :
+    // sinon un second glisser-déposer passait les contrôles puis se faisait tronquer en
+    // silence au moment de la fusion.
+    const alreadySelected = files;
+    let selectedCount = alreadySelected.length;
+    let inspectedBytes = alreadySelected.reduce((total, file) => total + file.size, 0);
 
     async function inspectDocument(file: File, displayName = file.name) {
-      if (valid.length >= MAX_FILES) {
+      if (selectedCount >= MAX_FILES) {
         rejected.push(`${displayName} : limite de ${MAX_FILES} documents atteinte`);
         return;
       }
@@ -219,6 +287,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
 
       valid.push(new File([file], displayName, { type: detectedType, lastModified: file.lastModified }));
       inspectedBytes += file.size;
+      selectedCount += 1;
     }
 
     try {
@@ -242,7 +311,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
           );
 
           for (const entry of entries) {
-            if (valid.length >= MAX_FILES) {
+            if (selectedCount >= MAX_FILES) {
               rejected.push(`${file.name} : seuls les ${MAX_FILES} premiers documents valides sont acceptés`);
               break;
             }
@@ -288,6 +357,15 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     }
   }
 
+  /**
+   * Envoi de la sélection, découpée par nombre ET par volume : le plafond de corps de
+   * requête de la plateforme est atteint bien avant les 10 fichiers si les scans sont
+   * lourds.
+   *
+   * Un envoi qui échoue ne fait plus tout perdre : les jobs déjà créés sont conservés et
+   * démarrés, seuls les fichiers réellement non envoyés restent dans la sélection. Sans
+   * ça, un utilisateur qui relançait après une erreur re-téléversait les lots déjà passés.
+   */
   async function submit() {
     if (!files.length || submitting) return;
     setSubmitting(true);
@@ -295,57 +373,89 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     setError(null);
     setActiveUploadJobIds([]);
     window.localStorage.removeItem(ACTIVE_UPLOAD_STORAGE_KEY);
-    const submittedJobIds: string[] = [];
-    const processingMode = processingModeFor(files.length);
+    // Sinon « Résultat du traitement » cumulait les compteurs du dépôt précédent avec
+    // ceux du nouveau : 3 factures déposées après 5 en affichaient 8.
+    setAutoResult({ autoSaved: [], toReview: [], duplicates: [] });
 
-    try {
-      let sent = 0;
-      // Découpe par nombre ET par volume : le plafond de corps de requête de la
-      // plateforme est atteint bien avant les 10 fichiers si les scans sont lourds.
-      for (const chunk of chunkForUpload(files)) {
+    const processingMode = processingModeFor(files.length);
+    const submittedJobIds: string[] = [];
+    const notSent: File[] = [];
+    const failures: string[] = [];
+    let sent = 0;
+
+    const trackSubmitted = (ids: string[]) => {
+      if (!ids.length) return;
+      submittedJobIds.push(...ids);
+      setActiveUploadJobIds([...submittedJobIds]);
+      window.localStorage.setItem(ACTIVE_UPLOAD_STORAGE_KEY, JSON.stringify(submittedJobIds));
+    };
+
+    for (const chunk of chunkForUpload(files)) {
+      try {
         const formData = new FormData();
         formData.append("processing_mode", processingMode);
         chunk.forEach((file) => formData.append("files", file));
         const response = await fetch("/api/document-jobs", { method: "POST", body: formData });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.error ?? "Impossible de mettre les documents en file.");
-        submittedJobIds.push(...(payload.jobs ?? []).map((job: { id: string }) => job.id));
-        setActiveUploadJobIds([...submittedJobIds]);
-        window.localStorage.setItem(ACTIVE_UPLOAD_STORAGE_KEY, JSON.stringify(submittedJobIds));
-        sent += chunk.length;
-        setUploadedCount(sent);
-      }
-      setFiles([]);
-      await refreshJobs();
 
-      // Démarrage immédiat opportuniste. Les Cron restent le filet de sécurité si
-      // l'onglet est fermé ou si cette invocation échoue.
-      const supabase = createClient();
-      const functionName = processingMode === "direct" ? "process-direct-documents" : "process-document-queue";
-      void supabase.functions.invoke(functionName, {
-        body: processingMode === "direct" ? { job_ids: submittedJobIds } : {},
-      }).finally(() => void refreshJobs());
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Erreur réseau.");
-    } finally {
-      setSubmitting(false);
+        if (!response.ok && !(payload.jobs ?? []).length) {
+          failures.push(payload.error ?? `Envoi refusé (${response.status}).`);
+          notSent.push(...chunk);
+          continue;
+        }
+
+        trackSubmitted((payload.jobs ?? []).map((job: { id: string }) => job.id));
+        // Le serveur nomme les fichiers qu'il n'a pas pu mettre en file : eux seuls
+        // restent en sélection, les autres sont bien partis.
+        const rejectedNames = new Set<string>(
+          ((payload.errors ?? []) as Array<{ name?: string; message?: string }>).map((item) => item.name ?? ""),
+        );
+        for (const item of (payload.errors ?? []) as Array<{ name?: string; message?: string }>) {
+          failures.push(`${item.name ?? "document"} : ${item.message ?? "mise en file impossible"}`);
+        }
+        notSent.push(...chunk.filter((file) => rejectedNames.has(file.name)));
+        sent += chunk.length - rejectedNames.size;
+        setUploadedCount(sent);
+      } catch {
+        failures.push("Erreur réseau pendant l'envoi.");
+        notSent.push(...chunk);
+      }
     }
+
+    setFiles(notSent);
+    if (failures.length) {
+      const preview = failures.slice(0, 3).join(" ; ");
+      setError(
+        `${preview}${failures.length > 3 ? "…" : ""}`
+        + (notSent.length ? ` — ${notSent.length} fichier${notSent.length > 1 ? "s restent" : " reste"} à envoyer.` : ""),
+      );
+    }
+
+    await refreshJobs();
+    // Démarrage immédiat opportuniste. Les Cron restent le filet de sécurité si l'onglet
+    // est fermé ou si ces invocations échouent.
+    if (submittedJobIds.length) startProcessing(processingMode, submittedJobIds);
+    setSubmitting(false);
   }
 
   async function retry(jobId: string) {
+    // Mode lu AVANT la relance : après `refreshJobs`, `jobsRef` n'est pas encore à jour
+    // (il est réaffecté par un effet, donc après le rendu suivant).
+    const mode = jobs.find((candidate) => candidate.id === jobId)?.processing_mode ?? "batch";
     const response = await fetch(`/api/document-jobs/${jobId}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "retry" }),
     });
-    const payload = await response.json();
-    if (!response.ok) setError(payload.error ?? "Nouvelle tentative impossible.");
-    await refreshJobs();
-    if (response.ok) {
-      const job = jobsRef.current.find((candidate) => candidate.id === jobId);
-      const functionName = job?.processing_mode === "direct" ? "process-direct-documents" : "process-document-queue";
-      void createClient().functions.invoke(functionName, {
-        body: job?.processing_mode === "direct" ? { job_ids: [jobId] } : {},
-      }).finally(() => void refreshJobs());
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setError(payload.error ?? "Nouvelle tentative impossible.");
+      await refreshJobs();
+      return;
     }
+    // Une relance réussie remet le job en traitement : il redevient candidat à
+    // l'enregistrement automatique quand son extraction reviendra.
+    autoProcessedRef.current.delete(jobId);
+    await refreshJobs();
+    startProcessing(mode, [jobId]);
   }
 
   async function deleteJob(jobId: string) {
@@ -402,14 +512,32 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     setDeletingReviewJobs(false);
   }
 
-  const fallbackActiveJobs = jobs.filter((job) => !isTerminalJobStatus(job.status));
   // File de traitement : tout ce qui n'est pas terminé. Un job `completed` = facture
   // enregistrée (ou doublon déjà en base) → il sort de la file, il reste visible dans
   // Mes documents.
   const queueJobs = jobs.filter((job) => job.status !== "completed");
-  const trackedJobs = activeUploadJobIds.length
+  // Repli quand le suivi du dépôt est perdu : les jobs récents, **terminés compris**.
+  // L'ancien repli ne gardait que les jobs non terminaux : chaque document qui finissait
+  // quittait l'ensemble suivi, si bien que la barre restait bloquée à 0 % puis
+  // disparaissait d'un coup.
+  const recentJobs = jobs.filter((job) => now - new Date(job.created_at).getTime() <= RECENT_TRACKING_WINDOW_MS);
+
+  // Suivi du dernier dépôt. Il expire tout seul : `activeUploadJobIds` n'était jamais
+  // vidé — les jobs existent toujours une fois terminés, la purge de `refreshJobs` ne
+  // retire que les identifiants inconnus — donc le panneau « Traitement terminé »
+  // restait affiché indéfiniment, y compris après rechargement puisque la liste est
+  // persistée en localStorage. L'expiration se lit sur les jobs eux-mêmes plutôt que
+  // sur un minuteur du navigateur : un lot fini il y a trois heures ne réapparaît pas
+  // au rechargement, un lot fini il y a une minute reste visible.
+  const uploadRunJobs = activeUploadJobIds.length
     ? jobs.filter((job) => activeUploadJobIds.includes(job.id))
-    : fallbackActiveJobs;
+    : [];
+  const uploadRunFinishedAt = lastActivityOf(uploadRunJobs);
+  const uploadRunExpired = uploadRunJobs.length > 0
+    && uploadRunJobs.every((job) => isTerminalJobStatus(job.status))
+    && now - uploadRunFinishedAt >= FINISHED_PANEL_GRACE_MS;
+
+  const trackedJobs = uploadRunJobs.length && !uploadRunExpired ? uploadRunJobs : recentJobs;
   const activeTrackedJobs = trackedJobs.filter((job) => !isTerminalJobStatus(job.status));
   const selectionMode = processingModeFor(files.length);
   const directFlow = files.length > 0
@@ -429,30 +557,77 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
 
   const hasAutoResult = autoResult.autoSaved.length > 0 || autoResult.toReview.length > 0 || autoResult.duplicates.length > 0;
 
+  // Lot qui vient de se terminer : on garde le panneau le temps que l'utilisateur voie
+  // le résultat. Au-delà, plus rien à afficher.
+  const runJustFinished = trackedJobs.length > 0
+    && activeTrackedJobs.length === 0
+    && now - lastActivityOf(trackedJobs) < FINISHED_PANEL_GRACE_MS;
+  // Le panneau ne s'affiche que s'il a quelque chose à dire : une sélection à estimer,
+  // du travail en cours, ou un lot qui vient de se terminer.
+  const showProgressPanel = files.length > 0 || activeTrackedJobs.length > 0 || runJustFinished;
+
+  // Clé stable : `trackedJobs` est un nouveau tableau à chaque rendu, l'effet ci-dessous
+  // se déclencherait donc en boucle. Une chaîne se compare par valeur.
+  const reviewableJobKey = trackedJobs
+    .filter((job) => job.status === "needs_review")
+    .map((job) => job.id)
+    .sort()
+    .join(",");
+
   // Enregistrement automatique : dès qu'un document du lot passe en révision, on tente
   // l'enregistrement (extraction ET commune ≥ 96 %). Le ref évite de retraiter un job.
   useEffect(() => {
-    const candidates = trackedJobs
-      .filter((job) => job.status === "needs_review" && !autoProcessedRef.current.has(job.id))
-      .map((job) => job.id);
+    const candidates = reviewableJobKey
+      .split(",")
+      .filter((id) => id && !autoProcessedRef.current.has(id));
     if (!candidates.length) return;
     candidates.forEach((id) => autoProcessedRef.current.add(id));
+
     void (async () => {
-      const response = await fetch("/api/document-jobs/auto-save", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ job_ids: candidates }),
-      });
-      if (!response.ok) return;
-      const data = await response.json();
-      setAutoResult((current) => ({
-        autoSaved: [...current.autoSaved, ...(data.autoSaved ?? [])],
-        toReview: [...current.toReview, ...(data.toReview ?? [])],
-        duplicates: [...current.duplicates, ...(data.duplicates ?? [])],
-      }));
+      let notSavedCount = 0;
+      // Factures créées par les tranches déjà passées : transmises à la dernière, qui
+      // seule déclenche le recalcul d'anomalies portefeuille. Sans ça, les factures des
+      // tranches précédentes ne seraient jamais escaladées en `anomaly_flagged`.
+      const savedInvoiceIds: string[] = [];
+      // Découpé : un lot de 200 documents dans une seule requête dépasse la durée
+      // maximale de la route, et tout le travail serait perdu d'un coup.
+      for (let index = 0; index < candidates.length; index += AUTO_SAVE_CHUNK) {
+        const slice = candidates.slice(index, index + AUTO_SAVE_CHUNK);
+        const isLastChunk = index + AUTO_SAVE_CHUNK >= candidates.length;
+        try {
+          const response = await fetch("/api/document-jobs/auto-save", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              job_ids: slice,
+              // Le recalcul d'anomalies coûte O(taille de l'organisation) : une seule
+              // fois en fin de dépôt, pas à chaque tranche.
+              finalize: isLastChunk,
+              ...(isLastChunk ? { escalate_invoice_ids: savedInvoiceIds } : {}),
+            }),
+          });
+          if (!response.ok) throw new Error(String(response.status));
+          const data = await response.json();
+          savedInvoiceIds.push(...(data.autoSaved ?? []).map((entry: AutoSavedEntry) => entry.invoiceId));
+          setAutoResult((current) => ({
+            autoSaved: [...current.autoSaved, ...(data.autoSaved ?? [])],
+            toReview: [...current.toReview, ...(data.toReview ?? [])],
+            duplicates: [...current.duplicates, ...(data.duplicates ?? [])],
+          }));
+        } catch {
+          // Échec réseau ou serveur : on rend les jobs à l'ensemble des candidats, sinon
+          // ils restaient marqués « traités » et n'étaient plus jamais enregistrés. La
+          // relance est manuelle (bouton Actualiser) pour ne pas boucler sur une panne.
+          slice.forEach((id) => autoProcessedRef.current.delete(id));
+          notSavedCount += slice.length;
+        }
+      }
+      if (notSavedCount) {
+        setError(`Enregistrement automatique indisponible pour ${notSavedCount} document${notSavedCount > 1 ? "s" : ""} — utilisez « Actualiser » ou révisez-les manuellement.`);
+      }
       await refreshJobs();
     })();
-  }, [trackedJobs, refreshJobs]);
+  }, [reviewableJobKey, manualSyncCount, refreshJobs]);
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
@@ -503,7 +678,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
           </div>
           <div className="space-y-1.5">
             {files.map((file, index) => (
-              <div key={`${file.name}-${file.size}`} className="flex items-center gap-2 rounded-lg bg-[var(--kn-panel)] px-3 py-2 text-sm">
+              <div key={`${file.name}-${file.size}-${file.lastModified}-${index}`} className="flex items-center gap-2 rounded-lg bg-[var(--kn-panel)] px-3 py-2 text-sm">
                 <FileText className="size-4 text-[#f97316]" />
                 <span className="min-w-0 flex-1 truncate">{file.name}</span>
                 <span className="text-xs text-[var(--kn-text-muted)]">{(file.size / 1024 / 1024).toFixed(1)} Mo</span>
@@ -524,7 +699,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
         </div>
       )}
 
-      {(estimate || trackedJobs.length > 0) && (
+      {showProgressPanel && (
         <div className="mt-4 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
@@ -611,7 +786,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
                 Supprimer ({selectedReviewJobIds.size})
               </button>
             )}
-            <button onClick={() => void refreshJobs()} className="flex cursor-pointer items-center gap-1 text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]">
+            <button onClick={() => { setError(null); setManualSyncCount((count) => count + 1); void refreshJobs(); }} className="flex cursor-pointer items-center gap-1 text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]">
               <RefreshCw className="size-3.5" />Actualiser
             </button>
           </div>
@@ -626,7 +801,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-[var(--kn-text)]">{job.original_name}</p>
                 <p className="text-xs text-[var(--kn-text-muted)]">
-                  {statusLabel[job.status]}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}
+                  {statusLabel[job.status] ?? job.status}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}
                   {job.status === "rejected_non_invoice" && job.prefilter_type ? ` · détecté comme ${prefilterTypeLabel[job.prefilter_type] ?? job.prefilter_type}` : ""}
                 </p>
                 {job.last_error && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.last_error}</p>}

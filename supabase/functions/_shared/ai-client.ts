@@ -5,7 +5,11 @@ import { AI_MODEL_PREFILTER, CLASSIFY_PROMPT, CLASSIFY_SYSTEM_PROMPT, classifyTo
 
 const AI_API_BASE = "https://api.anthropic.com";
 const RETRYABLE_STATUSES = new Set(["408", "409", "429", "500", "502", "503", "504", "529"]);
-const FORBIDDEN_FILENAME_CHARS = /[<>:"|?*\x00-\x1f]/;
+// Les deux séparateurs de chemin en font partie : le nom envoyé au fournisseur doit être
+// un nom de fichier nu, jamais un chemin.
+const FORBIDDEN_FILENAME_CHARS = /[<>:"|?*/\\\x00-\x1f]/;
+/** Antislash ou slash. */
+const PATH_SEPARATORS = /[\\/]/;
 
 export async function aiRequest(path: string, apiKey: string, init: RequestInit, maxAttempts = 3): Promise<Response> {
   let lastError = "Erreur du service d'extraction";
@@ -29,9 +33,18 @@ export async function aiRequest(path: string, apiKey: string, init: RequestInit,
   throw new Error(lastError);
 }
 
+/**
+ * Nom de fichier acceptable par l'API Files du fournisseur.
+ *
+ * ⚠️ Le motif de séparateur était `new RegExp("\\" + "|/")`, soit `/\|\//` : un pipe
+ * ÉCHAPPÉ suivi d'un slash. Il ne reconnaissait donc ni `\` ni `/` mais la séquence
+ * littérale `|/`, et aucun chemin n'était réduit à son nom de fichier. Un import de
+ * dossier (`original_name = "factures/facture_123.pdf"`) partait tel quel et le
+ * fournisseur répondait 400 « filename: includes a forbidden character » — échec
+ * définitif, non rejouable, sur chaque document d'un sous-dossier.
+ */
 export function safeFilename(filename: string, maxLength = 200): string {
-  const separatorPattern = new RegExp(String.fromCharCode(92) + "|/");
-  const basename = filename.split(separatorPattern).pop()?.trim() || "document";
+  const basename = filename.split(PATH_SEPARATORS).pop()?.trim() || "document";
   const sanitized = Array.from(basename.normalize("NFKC"))
     .map((character) => FORBIDDEN_FILENAME_CHARS.test(character) ? "_" : character)
     .join("")
@@ -53,6 +66,45 @@ export async function uploadDocument(file: Blob, filename: string, apiKey: strin
 export async function deleteDocument(fileId: string | null, apiKey: string): Promise<void> {
   if (!fileId) return;
   await aiRequest(`/v1/files/${fileId}`, apiKey, { method: "DELETE" }).catch(() => null);
+}
+
+/**
+ * Supprime le fichier distant d'un job et efface le pointeur `anthropic_file_id`.
+ *
+ * Remplace le couple « deleteDocument puis UPDATE à NULL » écrit à l'identique dans les
+ * trois workers, avec une différence délibérée : le pointeur n'est effacé QUE si la
+ * suppression distante a réussi (ou si le fichier n'existe déjà plus — 404). Effacer le
+ * pointeur sur un échec de suppression recréerait exactement la fuite que ce helper
+ * corrige : un PDF confidentiel resterait chez le fournisseur sans plus aucun moyen de
+ * le supprimer. En cas d'échec réel, le pointeur reste en base et le réconciliateur de
+ * maintenance retentera au prochain passage.
+ *
+ * Renvoie `true` si le job ne référence plus de fichier distant à l'issue de l'appel.
+ */
+export async function releaseRemoteFile(
+  // Client service-role ; typé structurellement pour rester importable par les tests.
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  jobId: string,
+  apiKey: string,
+): Promise<boolean> {
+  const { data: job } = await supabase
+    .from("document_jobs").select("anthropic_file_id").eq("id", jobId).maybeSingle();
+  const fileId = job?.anthropic_file_id as string | null | undefined;
+  if (!fileId) return true;
+
+  try {
+    await aiRequest(`/v1/files/${fileId}`, apiKey, { method: "DELETE" });
+  } catch (error) {
+    const status = error instanceof Error ? error.message.match(/^(\d{3}):/)?.[1] : null;
+    // 404 : déjà supprimé ou expiré côté fournisseur — l'objectif est atteint.
+    if (status !== "404") return false;
+  }
+
+  await supabase.from("document_jobs")
+    .update({ anthropic_file_id: null, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  return true;
 }
 
 /**

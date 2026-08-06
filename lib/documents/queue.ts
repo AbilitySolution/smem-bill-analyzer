@@ -42,6 +42,15 @@ export const MAX_FILES_PER_REQUEST = 10;
  * l'enveloppe MIME.
  */
 export const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
+/**
+ * Jobs réservés par une invocation du worker `direct`.
+ *
+ * Aligné sur `claim_direct_document_jobs`, qui borne sa réservation à 10
+ * (`LIMIT LEAST(GREATEST(job_limit, 1), 10)`), et sur `MAX_JOBS` de l'Edge Function.
+ * Le navigateur découpe donc ses invocations : sans ça, un dépôt de 20 documents en
+ * mode rapide n'en démarrait que 10, les autres attendaient le tick de Cron.
+ */
+export const DIRECT_JOBS_PER_INVOCATION = 10;
 
 /**
  * Découpe une sélection en envois qui respectent les deux bornes.

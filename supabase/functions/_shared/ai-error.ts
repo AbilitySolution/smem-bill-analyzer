@@ -10,6 +10,16 @@ const CREDIT_ERROR_PATTERN = /credit balance|insufficient credit|billing/i;
 
 const VENDOR_LABEL_PATTERN = /\bclaude (files|batch|classify)\b/gi;
 const VENDOR_NAME_PATTERN = /\bclaude\b|\banthropic\b/gi;
+/**
+ * Les URL partent en premier, entières.
+ *
+ * Le remplacement mot à mot s'appliquait aussi à l'intérieur des liens de documentation
+ * du fournisseur, produisant des messages illisibles affichés tels quels à
+ * l'utilisateur : `https://docs.le service d'extraction.com/en/docs/build-with-le
+ * service d'extraction/files`. Une URL de documentation fournisseur n'aide de toute
+ * façon pas l'utilisateur final — et c'est elle qui porte le nom à masquer.
+ */
+const URL_PATTERN = /https?:\/\/\S+/gi;
 
 export function isCreditError(message: string): boolean {
   return CREDIT_ERROR_PATTERN.test(message);
@@ -19,8 +29,14 @@ export function isCreditError(message: string): boolean {
 // (code statut, nom de champ manquant, etc.).
 function stripVendorName(message: string): string {
   return message
+    .replace(URL_PATTERN, "")
     .replace(VENDOR_LABEL_PATTERN, "Service d'extraction")
-    .replace(VENDOR_NAME_PATTERN, "le service d'extraction");
+    .replace(VENDOR_NAME_PATTERN, "le service d'extraction")
+    // Ponctuation orpheline laissée par l'URL retirée (« … at .», « … (). »).
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s+([.,;:])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 export interface SafeError {

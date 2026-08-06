@@ -33,18 +33,35 @@ function percentile(sortedValues: number[], ratio: number) {
 }
 
 /**
- * Percentiles de durée des lots terminés, toutes organisations confondues.
+ * Percentiles de durée des lots terminés **de l'organisation appelante**.
  *
- * Client admin volontairement : `document_batches` n'expose aucune policy (un lot peut
- * agréger des jobs de plusieurs organisations). Seuls des agrégats de durée sortent
- * d'ici, jamais une ligne.
+ * Auparavant lu en service-role sur tous les lots, toutes organisations confondues. Un
+ * lot étant désormais mono-organisation (`20260806000001_fair_dispatch.sql`), la lecture
+ * passe par le client de session et la policy `org_read_document_batches` : plus aucun
+ * agrégat inter-clients ne traverse cette route.
+ *
+ * Contrepartie assumée : un nouveau client n'a pas d'historique et reste sur les
+ * constantes de repli jusqu'à ses 5 premiers lots terminés — estimation plus prudente,
+ * mais calculée sur ses propres documents.
+ *
+ * Mémorisé une minute **par organisation** : la page d'import interroge cette route à
+ * chaque retour d'onglet et toutes les 60 s en repli, alors que ces percentiles bougent
+ * à l'échelle du jour.
  */
-async function processingEstimateStats(): Promise<ProcessingEstimateStats> {
+const ESTIMATE_CACHE_MS = 60_000;
+const estimateCache = new Map<string, { value: ProcessingEstimateStats; expiresAt: number }>();
+
+async function processingEstimateStats(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+): Promise<ProcessingEstimateStats> {
+  const cached = estimateCache.get(orgId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
   const fallback = fallbackEstimateStats();
-  const admin = createAdminClient();
   const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  const { data, error } = await admin.from("document_batches")
+  const { data, error } = await supabase.from("document_batches")
     .select("created_at, completed_at")
+    .eq("org_id", orgId)
     .eq("status", "ended")
     .not("completed_at", "is", null)
     .gte("created_at", cutoff)
@@ -57,14 +74,17 @@ async function processingEstimateStats(): Promise<ProcessingEstimateStats> {
     .filter((seconds) => Number.isFinite(seconds) && seconds > 0 && seconds <= 24 * 60 * 60)
     .sort((a, b) => a - b);
 
-  if (durations.length < 5) return { ...fallback, sampleCount: durations.length };
-  return {
-    sampleCount: durations.length,
-    p50BatchSeconds: percentile(durations, 0.5),
-    p80BatchSeconds: percentile(durations, 0.8),
-    source: "historical",
-    generatedAt: new Date().toISOString(),
-  };
+  const stats: ProcessingEstimateStats = durations.length < 5
+    ? { ...fallback, sampleCount: durations.length }
+    : {
+        sampleCount: durations.length,
+        p50BatchSeconds: percentile(durations, 0.5),
+        p80BatchSeconds: percentile(durations, 0.8),
+        source: "historical",
+        generatedAt: new Date().toISOString(),
+      };
+  estimateCache.set(orgId, { value: stats, expiresAt: Date.now() + ESTIMATE_CACHE_MS });
+  return stats;
 }
 
 export async function POST(request: Request) {
@@ -110,6 +130,10 @@ export async function POST(request: Request) {
   // est propriétaire des transitions d'état.
   const admin = createAdminClient();
   const jobs: Array<{ id: string; original_name: string; status: string }> = [];
+  // Un fichier qui échoue ne fait plus avorter l'envoi : les autres sont mis en file et
+  // le client apprend précisément lesquels reprendre. Avant, une erreur au 7e fichier
+  // laissait 6 jobs créés dont le navigateur ignorait tout — il les re-téléversait.
+  const errors: Array<{ name: string; message: string }> = [];
 
   for (const file of files) {
     const jobId = crypto.randomUUID();
@@ -122,7 +146,10 @@ export async function POST(request: Request) {
       await file.arrayBuffer(),
       { contentType: file.type, upsert: false },
     );
-    if (uploadError) return NextResponse.json({ error: `${file.name} : ${uploadError.message}` }, { status: 500 });
+    if (uploadError) {
+      errors.push({ name: file.name, message: uploadError.message });
+      continue;
+    }
 
     const { data: job, error: insertError } = await admin.from("document_jobs").insert({
       id: jobId,
@@ -139,20 +166,25 @@ export async function POST(request: Request) {
     if (insertError || !job) {
       // Pas d'orphelin : le fichier déjà écrit est retiré.
       await admin.storage.from("invoice-files").remove([filePath]);
-      return NextResponse.json({ error: `${file.name} : ${insertError?.message ?? "création du job impossible"}` }, { status: 500 });
+      errors.push({ name: file.name, message: insertError?.message ?? "création du job impossible" });
+      continue;
     }
 
-    if (processingMode === "batch") {
-      const { error: queueError } = await admin.rpc("enqueue_document_job", { job_id: job.id });
-      // Mise en file échouée : le job reste en base, en échec et relançable — jamais perdu.
-      if (queueError) {
-        await admin.from("document_jobs").update({ status: "failed", last_error: queueError.message }).eq("id", job.id);
-      }
-    }
+    // Plus de mise en file séparée : `status = 'queued'` EST la mise en file. La file
+    // pgmq a été retirée (voir `20260806000001_fair_dispatch.sql`) — elle formait une
+    // seconde source de vérité à synchroniser, et sa nature FIFO globale empêchait
+    // l'ordonnancement équitable entre clients.
     jobs.push(job);
   }
 
-  return NextResponse.json({ jobs, processing_mode: processingMode }, { status: 202 });
+  if (!jobs.length) {
+    return NextResponse.json(
+      { error: errors[0] ? `${errors[0].name} : ${errors[0].message}` : "Mise en file impossible.", errors, jobs: [] },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({ jobs, errors, processing_mode: processingMode }, { status: 202 });
 }
 
 export async function GET() {
@@ -166,7 +198,7 @@ export async function GET() {
       .eq("org_id", ctx.orgId)
       .order("created_at", { ascending: false })
       .limit(200),
-    processingEstimateStats(),
+    processingEstimateStats(supabase, ctx.orgId),
   ]);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ jobs: data, estimation });

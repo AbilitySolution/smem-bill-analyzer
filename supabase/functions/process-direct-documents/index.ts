@@ -7,7 +7,7 @@
 //     est alors filtrée sur `created_by`. Permet de démarrer sans attendre le tick.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { aiRequest, classifyDocument, deleteDocument, isRetryableProcessingError, uploadDocument } from "../_shared/ai-client.ts";
+import { aiRequest, classifyDocument, isRetryableProcessingError, releaseRemoteFile, uploadDocument } from "../_shared/ai-client.ts";
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
@@ -32,13 +32,17 @@ type ExtractionOutcome =
   | { kind: "extracted"; extraction: unknown; usage: Record<string, number> | null; fileId: string };
 
 async function extractInvoice(job: DocumentJob, supabase: ReturnType<typeof createClient>, apiKey: string): Promise<ExtractionOutcome> {
-  let fileId = job.anthropic_file_id;
-  if (!fileId) {
+  let uploadedFileId = job.anthropic_file_id;
+  if (!uploadedFileId) {
     const { data: file, error } = await supabase.storage.from("invoice-files").download(job.file_path);
     if (error || !file) throw new Error(error?.message ?? "Fichier absent de Supabase Storage");
-    fileId = await uploadDocument(file, job.original_name, apiKey);
-    await supabase.from("document_jobs").update({ anthropic_file_id: fileId, claude_file_uploaded_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", job.id);
+    uploadedFileId = await uploadDocument(file, job.original_name, apiKey);
+    await supabase.from("document_jobs").update({ anthropic_file_id: uploadedFileId, claude_file_uploaded_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", job.id);
   }
+  // Figé dans un `const` : le `try/catch` du pré-filtre ci-dessous fait perdre à
+  // TypeScript le rétrécissement d'un `let`, et `fileId` repassait `string | null` alors
+  // qu'il est garanti non nul ici. `ExtractionOutcome` le déclare `string`.
+  const fileId = uploadedFileId;
 
   if (!job.skip_prefilter) {
     try {
@@ -147,8 +151,7 @@ Deno.serve(async (request) => {
           last_error: null,
         }).eq("id", job.id).eq("status", "direct_processing");
       }
-      await deleteDocument(result.fileId, apiKey);
-      await supabase.from("document_jobs").update({ anthropic_file_id: null, updated_at: new Date().toISOString() }).eq("id", job.id);
+      await releaseRemoteFile(supabase, job.id, apiKey);
       succeeded++;
     } catch (error) {
       const { userMessage, logMessage } = toUserSafeError(error);
@@ -159,6 +162,8 @@ Deno.serve(async (request) => {
         last_error: userMessage.slice(0, 1000),
         updated_at: new Date().toISOString(),
       }).eq("id", job.id).eq("status", "direct_processing");
+      // Échec définitif : ne pas laisser le document confidentiel chez le fournisseur.
+      if (terminal) await releaseRemoteFile(supabase, job.id, apiKey);
       failed++;
     }
   });

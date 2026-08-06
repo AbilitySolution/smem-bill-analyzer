@@ -87,6 +87,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { data: owned } = await supabase.from("document_jobs").select("id").eq("id", id).maybeSingle();
     if (!owned) return NextResponse.json({ error: "Job introuvable." }, { status: 404 });
 
+    // `invoice_id` vient du client : sans ce contrôle, un job pouvait être clos en
+    // pointant une facture arbitraire (ou inexistante). La lecture RLS borne à l'org.
+    const { data: invoice } = await supabase
+      .from("invoices").select("id").eq("id", body.invoice_id).maybeSingle();
+    if (!invoice) return NextResponse.json({ error: "Facture introuvable." }, { status: 404 });
+
     const { error } = await createAdminClient().from("document_jobs").update({
       status: "completed", processed_invoice_id: body.invoice_id, updated_at: new Date().toISOString(),
     }).eq("id", id);
@@ -104,7 +110,7 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 
   const supabase = await createClient();
   const { data: job } = await supabase
-    .from("document_jobs").select("id, created_by, file_path").eq("id", id).maybeSingle();
+    .from("document_jobs").select("id, created_by, file_path, processed_invoice_id").eq("id", id).maybeSingle();
   if (!job) return NextResponse.json({ error: "Job introuvable." }, { status: 404 });
 
   // Un membre ne supprime que ses propres dépôts ; un administrateur d'organisation
@@ -119,7 +125,11 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 
   // Le fichier ne sert plus à rien une fois le job supprimé : le laisser ferait grossir
   // le bucket sans que rien ne le référence. Non bloquant.
-  if (job.file_path) {
+  //
+  // SAUF si une facture a été enregistrée depuis ce job : elle référence exactement ce
+  // `file_path`. Le supprimer laissait la facture sans document d'origine — plus d'aperçu
+  // ni de justificatif, sans aucun message.
+  if (job.file_path && !job.processed_invoice_id) {
     const { error: storageError } = await admin.storage.from("invoice-files").remove([job.file_path]);
     if (storageError) {
       console.error("[document-jobs] fichier non supprimé", { id, path: job.file_path, error: storageError.message });

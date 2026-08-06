@@ -85,10 +85,20 @@ ANTHROPIC_API_KEY=<clé API Anthropic>
 
 6. Déployez
 
-> **Aucun Vercel Cron n'est nécessaire.** La reprise des documents en attente est
-> assurée par `pg_cron` **dans Supabase**, pas par une route `/api/cron/*`. Si un cron
-> Vercel pointe encore sur `/api/cron/sync-batches` (ancien import en lot), supprimez-le :
-> la route n'existe plus.
+> **Deux ordonnanceurs coexistent, aux rôles distincts :**
+>
+> - `pg_cron` **dans Supabase** pilote les workers d'extraction (dispatch, collecte,
+>   mode direct) — voir `supabase/migrations/20260805000000_document_queue.sql`.
+> - **Vercel Cron** (`vercel.json`) pilote ce qui a besoin du code applicatif Next :
+>   l'enregistrement automatique (`/api/document-jobs/auto-save`, toutes les 2 min) et
+>   la maintenance quotidienne (`/api/cron/maintenance`). Ces routes exigent
+>   `Authorization: Bearer $CRON_SECRET` — définissez la variable `CRON_SECRET` sur
+>   Vercel, sans quoi elles répondent 401 et rien ne tourne.
+>   ⚠️ Les fréquences infra-quotidiennes exigent le plan Vercel **Pro** ; en Hobby,
+>   faites appeler les mêmes URL par `pg_cron` + `pg_net` avec le même en-tête.
+>
+> Si un cron Vercel pointe encore sur `/api/cron/sync-batches` (ancien import en lot),
+> supprimez-le : la route n'existe plus.
 
 Votre application sera alors disponible sur une URL du type :
 

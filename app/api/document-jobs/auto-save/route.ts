@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { matchesCronSecret } from "@/lib/ops/cron-auth";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getUserContext } from "@/lib/auth";
@@ -24,40 +26,78 @@ export const maxDuration = 300;
  *   - duplicates : facture déjà en base, le job est clos en pointant l'existante ;
  *   - toReview   : révision manuelle, avec la meilleure commune pré-remplie même
  *                  sous le seuil (l'utilisateur n'a plus qu'à confirmer).
+ *
+ * ── Deux appelants ───────────────────────────────────────────────────────────────
+ *
+ * 1. La page d'import, avec la session de l'utilisateur : retour immédiat après un
+ *    dépôt, bornée aux documents qu'elle vient de suivre.
+ *
+ * 2. Un Cron, avec `Authorization: Bearer $CRON_SECRET` : balaie toutes les
+ *    organisations. C'est LUI qui rend l'enregistrement automatique fiable — en mode
+ *    `batch` les résultats reviennent après des minutes ou des heures, l'onglet est
+ *    fermé depuis longtemps, et sans ce chemin les documents restaient en
+ *    `needs_review` indéfiniment.
+ *
+ *    Sur Vercel, la planification vit dans `vercel.json` (`crons`) et la plateforme
+ *    injecte elle-même l'en-tête depuis la variable `CRON_SECRET`. Tout ordonnanceur
+ *    externe envoyant le même en-tête convient également — par exemple `pg_cron` +
+ *    `pg_net` côté Supabase, utile si le plan Vercel ne descend pas sous le tick
+ *    quotidien.
  */
 const AUTO_THRESHOLD = 0.96;
+/**
+ * Documents traités par appel. Chaque enregistrement fait une dizaine d'allers-retours
+ * en base ; au-delà, la route dépasse `maxDuration` et **tout** le travail de la requête
+ * est perdu. Le client rappelle la route par tranches.
+ */
+const MAX_JOBS_PER_CALL = 25;
+/** Organisations servies par tick de Cron, la plus anciennement en attente d'abord. */
+const CRON_MAX_ORGS = 3;
+/** Documents par organisation et par tick. */
+const CRON_MAX_JOBS_PER_ORG = 15;
+/**
+ * Marge sous `maxDuration`. Dépasser signifie perdre la réponse ET tout le travail non
+ * encore écrit ; on préfère s'arrêter net et laisser le tick suivant continuer.
+ */
+const TIME_BUDGET_MS = 240_000;
 
 interface AutoSavedEntry { jobId: string; invoiceId: string; factureNumber: string }
 interface DuplicateEntry { jobId: string; existingInvoiceId: string; factureNumber: string }
 interface ToReviewEntry { jobId: string; factureNumber: string; reason: string }
 
-export async function POST(request: Request) {
-  const ctx = await getUserContext();
-  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+interface PendingJob {
+  id: string;
+  file_path: string;
+  created_by: string;
+  extraction_json: unknown;
+}
 
-  const supabase = await createClient();
-  const body = await request.json().catch(() => ({}));
-  const jobIds: string[] | null = Array.isArray(body?.job_ids)
-    ? body.job_ids.filter((value: unknown): value is string => typeof value === "string")
-    : null;
+interface OrgOutcome {
+  autoSaved: AutoSavedEntry[];
+  duplicates: DuplicateEntry[];
+  toReview: ToReviewEntry[];
+  createdInvoiceIds: string[];
+}
 
-  let query = supabase
-    .from("document_jobs")
-    .select("id, file_path, extraction_json")
-    .eq("created_by", ctx.userId)
-    .eq("status", "needs_review");
-  if (jobIds && jobIds.length) query = query.in("id", jobIds);
-  const { data: jobs } = await query;
-
-  if (!jobs || jobs.length === 0) {
-    return NextResponse.json({ autoSaved: [], toReview: [], duplicates: [] });
-  }
-
-  const admin = createAdminClient();
+/**
+ * Examine des documents d'UNE organisation.
+ *
+ * `created_by` est repris de chaque job, pas de l'appelant : le Cron n'a pas de session,
+ * et même en mode utilisateur c'est plus juste — la facture est créditée à celui qui a
+ * déposé le document, pas à celui qui a déclenché l'enregistrement.
+ */
+async function autoSaveOrgJobs(
+  supabase: SupabaseClient,
+  admin: SupabaseClient,
+  orgId: string,
+  jobs: PendingJob[],
+  deadline: number,
+): Promise<OrgOutcome> {
   const autoSaved: AutoSavedEntry[] = [];
   const duplicates: DuplicateEntry[] = [];
   const toReview: ToReviewEntry[] = [];
   const createdInvoiceIds: string[] = [];
+  const examinedJobIds: string[] = [];
 
   const markCompleted = (jobId: string, invoiceId: string) =>
     admin.from("document_jobs")
@@ -65,6 +105,9 @@ export async function POST(request: Request) {
       .eq("id", jobId);
 
   for (const job of jobs) {
+    if (Date.now() > deadline) break;
+    examinedJobIds.push(job.id);
+
     const parsed = invoiceExtractionSchema.safeParse(job.extraction_json);
     if (!parsed.success) {
       toReview.push({ jobId: job.id, factureNumber: "—", reason: "extraction incomplète" });
@@ -74,9 +117,9 @@ export async function POST(request: Request) {
     const factureNumber = extraction.invoice.facture_number ?? "—";
 
     const validation = validateInvoice(extraction);
-    const commune = await matchCommuneScored(supabase, ctx.orgId, extraction);
+    const commune = await matchCommuneScored(supabase, orgId, extraction);
     const site = commune
-      ? await matchSiteByContract(supabase, ctx.orgId, commune.id, extraction.contract.contract_number)
+      ? await matchSiteByContract(supabase, orgId, commune.id, extraction.contract.contract_number)
       : null;
 
     if (commune) {
@@ -97,7 +140,7 @@ export async function POST(request: Request) {
     // aller-retour réseau par facture.
     const saved = await saveInvoice(
       supabase,
-      { orgId: ctx.orgId, userId: ctx.userId },
+      { orgId, userId: job.created_by },
       {
         extraction,
         file_path: job.file_path,
@@ -127,10 +170,139 @@ export async function POST(request: Request) {
     toReview.push({ jobId: job.id, factureNumber, reason: saved.error });
   }
 
-  if (createdInvoiceIds.length > 0) {
-    const { computed } = await recomputeAndPersistAnomalies(supabase, ctx.orgId);
-    await escalateHighAnomalies(supabase, ctx.orgId, createdInvoiceIds, computed);
+  // Marqueur d'examen, y compris pour les documents partis en révision manuelle : ils
+  // restent `needs_review` par construction, et sans ça le Cron les réexaminerait à
+  // chaque tick, pour toujours. Écrit à la fin : une requête interrompue ne marque rien
+  // et le tick suivant reprend le travail.
+  if (examinedJobIds.length) {
+    await admin.from("document_jobs")
+      .update({ auto_save_attempted_at: new Date().toISOString() })
+      .in("id", examinedJobIds);
   }
 
-  return NextResponse.json({ autoSaved, toReview, duplicates });
+  return { autoSaved, duplicates, toReview, createdInvoiceIds };
+}
+
+/** Recalcul portefeuille + escalade, une seule fois par organisation. */
+async function finalizeOrg(supabase: SupabaseClient, orgId: string, invoiceIds: string[]) {
+  if (!invoiceIds.length) return false;
+  const { computed } = await recomputeAndPersistAnomalies(supabase, orgId);
+  await escalateHighAnomalies(supabase, orgId, invoiceIds, computed);
+  return true;
+}
+
+/** Balayage multi-organisations déclenché par le Cron. */
+async function runCronSweep(deadline: number) {
+  const admin = createAdminClient();
+  const { data: orgs, error } = await admin.rpc("list_orgs_pending_auto_save", { org_limit: CRON_MAX_ORGS });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  const pendingOrgs = (orgs ?? []) as Array<{ org_id: string; pending_count: number }>;
+  const summary: Array<{ orgId: string; examined: number; autoSaved: number; toReview: number; duplicates: number }> = [];
+
+  for (const org of pendingOrgs) {
+    if (Date.now() > deadline) break;
+    const { data: jobs } = await admin
+      .from("document_jobs")
+      .select("id, file_path, created_by, extraction_json")
+      .eq("org_id", org.org_id)
+      .eq("status", "needs_review")
+      .is("auto_save_attempted_at", null)
+      .order("result_available_at", { ascending: true })
+      .limit(CRON_MAX_JOBS_PER_ORG);
+    if (!jobs?.length) continue;
+
+    // Client admin de bout en bout : le Cron n'a aucune session, donc aucune RLS à
+    // laquelle s'adosser. L'isolation vient du filtre `org_id` ci-dessus, et chaque
+    // organisation est traitée dans son propre passage — jamais deux mélangées.
+    const outcome = await autoSaveOrgJobs(admin, admin, org.org_id, jobs as PendingJob[], deadline);
+    await finalizeOrg(admin, org.org_id, outcome.createdInvoiceIds);
+    summary.push({
+      orgId: org.org_id,
+      examined: jobs.length,
+      autoSaved: outcome.autoSaved.length,
+      toReview: outcome.toReview.length,
+      duplicates: outcome.duplicates.length,
+    });
+  }
+
+  return NextResponse.json({ mode: "cron", organizations: summary });
+}
+
+/**
+ * Point d'entrée du Cron.
+ *
+ * Vercel invoque les tâches planifiées en **GET**, pas en POST. Le verbe n'est pas
+ * idempotent ici — c'est la contrainte de la plateforme, pas un choix — d'où l'accès
+ * strictement réservé au porteur de `CRON_SECRET`. `matchesCronSecret` renvoie `false`
+ * quand la variable n'est pas définie : la route échoue fermée.
+ */
+export async function GET(request: Request) {
+  if (!matchesCronSecret(request.headers.get("authorization") ?? "")) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  return runCronSweep(Date.now() + TIME_BUDGET_MS);
+}
+
+export async function POST(request: Request) {
+  const deadline = Date.now() + TIME_BUDGET_MS;
+
+  // Le Cron est vérifié en premier : il n'a pas de session, `getUserContext` renverrait
+  // 401 avant d'avoir la moindre chance de tourner. Accepté en POST aussi, pour un
+  // ordonnanceur externe (pg_cron + pg_net) qui préférerait ce verbe.
+  if (matchesCronSecret(request.headers.get("authorization") ?? "")) {
+    return runCronSweep(deadline);
+  }
+
+  const ctx = await getUserContext();
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const supabase = await createClient();
+  const body = await request.json().catch(() => ({}));
+  const jobIds: string[] | null = Array.isArray(body?.job_ids)
+    ? body.job_ids.filter((value: unknown): value is string => typeof value === "string")
+    : null;
+  // Le recalcul d'anomalies portefeuille balaie TOUTE l'organisation (toutes les
+  // factures, toutes les périodes de consommation, suppression puis réinsertion des
+  // anomalies). Il coûte O(taille de l'organisation), pas O(factures ajoutées) — le
+  // faire à chaque tranche de 25 revenait à balayer 8 fois l'organisation pour un dépôt
+  // de 200 factures. L'appelant signale donc sa dernière tranche.
+  //
+  // Défaut `true` : un appel qui ne dit rien garde l'ancien comportement.
+  const finalize = body?.finalize !== false;
+  // Factures créées par les tranches PRÉCÉDENTES du même dépôt : sans elles, seule la
+  // dernière tranche serait escaladée en `anomaly_flagged`.
+  const previousInvoiceIds: string[] = Array.isArray(body?.escalate_invoice_ids)
+    ? body.escalate_invoice_ids.filter((value: unknown): value is string => typeof value === "string").slice(0, 500)
+    : [];
+
+  let query = supabase
+    .from("document_jobs")
+    .select("id, file_path, created_by, extraction_json")
+    .eq("org_id", ctx.orgId)
+    .eq("created_by", ctx.userId)
+    .eq("status", "needs_review")
+    .is("auto_save_attempted_at", null)
+    .order("created_at", { ascending: true })
+    .limit(MAX_JOBS_PER_CALL);
+  if (jobIds && jobIds.length) query = query.in("id", jobIds.slice(0, MAX_JOBS_PER_CALL));
+  const { data: jobs, error: jobsError } = await query;
+
+  if (jobsError) return NextResponse.json({ error: jobsError.message }, { status: 500 });
+  if (!jobs || jobs.length === 0) {
+    return NextResponse.json({ autoSaved: [], toReview: [], duplicates: [] });
+  }
+
+  const admin = createAdminClient();
+  const outcome = await autoSaveOrgJobs(supabase, admin, ctx.orgId, jobs as PendingJob[], deadline);
+
+  const invoicesToEscalate = [...new Set([...previousInvoiceIds, ...outcome.createdInvoiceIds])];
+  const recomputed = finalize ? await finalizeOrg(supabase, ctx.orgId, invoicesToEscalate) : false;
+
+  return NextResponse.json({
+    autoSaved: outcome.autoSaved,
+    toReview: outcome.toReview,
+    duplicates: outcome.duplicates,
+    recomputed,
+  });
 }

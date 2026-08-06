@@ -46,12 +46,17 @@ export async function recomputeAndPersistAnomalies(
       .eq("org_id", orgId).eq("archived", false).range(from, to),
   );
   if (invoices.length === 0) return { computed: [], preserved: 0 };
-  const invoiceIds = invoices.map((i) => i.id);
 
+  // Les trois requêtes ci-dessous passaient la liste complète des identifiants de
+  // factures via `.in("invoice_id", …)`. Avec supabase-js, cette liste part
+  // dans l'URL — 37 octets par facture, soit 7,7 Ko à 200 factures et 38 Ko à 1 000 —
+  // jusqu'à dépasser le plafond de ligne de requête des proxys (414 / 400). Le compteur
+  // porte sur le total de l'organisation et ne redescend jamais, et `selectAll` pagine
+  // la réponse, pas la requête. Les RPC ne prennent plus que `org_id` : les
+  // identifiants ne quittent plus la base.
   interface PeriodRow { invoice_id: string; period_start: string | null; period_end: string | null; consommation_kwh: number | null; montant_eur: number | null }
   const periods = await selectAll<PeriodRow>((from, to) =>
-    supabase.from("consumption_periods").select("invoice_id, period_start, period_end, consommation_kwh, montant_eur")
-      .in("invoice_id", invoiceIds).range(from, to),
+    supabase.rpc("org_anomaly_periods", { target_org: orgId, page_limit: to - from + 1, page_offset: from }),
   );
   const linesByInvoice = new Map<string, AnomalyLineInput[]>();
   for (const p of periods) {
@@ -74,13 +79,16 @@ export async function recomputeAndPersistAnomalies(
 
   interface ExistingRow { invoice_id: string; type: string; resolved: boolean }
   const existing = await selectAll<ExistingRow>((from, to) =>
-    supabase.from("anomalies").select("invoice_id, type, resolved")
-      .in("invoice_id", invoiceIds).in("type", RECOMPUTED_TYPES).range(from, to),
+    supabase.rpc("org_recomputed_anomalies", {
+      target_org: orgId, anomaly_types: RECOMPUTED_TYPES, page_limit: to - from + 1, page_offset: from,
+    }),
   );
   const resolvedMap = new Map(existing.map((e) => [`${e.invoice_id}:${e.type}`, e.resolved]));
 
-  const { error: deleteErr } = await supabase.from("anomalies").delete()
-    .in("invoice_id", invoiceIds).in("type", RECOMPUTED_TYPES);
+  const { error: deleteErr } = await supabase.rpc("delete_org_recomputed_anomalies", {
+    target_org: orgId,
+    anomaly_types: RECOMPUTED_TYPES,
+  });
   if (deleteErr) throw new Error(`recompute anomalies delete: ${deleteErr.message}`);
 
   if (computed.length > 0) {

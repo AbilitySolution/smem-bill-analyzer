@@ -6,7 +6,7 @@ import {
   BarChart, Bar, Cell, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 import { AlertTriangle, ShieldAlert, MapPin, CheckCircle2, Info, ExternalLink, RotateCcw, History, Euro } from "lucide-react";
-import type { InvoiceDoc } from "@/lib/data/invoices";
+import type { InvoiceDoc, PortfolioPoint } from "@/lib/data/invoices";
 import { SEVERITY_LABEL, SEVERITY_COLOR, type Severity } from "@/lib/data/anomalies";
 import { setAnomalyResolved } from "@/app/(app)/anomalies/actions";
 
@@ -30,7 +30,14 @@ const barSeverity = (d: unknown): Severity | null => {
   return o?.severity ?? o?.payload?.severity ?? null;
 };
 
-export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: string }) {
+const SEV_RANK_ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
+
+export function AnomaliesView({ docs, portfolio, focus }: {
+  docs: InvoiceDoc[];
+  /** Portefeuille complet (non archivé) : le nuage de fond du scatter. Null = repli sur `docs`. */
+  portfolio?: PortfolioPoint[] | null;
+  focus?: string;
+}) {
   // Surcharge optimiste locale (id -> resolved) le temps que la server action
   // écrive en DB et que la page se revalide — la vérité reste toujours la DB.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
@@ -52,10 +59,9 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
     return items;
   }, [docs, overrides]);
 
-  const rank: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
   const open = useMemo(() => {
     return allItems.filter((i) => !i.resolved)
-      .sort((a, b) => (a.invoiceId === focus ? -1 : b.invoiceId === focus ? 1 : rank[a.severity] - rank[b.severity]));
+      .sort((a, b) => (a.invoiceId === focus ? -1 : b.invoiceId === focus ? 1 : SEV_RANK_ORDER[a.severity] - SEV_RANK_ORDER[b.severity]));
   }, [allItems, focus]);
   const history = useMemo(() => allItems.filter((i) => i.resolved), [allItems]);
 
@@ -68,12 +74,18 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
   const distribution = SEV_ORDER.map((s) => ({ label: SEVERITY_LABEL[s], severity: s, value: open.filter((i) => i.severity === s).length }))
     .filter((d) => d.value > 0);
 
+  // Nuage de fond = portefeuille COMPLET, pas seulement les factures anormales : sans
+  // les factures saines, « repérer un point qui sort du nuage » n'avait pas de nuage.
   const scatter = useMemo(() => {
     const flaggedIds = new Set(open.map((i) => i.invoiceId));
-    return docs
-      .filter((d) => d.kwh > 0)
-      .map((d) => ({ id: d.id, kwh: d.kwh, amount: d.totalTtc, flagged: flaggedIds.has(d.id), severity: flaggedIds.has(d.id) ? (d.anomalySeverity ?? null) : null }));
-  }, [docs, open]);
+    const severityByInvoice = new Map(docs.map((d) => [d.id, d.anomalySeverity ?? null]));
+    const points = portfolio ?? docs.filter((d) => d.kwh > 0).map((d) => ({ id: d.id, kwh: d.kwh, totalTtc: d.totalTtc }));
+    return points.map((p) => ({
+      id: p.id, kwh: p.kwh, amount: p.totalTtc,
+      flagged: flaggedIds.has(p.id),
+      severity: flaggedIds.has(p.id) ? (severityByInvoice.get(p.id) ?? null) : null,
+    }));
+  }, [docs, portfolio, open]);
 
   function resolve(id: string) {
     setOverrides((prev) => new Map(prev).set(id, true));
@@ -148,7 +160,7 @@ export function AnomaliesView({ docs, focus }: { docs: InvoiceDoc[]; focus?: str
                   </ResponsiveContainer>
                 </Panel>
 
-                <Panel title="Montant vs consommation" subtitle="Survolez un point pour repérer l'alerte associée">
+                <Panel title="Montant vs consommation" subtitle="Tout le portefeuille — les points colorés portent une alerte ouverte">
                   <ResponsiveContainer width="100%" height={240}>
                     <ScatterChart margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--kn-border)" />

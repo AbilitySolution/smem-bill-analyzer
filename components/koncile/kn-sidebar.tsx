@@ -63,9 +63,12 @@ const adminNav: NavItem[] = [
 export function AbilitySidebar({
   user,
   isAdmin = false,
+  isPlatformOperator = false,
 }: {
   user: SidebarUser;
   isAdmin?: boolean;
+  /** Membre de l'org Ability (opérateur de la plateforme) — voir lib/auth-platform.ts. */
+  isPlatformOperator?: boolean;
 }) {
   const pathname = usePathname();
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
@@ -166,6 +169,29 @@ export function AbilitySidebar({
                 </Link>
               );
             })}
+          </>
+        )}
+
+        {/* Section opérateur : réservée aux membres de l'org Ability, visuellement
+            distincte du bloc « Administration » client pour ne jamais confondre les
+            deux contextes. La page elle-même re-vérifie le gate (notFound sinon). */}
+        {isPlatformOperator && (
+          <>
+            <p className="px-2.5 pb-1 pt-4 text-[10px] font-semibold uppercase tracking-wide text-[#b45309]">
+              Exploitation plateforme
+            </p>
+            <Link
+              href="/exploitation"
+              className={cx(
+                "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
+                isActive("/exploitation")
+                  ? "bg-[var(--kn-active)] font-medium text-[var(--kn-text)]"
+                  : "text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)] hover:text-[var(--kn-text)]",
+              )}
+            >
+              <Gauge className="size-[17px] shrink-0" strokeWidth={1.75} />
+              <span className="truncate">Santé de la file</span>
+            </Link>
           </>
         )}
       </nav>

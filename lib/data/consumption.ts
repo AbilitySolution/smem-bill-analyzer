@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { selectAll } from "@/lib/data/invoices";
 
 export type Tarif = "HP" | "HC" | "Base";
 export type Metric = "kwh" | "eur";
@@ -163,29 +164,53 @@ function aggregate(periods: RawPeriod[], charges: RawCharge[]): AnalysisData {
   };
 }
 
-/** Analyse de consommation réelle (Supabase), filtrable par commune/site/catégorie. */
+/**
+ * Analyse de consommation réelle (Supabase), filtrable par commune/site/catégorie.
+ *
+ * Deux invariants alignés sur le reste de l'application :
+ *   - `archived = false` : une facture archivée est déjà invisible dans Mes documents,
+ *     la page Anomalies et le recalcul portefeuille — elle ne doit pas non plus gonfler
+ *     les totaux d'analyse ;
+ *   - pagination `selectAll` : PostgREST tronque à 1000 lignes par requête, en
+ *     silence — sans elle, les analyses sous-comptaient dès ~300 factures.
+ */
 export async function getConsumptionAnalysis(filters: AnalysisFilters): Promise<AnalysisData | null> {
   const supabase = await createClient();
 
   // org_id explicite en plus de la RLS (défense en profondeur) — l'isolation multi-tenant
-  // ne doit pas dépendre uniquement de la policy.
-  let pq = supabase
-    .from("consumption_periods")
-    .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, montant_eur, invoices!inner(facture_date, site_id, commune_id, categorie, total_ttc, org_id)")
-    .eq("invoices.org_id", filters.orgId);
-  let cq = supabase
-    .from("invoice_charges")
-    .select("invoice_id, period_start, period_end, montant_eur, invoices!inner(facture_date, site_id, commune_id, categorie, org_id)")
-    .eq("category", "fixed")
-    .eq("invoices.org_id", filters.orgId);
+  // ne doit pas dépendre uniquement de la policy. Fabriques : le builder Supabase est
+  // mutable, chaque page de `selectAll` doit repartir d'une requête neuve.
+  const periodQuery = () => {
+    let q = supabase
+      .from("consumption_periods")
+      .select("invoice_id, poste_tarifaire, period_start, period_end, consommation_kwh, montant_eur, invoices!inner(facture_date, site_id, commune_id, categorie, total_ttc, org_id, archived)")
+      .eq("invoices.org_id", filters.orgId)
+      .eq("invoices.archived", false);
+    if (filters.communeId) q = q.eq("invoices.commune_id", filters.communeId);
+    if (filters.siteId) q = q.eq("invoices.site_id", filters.siteId);
+    if (filters.categorie) q = q.eq("invoices.categorie", filters.categorie);
+    // Ordre total requis : une pagination sans tri stable peut dupliquer ou sauter des lignes.
+    return q.order("invoice_id", { ascending: true }).order("id", { ascending: true });
+  };
+  const chargeQuery = () => {
+    let q = supabase
+      .from("invoice_charges")
+      .select("invoice_id, period_start, period_end, montant_eur, invoices!inner(facture_date, site_id, commune_id, categorie, org_id, archived)")
+      .eq("category", "fixed")
+      .eq("invoices.org_id", filters.orgId)
+      .eq("invoices.archived", false);
+    if (filters.communeId) q = q.eq("invoices.commune_id", filters.communeId);
+    if (filters.siteId) q = q.eq("invoices.site_id", filters.siteId);
+    if (filters.categorie) q = q.eq("invoices.categorie", filters.categorie);
+    return q.order("invoice_id", { ascending: true }).order("id", { ascending: true });
+  };
 
-  if (filters.communeId) { pq = pq.eq("invoices.commune_id", filters.communeId); cq = cq.eq("invoices.commune_id", filters.communeId); }
-  if (filters.siteId) { pq = pq.eq("invoices.site_id", filters.siteId); cq = cq.eq("invoices.site_id", filters.siteId); }
-  if (filters.categorie) { pq = pq.eq("invoices.categorie", filters.categorie); cq = cq.eq("invoices.categorie", filters.categorie); }
-
-  const [pRes, cRes] = await Promise.all([pq, cq]);
-  if (pRes.error || !pRes.data || pRes.data.length === 0) return null;
-  return aggregate(pRes.data as unknown as RawPeriod[], (cRes.data as unknown as RawCharge[]) ?? []);
+  const [periods, charges] = await Promise.all([
+    selectAll<RawPeriod>((from, to) => periodQuery().range(from, to)),
+    selectAll<RawCharge>((from, to) => chargeQuery().range(from, to)),
+  ]);
+  if (!periods || periods.length === 0) return null;
+  return aggregate(periods, charges ?? []);
 }
 
 /** Instantané de démonstration (repli hors session / RLS) — quelques mois plausibles. */

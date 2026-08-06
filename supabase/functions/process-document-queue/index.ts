@@ -1,19 +1,46 @@
-// Worker du mode `batch` : réserve des jobs dans pgmq, téléverse les fichiers chez le
+// Worker du mode `batch` : réserve des jobs, téléverse les fichiers chez le
 // fournisseur, pré-filtre, puis soumet un lot Message Batches.
 //
 // Invoqué par le Cron `dispatch-claude-batches` toutes les minutes, et directement par
 // le navigateur au dépôt pour ne pas attendre le tick suivant.
+//
+// La réservation ne ramène jamais que les jobs d'UNE organisation :
+//   - Cron       → tourniquet, l'organisation servie le moins récemment ;
+//   - navigateur → son organisation, tout de suite.
+// Conséquence : aucun lot Anthropic ne mélange les documents de deux clients, et un
+// client qui dépose 200 factures ne fait plus attendre celui qui en dépose 2.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { aiRequest, deleteDocument, isRetryableProcessingError, uploadDocument, classifyDocument } from "../_shared/ai-client.ts";
+import { aiRequest, isRetryableProcessingError, releaseRemoteFile, uploadDocument, classifyDocument } from "../_shared/ai-client.ts";
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
+import { isServiceToken } from "../_shared/service-token.ts";
 import { AI_MODEL_OCR, EXTRACTION_PROMPT, SYSTEM_PROMPT, extractionTool } from "../_shared/edf-extraction.ts";
 
-const QUEUE_VISIBILITY_SECONDS = 180;
+/**
+ * Au-delà, un job resté en `uploading_to_claude` est considéré abandonné et repris.
+ * Remplace le délai de visibilité de pgmq, retiré du chemin.
+ */
+const STALE_DISPATCH_SECONDS = 300;
 const MAX_ATTEMPTS = 3;
-const BATCH_SIZE = 5;
-const MAX_BATCHES_PER_INVOCATION = 10;
+/**
+ * Documents visés par lot fournisseur.
+ *
+ * L'API Batches en accepte des dizaines de milliers ; la vraie contrainte est la
+ * **préparation** (un téléchargement + un upload + une classification par document,
+ * dans une seule invocation d'Edge Function). Les deux étaient confondus à 5, si bien
+ * que 2 000 documents produisaient 400 lots que le collecteur ne pouvait visiter qu'à
+ * 10 par minute — 40 minutes rien que pour les regarder. Découplés : la préparation est
+ * bornée par `MAX_DOCUMENTS_PER_INVOCATION`, le lot regroupe tout ce qui a été préparé
+ * pour une organisation. 2 000 documents → ~40 lots.
+ */
+const TARGET_BATCH_SIZE = 50;
+/**
+ * Plafond de travail d'une invocation, en documents. Inchangé par rapport à l'ancien
+ * `10 lots × 5 documents` : c'est le coût de préparation qui dicte la durée, et il n'a
+ * pas bougé. Seul le nombre de lots produits diminue.
+ */
+const MAX_DOCUMENTS_PER_INVOCATION = 50;
 const FILE_UPLOAD_CONCURRENCY = 3;
 
 async function createAiBatch(
@@ -64,90 +91,148 @@ async function mapWithConcurrency<T, R>(values: T[], limit: number, worker: (val
   return results;
 }
 
-type QueueClaim = { message_id: number; job_id: string; read_count: number };
 // Les colonnes lues sont stables ; le typage précis vit côté application (lib/types).
 // deno-lint-ignore no-explicit-any
 type QueuedJobRow = Record<string, any>;
 
+/**
+ * Quelle organisation ce passage sert.
+ *
+ * `fair` : le Cron laisse la base choisir — l'organisation servie le moins récemment
+ *          parmi celles qui ont du travail (tourniquet). C'est ce qui empêche un client
+ *          déposant 200 factures de bloquer celui qui en dépose 2.
+ * `org`  : le navigateur ne sert que SON organisation, immédiatement, sans attendre son
+ *          tour ni consommer celui des autres.
+ *
+ * Dans les deux cas la réservation ne ramène jamais que les jobs d'UNE organisation :
+ * un lot Anthropic ne mélange donc jamais les documents de deux clients.
+ */
+type DispatchScope = { kind: "fair" } | { kind: "org"; orgId: string };
+
+/** Issue de la préparation d'UN document. `failed` reste local au document concerné. */
+type PreparedJob = { kind: "prepared"; id: string; mime_type: string; anthropic_file_id: string };
+type UploadOutcome =
+  | PreparedJob
+  | { kind: "rejected"; id: string }
+  | { kind: "failed"; id: string; error: unknown };
+
+/**
+ * Réservation.
+ *
+ * Les deux fonctions font le même contrat, en une seule transaction : sélection
+ * `FOR UPDATE SKIP LOCKED`, passage en `uploading_to_claude`, incrément de tentative,
+ * et reprise des jobs figés par un worker mort. Il n'y a plus de file de messages à
+ * acquitter — `document_jobs` EST la file.
+ */
+async function claimJobs(
+  supabase: ReturnType<typeof createClient>,
+  scope: DispatchScope,
+  jobLimit: number,
+): Promise<QueuedJobRow[] | null> {
+  const { data, error } = scope.kind === "org"
+    ? await supabase.rpc("claim_org_document_jobs", { requested_org_id: scope.orgId, job_limit: jobLimit })
+    : await supabase.rpc("claim_fair_document_jobs", { job_limit: jobLimit, stale_after_seconds: STALE_DISPATCH_SECONDS });
+  if (error) throw new Error(error.message);
+  const rows = (data ?? []) as QueuedJobRow[];
+  return rows.length ? rows : null;
+}
+
 async function dispatchNextBatch(
   supabase: ReturnType<typeof createClient>,
   aiApiKey: string,
+  scope: DispatchScope,
+  jobLimit: number,
 ) {
-  const { data, error: claimError } = await supabase.rpc("claim_document_jobs", {
-    visibility_timeout_seconds: QUEUE_VISIBILITY_SECONDS,
-    message_limit: BATCH_SIZE,
-  });
-  if (claimError) throw new Error(claimError.message);
-  const claims = (data ?? []) as QueueClaim[];
-  if (!claims.length) return null;
+  const rows = await claimJobs(supabase, scope, jobLimit);
+  if (!rows) return null;
 
-  const claimByJob = new Map<string, QueueClaim>(claims.map((claim) => [claim.job_id, claim]));
-  const { data: jobRows, error: jobsError } = await supabase.from("document_jobs").select("*").in("id", claims.map((claim) => claim.job_id));
-  if (jobsError) throw new Error(jobsError.message);
-  const rows = (jobRows ?? []) as QueuedJobRow[];
+  // Toutes les lignes viennent de la même organisation : la réservation le garantit.
+  const batchOrgId = rows[0].org_id as string;
+  const attemptByJob = new Map<string, number>(rows.map((row) => [row.id as string, (row.attempt_count as number) ?? 1]));
   const prepared: Array<{ id: string; mime_type: string; anthropic_file_id: string }> = [];
+  /** Jobs sortis du dispatch pendant ce passage : leur statut ne doit plus être touché. */
+  const settled = new Set<string>();
   const dispatchStartedAt = new Date().toISOString();
 
   try {
-    const candidates: QueuedJobRow[] = [];
-    for (const job of rows) {
-      // Garde anti-double-traitement : un message rejoué pour un job déjà parti est
-      // acquitté et ignoré.
-      if (["batched", "needs_review", "completed"].includes(job.status)) {
-        await supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id });
-        continue;
+    // Préparation isolée par document. Le `try/catch` est DANS le worker, comme dans
+    // `process-direct-documents` : sans lui, `Promise.all` remonte la première exception
+    // et le `catch` global rétrograde les cinq jobs de la réservation — un seul fichier
+    // corrompu faisait passer en `failed`, au bout de trois tentatives, quatre documents
+    // parfaitement sains. Les cinq appartiennent désormais au même client, mais le
+    // dégât reste inacceptable à l'intérieur d'un client.
+    const outcomes = await mapWithConcurrency(rows, FILE_UPLOAD_CONCURRENCY, async (job): Promise<UploadOutcome> => {
+      try {
+        // `anthropic_file_id` mémorisé : une relance ne réuploade pas le fichier.
+        let uploadedFileId = job.anthropic_file_id as string | null;
+        if (!uploadedFileId) {
+          const { data: file, error: downloadError } = await supabase.storage.from("invoice-files").download(job.file_path);
+          if (downloadError || !file) throw new Error(`${job.original_name}: ${downloadError?.message ?? "fichier absent"}`);
+          uploadedFileId = await uploadDocument(file, job.original_name, aiApiKey);
+          const uploadedAt = new Date().toISOString();
+          await supabase.from("document_jobs").update({ anthropic_file_id: uploadedFileId, claude_file_uploaded_at: uploadedAt, updated_at: uploadedAt }).eq("id", job.id);
+        }
+        // Figé dans un `const` : le `try/catch` du pré-filtre ci-dessous fait perdre à
+        // TypeScript le rétrécissement d'un `let`, et `fileId` repassait `string | null`.
+        const fileId = uploadedFileId;
+
+        if (!job.skip_prefilter) {
+          try {
+            const classification = await classifyDocument(fileId, job.mime_type, aiApiKey);
+            if (!classification.isInvoice) {
+              const now = new Date().toISOString();
+              await supabase.from("document_jobs").update({
+                status: "rejected_non_invoice",
+                prefilter_type: classification.type,
+                completed_at: now,
+                result_available_at: now,
+                updated_at: now,
+                last_error: null,
+              }).eq("id", job.id);
+              await releaseRemoteFile(supabase, job.id, aiApiKey);
+              return { kind: "rejected", id: job.id };
+            }
+          } catch {
+            // Classifieur indisponible ou réponse invalide : on ne bloque pas le lot,
+            // le document part en extraction normale (biais volontaire vers l'acceptation).
+          }
+        }
+
+        return { kind: "prepared", id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId };
+      } catch (error) {
+        return { kind: "failed", id: job.id, error };
       }
-      const attempt = (job.attempt_count ?? 0) + 1;
-      await supabase.from("document_jobs").update({ status: "uploading_to_claude", attempt_count: attempt, dispatch_started_at: dispatchStartedAt, started_at: dispatchStartedAt, updated_at: dispatchStartedAt }).eq("id", job.id);
-      candidates.push(job);
+    });
+
+    // Échecs individuels : traités ici, un par un, pour qu'ils ne contaminent personne.
+    for (const outcome of outcomes) {
+      if (outcome.kind !== "failed") continue;
+      settled.add(outcome.id);
+      const { userMessage, logMessage } = toUserSafeError(outcome.error);
+      console.error(`[process-document-queue] job ${outcome.id} preparation failed:`, logMessage);
+      const terminal = (attemptByJob.get(outcome.id) ?? 1) >= MAX_ATTEMPTS || !isRetryableProcessingError(outcome.error);
+      await supabase.from("document_jobs")
+        .update({ status: terminal ? "failed" : "queued", last_error: userMessage.slice(0, 1000), updated_at: new Date().toISOString() })
+        .eq("id", outcome.id)
+        .in("status", ["queued", "uploading_to_claude"]);
+      // Échec définitif : le fichier distant ne servira plus — un document confidentiel
+      // ne doit pas rester chez le fournisseur. Une relance manuelle réuploade.
+      if (terminal) await releaseRemoteFile(supabase, outcome.id, aiApiKey);
     }
 
-    const uploaded = await mapWithConcurrency(candidates, FILE_UPLOAD_CONCURRENCY, async (job) => {
-      // `anthropic_file_id` mémorisé : une relance ne réuploade pas le fichier.
-      let fileId = job.anthropic_file_id as string | null;
-      if (!fileId) {
-        const { data: file, error: downloadError } = await supabase.storage.from("invoice-files").download(job.file_path);
-        if (downloadError || !file) throw new Error(`${job.original_name}: ${downloadError?.message ?? "fichier absent"}`);
-        fileId = await uploadDocument(file, job.original_name, aiApiKey);
-        const uploadedAt = new Date().toISOString();
-        await supabase.from("document_jobs").update({ anthropic_file_id: fileId, claude_file_uploaded_at: uploadedAt, updated_at: uploadedAt }).eq("id", job.id);
-      }
+    const rejectedJobs = outcomes.filter((outcome) => outcome.kind === "rejected");
+    const acceptedJobs = outcomes.filter((outcome): outcome is PreparedJob => outcome.kind === "prepared");
+    rejectedJobs.forEach((job) => settled.add(job.id));
+    prepared.push(...acceptedJobs.map(({ id, mime_type, anthropic_file_id }) => ({ id, mime_type, anthropic_file_id })));
 
-      if (!job.skip_prefilter) {
-        try {
-          const classification = await classifyDocument(fileId, job.mime_type, aiApiKey);
-          if (!classification.isInvoice) {
-            const now = new Date().toISOString();
-            await supabase.from("document_jobs").update({
-              status: "rejected_non_invoice",
-              prefilter_type: classification.type,
-              completed_at: now,
-              result_available_at: now,
-              updated_at: now,
-              last_error: null,
-            }).eq("id", job.id);
-            await deleteDocument(fileId, aiApiKey);
-            await supabase.from("document_jobs").update({ anthropic_file_id: null, updated_at: new Date().toISOString() }).eq("id", job.id);
-            return { id: job.id, rejected: true as const };
-          }
-        } catch {
-          // Classifieur indisponible ou réponse invalide : on ne bloque pas le lot,
-          // le document part en extraction normale (biais volontaire vers l'acceptation).
-        }
-      }
-
-      return { id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId, rejected: false as const };
-    });
-    const rejectedJobs = uploaded.filter((job) => job.rejected);
-    const acceptedJobs = uploaded.filter((job): job is { id: string; mime_type: string; anthropic_file_id: string; rejected: false } => !job.rejected);
-    await Promise.all(rejectedJobs.map((job) => supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id })));
-    prepared.push(...acceptedJobs);
-
-    if (!prepared.length) return { batchId: null, documentCount: 0 };
+    if (!prepared.length) return { batchId: null, documentCount: 0, claimedCount: rows.length };
     const batch = await createAiBatch(prepared, aiApiKey);
     const batchCreatedAt = new Date().toISOString();
     const { error: insertError } = await supabase.from("document_batches").insert({
       anthropic_batch_id: batch.id,
+      // Un lot = une organisation. Rend la garantie auditable et permet la policy RLS
+      // `org_read_document_batches`, donc une estimation de durée par client.
+      org_id: batchOrgId,
       status: "in_progress",
       document_count: prepared.length,
       request_counts: batch.request_counts,
@@ -157,17 +242,23 @@ async function dispatchNextBatch(
     if (insertError) throw new Error(insertError.message);
     await supabase.from("document_jobs").update({ status: "batched", anthropic_batch_id: batch.id, batch_created_at: batchCreatedAt, updated_at: batchCreatedAt, last_error: null })
       .in("id", prepared.map((job) => job.id));
-    await Promise.all(prepared.map((job) => supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id })));
-    return { batchId: batch.id, documentCount: prepared.length };
+    return { batchId: batch.id, documentCount: prepared.length, claimedCount: rows.length };
   } catch (error) {
     const { userMessage, logMessage } = toUserSafeError(error);
     console.error("[process-document-queue] dispatch error:", logMessage);
     await Promise.all(rows.map(async (job) => {
-      if (job.status === "batched") return;
-      const terminal = (job.attempt_count ?? 0) + 1 >= MAX_ATTEMPTS || !isRetryableProcessingError(error);
-      await supabase.from("document_jobs").update({ status: terminal ? "failed" : "queued", last_error: userMessage.slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", job.id);
-      // Sur erreur terminale, acquitter : sinon le message est rejoué indéfiniment.
-      if (terminal) await supabase.rpc("acknowledge_document_job", { message_id: claimByJob.get(job.id)?.message_id });
+      // `settled` recense les jobs déjà arrivés à un état définitif pendant CE passage
+      // (rejetés par le pré-filtre, ou déjà soumis). `rows` porte l'état lu au moment de
+      // la réservation : sans cette garde, une erreur survenue APRÈS un rejet réécrivait
+      // le job en `failed` et faisait disparaître le motif « pas une facture ».
+      if (settled.has(job.id) || job.status === "batched") return;
+      const terminal = (attemptByJob.get(job.id) ?? 1) >= MAX_ATTEMPTS || !isRetryableProcessingError(error);
+      await supabase.from("document_jobs")
+        .update({ status: terminal ? "failed" : "queued", last_error: userMessage.slice(0, 1000), updated_at: new Date().toISOString() })
+        .eq("id", job.id)
+        // Verrou optimiste : seul un job encore en cours de dispatch est rétrogradé.
+        .in("status", ["queued", "uploading_to_claude"]);
+      if (terminal) await releaseRemoteFile(supabase, job.id, aiApiKey);
     }));
     throw error;
   }
@@ -183,18 +274,45 @@ Deno.serve(async (request) => {
   const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
   const aiApiKey = Deno.env.get("ANTHROPIC_API_KEY")!;
   const batches: Array<{ batchId: string | null; documentCount: number }> = [];
+  let documentsHandled = 0;
+
+  // Découplage des tenants, symétrique de `process-direct-documents` : un appel de
+  // service (Cron) sert les organisations en tourniquet, un appel utilisateur est borné
+  // à SON organisation. Sans ça, n'importe quel utilisateur authentifié déclenchait — et
+  // pouvait faire échouer — le dispatch des documents des autres organisations.
+  const authorization = request.headers.get("authorization") ?? "";
+  const token = authorization.replace(/^Bearer\s+/i, "");
+  let scope: DispatchScope = { kind: "fair" };
+  if (token && !isServiceToken(token, serviceRoleKey)) {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) return jsonResponse({ error: "Unauthorized" }, { status: 401 });
+    const { data: role } = await supabase
+      .from("user_roles").select("org_id").eq("user_id", data.user.id).maybeSingle();
+    const orgId = (role as { org_id?: string } | null)?.org_id;
+    // Provisioning incomplet : pas d'organisation, donc aucun périmètre légitime. On
+    // refuse plutôt que de retomber sur le tourniquet, qui sert tout le monde.
+    if (!orgId) return jsonResponse({ error: "Forbidden" }, { status: 403 });
+    scope = { kind: "org", orgId };
+  }
 
   try {
-    for (let index = 0; index < MAX_BATCHES_PER_INVOCATION; index++) {
-      const result = await dispatchNextBatch(supabase, aiApiKey);
+    // Bornée par les documents traités, pas par le nombre de lots : une organisation qui
+    // a 200 documents en attente consomme tout le budget en UN lot, tandis que dix
+    // organisations avec 5 documents chacune sont toutes servies dans la même invocation.
+    while (documentsHandled < MAX_DOCUMENTS_PER_INVOCATION) {
+      const budget = Math.min(TARGET_BATCH_SIZE, MAX_DOCUMENTS_PER_INVOCATION - documentsHandled);
+      const result = await dispatchNextBatch(supabase, aiApiKey, scope, budget);
       if (!result) break;
-      if (result.documentCount > 0) batches.push(result);
+      documentsHandled += result.claimedCount;
+      if (result.documentCount > 0) batches.push({ batchId: result.batchId, documentCount: result.documentCount });
     }
     return jsonResponse({
       processed: batches.length > 0,
+      scope: scope.kind,
       batches,
       batch_count: batches.length,
       document_count: batches.reduce((total, batch) => total + batch.documentCount, 0),
+      documents_handled: documentsHandled,
       duration_ms: Date.now() - startedAt,
     });
   } catch (error) {

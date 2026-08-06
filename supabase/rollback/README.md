@@ -7,8 +7,22 @@ studio) en cas de retour arrière.
 
 | Ordre | Fichier | Effet | Destructif ? |
 |---|---|---|---|
-| 1 | `20260805000001_drop_extraction_batches_down.sql` | Recrée `extraction_batches` / `extraction_batch_items` (vides) | Non, mais les lots perdus ne reviennent pas |
-| 2 | `20260805000000_document_queue_down.sql` | Supprime la file, les 5 fonctions, les 3 Cron, `document_batches`, `invoices.auto_saved` | 🔴 **Perte totale de la file** |
+| −1 | `20260806000006_invoice_analytics_total_anomaly_count_down.sql` | Retire `anomaly_count` de la vue (DROP + recréation) | Non — mais l'Historique de /anomalies reperd les factures entièrement résolues |
+| 0 | `20260806000005_queue_health_and_leak_fix_down.sql` | Retire les fonctions de santé de la file ; `retry_document_job` recommence à détruire le pointeur du fichier distant | Non — mais 🔴 rétablit la fuite de PDF chez le fournisseur |
+| 0b | `20260806000004_org_scoped_anomaly_recompute_down.sql` | Le recalcul d'anomalies retransporte les identifiants dans l'URL | Non — mais replafonne à ~200 factures/org |
+| 1 | `20260806000003_auto_save_server_side_down.sql` | Retire le balayage Cron de l'enregistrement automatique | Non — mais il redevient dépendant d'un onglet ouvert |
+| 2 | `20260806000002_bigger_batches_down.sql` | Lots de 5 documents, collecte FIFO sans équité | Non — mais collecte ~10× plus lente |
+| 3 | `20260806000001_fair_dispatch_down.sql` | Recrée la file pgmq et les 3 fonctions associées, retire le tourniquet | Non — mais rétablit le couplage entre clients |
+| 4 | `20260806000000_org_scoped_dispatch_down.sql` | Supprime `claim_org_document_jobs` et son index | Non — mais rouvre le dispatch global aux appels utilisateur |
+| 5 | `20260805000001_drop_extraction_batches_down.sql` | Recrée `extraction_batches` / `extraction_batch_items` (vides) | Non, mais les lots perdus ne reviennent pas |
+| 6 | `20260805000000_document_queue_down.sql` | Supprime la file, les 5 fonctions, les 3 Cron, `document_batches`, `invoices.auto_saved` | 🔴 **Perte totale de la file** |
+
+> Chacun des rollbacks 1 à 3 exige de redéployer d'abord le code correspondant (tâche
+> planifiée, Edge Functions) — détail en tête de chaque fichier.
+
+> Le rollback 1 **doit** être précédé du redéploiement de `process-document-queue` en
+> version pgmq, et il ré-enfile lui-même les jobs `queued` restants — sans quoi ils ne
+> repartent jamais. Détail en tête du fichier.
 
 ## Règles impératives
 

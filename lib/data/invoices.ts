@@ -75,7 +75,10 @@ function avgConfidence(precision: Record<string, number> | null): number | null 
   return Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 100);
 }
 
-async function selectAll<T>(
+// Exporté : consumption.ts pagine avec le même utilitaire — sans lui, ses SELECT
+// étaient tronqués en silence à 1000 lignes (plafond PostgREST) et les analyses
+// sous-comptaient dès ~300 factures.
+export async function selectAll<T>(
   // PromiseLike : le query builder Supabase est un thenable (pas une Promise complète) ;
   // `unknown[]` évite le conflit entre les relations inférées (tableaux) et nos types Raw*.
   queryFactory: (from: number, to: number) => PromiseLike<{ data: unknown[] | null; error: unknown }>,
@@ -247,6 +250,7 @@ export async function getInvoiceDocsPage(filters: InvoiceListFilters = {}): Prom
 }
 
 /**
+<<<<<<< HEAD
  * Nombre de factures et total TTC par jour, pour la heatmap de la vue Calendrier.
  *
  * Agrégé en SQL et NON paginé : la liste, elle, l'est — un calendrier construit à partir de
@@ -281,7 +285,16 @@ export async function getInvoiceCalendarDays(filters: InvoiceListFilters = {}): 
 /**
  * Factures portant au moins une anomalie ouverte (page /anomalies).
  * Filtré en base via open_anomaly_count : inutile de charger tout le portefeuille pour
+=======
+ * Factures portant au moins une anomalie — ouvertes OU résolues (page /anomalies).
+ * Filtré en base via anomaly_count : inutile de charger tout le portefeuille pour
+>>>>>>> a510282 (upload facture en batch v2- fix suite au merge)
  * n'en garder ensuite qu'une poignée côté JS.
+ *
+ * `anomaly_count` (total) et non `open_anomaly_count` : filtrer sur les seules alertes
+ * ouvertes faisait disparaître une facture — et tout son historique de résolutions —
+ * dès que sa dernière alerte était résolue. L'onglet « Historique » ne montrait donc
+ * que les résolutions des factures encore en alerte.
  */
 export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   const ctx = await getUserContext();
@@ -295,7 +308,7 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
       .select(LIST_COLUMNS)
       .eq("org_id", ctx.orgId)
       .eq("archived", false)
-      .gt("open_anomaly_count", 0)
+      .gt("anomaly_count", 0)
       .order("facture_date", { ascending: false })
       .range(from, to),
   );
@@ -314,6 +327,41 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   }
 
   return docs;
+}
+
+/** Point du nuage « Montant vs consommation » de la page Anomalies. */
+export interface PortfolioPoint {
+  id: string;
+  kwh: number;
+  totalTtc: number;
+}
+
+/**
+ * Portefeuille complet (non archivé) pour le nuage de la page Anomalies.
+ *
+ * `getInvoiceDocs` ne charge que les factures portant une anomalie ouverte — c'est
+ * voulu pour le fil d'alertes, mais le nuage comparait alors les factures anormales
+ * à… rien : sans les factures saines, impossible de voir un point sortir du nuage.
+ * Trois colonnes seulement : le poids reste négligeable même à quelques milliers de
+ * factures.
+ */
+export async function getPortfolioScatter(): Promise<PortfolioPoint[] | null> {
+  const ctx = await getUserContext();
+  if (!ctx) return null;
+  const supabase = await createClient();
+  const rows = await selectAll<{ id: string; total_kwh: number | null; total_ttc: number | null }>(
+    (from, to) => supabase
+      .from("invoice_analytics")
+      .select("id, total_kwh, total_ttc")
+      .eq("org_id", ctx.orgId)
+      .eq("archived", false)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (!rows) return null;
+  return rows
+    .filter((row) => Number(row.total_kwh ?? 0) > 0)
+    .map((row) => ({ id: row.id, kwh: Number(row.total_kwh ?? 0), totalTtc: Number(row.total_ttc ?? 0) }));
 }
 
 /** Instantané des VRAIES factures (capturé via SQL) — repli pour le preview public. */

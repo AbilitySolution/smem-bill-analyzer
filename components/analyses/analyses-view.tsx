@@ -130,10 +130,12 @@ export function AnalysesView({
           options={[{ value: "", label: "Toutes" }, { value: "batiment", label: "Bâtiments" }, { value: "eclairage_public", label: "Éclairage public" }]} />
       </div>
 
-      {/* KPIs */}
-      <div className="mb-5 grid grid-cols-2 gap-4 lg:grid-cols-4">
+      {/* KPIs. « Prix moyen » est la même unité que la détection d'anomalies de coût
+          (c€/kWh, part variable seule) : les deux pages parlent la même langue. */}
+      <div className="mb-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
         <Kpi icon={Zap} label="Consommation totale" value={`${nf(analysis.kpis.totalKwh)} kWh`} />
         <Kpi icon={Euro} label="Coût total" value={`${nf(analysis.kpis.totalCost)} €`} />
+        <Kpi icon={Gauge} label="Prix moyen (variable)" value={`${analysis.kpis.avgPrice.toLocaleString("fr-FR")} c€/kWh`} />
         <Kpi icon={Plug} label="Abonnement (part fixe)" value={`${nf(analysis.kpis.aboEur)} €`} />
         <Kpi icon={FileText} label="Factures analysées" value={`${analysis.kpis.invoiceCount}`} />
       </div>
