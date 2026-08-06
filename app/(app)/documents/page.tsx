@@ -1,16 +1,18 @@
 import { DocumentsHub } from "@/components/documents/documents-hub";
 import {
-  getInvoiceDocsPage, DEMO_INVOICE_DOCS, PAGE_SIZES, DEFAULT_PAGE_SIZE,
+  getInvoiceDocsPage, getInvoiceCalendarDays, DEMO_INVOICE_DOCS, PAGE_SIZES, DEFAULT_PAGE_SIZE,
   type InvoiceDoc, type InvoiceListPage, type SortKey,
 } from "@/lib/data/invoices";
 import { getUserContext } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 
 const SORT_KEYS: SortKey[] = ["date", "number", "site", "commune", "kwh", "totalTtc"];
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const asDate = (v?: string) => (v && DATE_RE.test(v) ? v : undefined);
 
 interface SearchParams {
   q?: string; cat?: string; commune?: string; site?: string;
-  anomalies?: string; archived?: string;
+  anomalies?: string; archived?: string; from?: string; to?: string;
   sort?: string; dir?: string; page?: string; size?: string;
 }
 
@@ -23,6 +25,11 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
   const size = PAGE_SIZES.includes(Number(sp.size) as (typeof PAGE_SIZES)[number])
     ? Number(sp.size) : DEFAULT_PAGE_SIZE;
 
+  // Bornes inversées dans l'URL → on rétablit l'ordre plutôt que de renvoyer un ensemble vide.
+  let from = asDate(sp.from);
+  let to = asDate(sp.to);
+  if (from && to && from > to) [from, to] = [to, from];
+
   const filters = {
     query: sp.q,
     categorie: cat,
@@ -30,6 +37,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
     siteId: sp.site || undefined,
     onlyAnomalies: sp.anomalies === "1",
     showArchived: sp.archived === "1",
+    from, to,
     sort, dir,
     page: Math.max(1, Number(sp.page) || 1),
     pageSize: size,
@@ -45,15 +53,17 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
         communes={[]}
         sites={[]}
         filters={filters}
+        calendarDays={demoCalendarDays()}
       />
     );
   }
 
   const supabase = await createClient();
-  const [result, communesRes, sitesRes] = await Promise.all([
+  const [result, communesRes, sitesRes, calendarDays] = await Promise.all([
     getInvoiceDocsPage(filters),
     supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).order("nom"),
     supabase.from("sites").select("id, nom, commune_id").eq("org_id", ctx.orgId).order("nom"),
+    getInvoiceCalendarDays(filters),
   ]);
 
   const page = result ?? emptyPage(filters.page, filters.pageSize);
@@ -64,6 +74,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
       communes={communesRes.data ?? []}
       sites={sitesRes.data ?? []}
       filters={filters}
+      calendarDays={calendarDays}
     />
   );
 }
@@ -93,6 +104,20 @@ function demoPage(pageSize: number): InvoiceListPage {
     pageCount: Math.max(1, Math.ceil(DEMO_INVOICE_DOCS.length / pageSize)),
     isDemo: true,
   };
+}
+
+/** Agrégat par jour du jeu de démo — sans lui le calendrier serait vide en aperçu public. */
+function demoCalendarDays() {
+  const map = new Map<string, { count: number; ttc: number }>();
+  for (const d of DEMO_INVOICE_DOCS) {
+    const cur = map.get(d.date) ?? { count: 0, ttc: 0 };
+    cur.count += 1;
+    cur.ttc += d.totalTtc;
+    map.set(d.date, cur);
+  }
+  return [...map.entries()]
+    .map(([date, v]) => ({ date, count: v.count, ttc: v.ttc }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 /** Génère en lot les URLs signées des PDF pour les vignettes (galerie / aperçu). */

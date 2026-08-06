@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { getUserContext } from "@/lib/auth";
 import { topSeverity, type AnomalyLite, type Severity } from "./anomalies";
-import { DEFAULT_PAGE_SIZE, type InvoiceListFilters, type InvoiceListKpis, type SortKey } from "./invoice-list-params";
+import { DEFAULT_PAGE_SIZE, type CalendarDay, type InvoiceListFilters, type InvoiceListKpis, type SortKey } from "./invoice-list-params";
 
 export * from "./invoice-list-params";
 
@@ -181,6 +181,8 @@ export async function getInvoiceDocsPage(filters: InvoiceListFilters = {}): Prom
   if (filters.communeId) q = q.eq("commune_id", filters.communeId);
   if (filters.siteId) q = q.eq("site_id", filters.siteId);
   if (filters.onlyAnomalies) q = q.gt("open_anomaly_count", 0);
+  if (filters.from) q = q.gte("facture_date", filters.from);
+  if (filters.to) q = q.lte("facture_date", filters.to);
   if (query) {
     const escaped = query.replace(/[%,()]/g, " ");
     q = q.or(`facture_number.ilike.%${escaped}%,site_nom.ilike.%${escaped}%,commune_nom.ilike.%${escaped}%`);
@@ -194,6 +196,8 @@ export async function getInvoiceDocsPage(filters: InvoiceListFilters = {}): Prom
       // d'ordre entre deux pages et apparaître en double / disparaître.
       .order("id", { ascending: true })
       .range(from, from + pageSize - 1),
+    // La plage de dates est passée au RPC : sans elle, les KPIs porteraient sur tout le
+    // périmètre alors que la liste, elle, serait filtrée sur la période choisie.
     supabase.rpc("invoice_list_kpis", {
       p_query: query || null,
       p_categorie: filters.categorie ?? null,
@@ -201,6 +205,8 @@ export async function getInvoiceDocsPage(filters: InvoiceListFilters = {}): Prom
       p_site_id: filters.siteId ?? null,
       p_only_anomalies: !!filters.onlyAnomalies,
       p_show_archived: !!filters.showArchived,
+      p_from: filters.from ?? null,
+      p_to: filters.to ?? null,
     }),
   ]);
 
@@ -238,6 +244,38 @@ export async function getInvoiceDocsPage(filters: InvoiceListFilters = {}): Prom
     pageSize,
     pageCount: Math.max(1, Math.ceil(total / pageSize)),
   };
+}
+
+/**
+ * Nombre de factures et total TTC par jour, pour la heatmap de la vue Calendrier.
+ *
+ * Agrégé en SQL et NON paginé : la liste, elle, l'est — un calendrier construit à partir de
+ * la seule page affichée ne montrerait qu'une fraction des factures de l'année.
+ *
+ * La plage `from`/`to` est volontairement ignorée : le calendrier doit continuer à afficher
+ * l'année entière une fois une période sélectionnée, sinon on ne pourrait plus en choisir
+ * une autre. Les autres filtres (commune, site, catégorie…) sont eux appliqués.
+ */
+export async function getInvoiceCalendarDays(filters: InvoiceListFilters = {}): Promise<CalendarDay[]> {
+  const ctx = await getUserContext();
+  if (!ctx) return [];
+
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("invoice_calendar_days", {
+    p_query: filters.query?.trim() || null,
+    p_categorie: filters.categorie ?? null,
+    p_commune_id: filters.communeId ?? null,
+    p_site_id: filters.siteId ?? null,
+    p_only_anomalies: !!filters.onlyAnomalies,
+    p_show_archived: !!filters.showArchived,
+  });
+
+  if (error || !data) return [];
+  return (data as { jour: string; n: number; total_ttc: number }[]).map((r) => ({
+    date: r.jour,
+    count: Number(r.n ?? 0),
+    ttc: Number(r.total_ttc ?? 0),
+  }));
 }
 
 /**

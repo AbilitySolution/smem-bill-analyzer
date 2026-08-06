@@ -5,14 +5,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   Search, Download, Building2, Lightbulb, ChevronsUpDown, ChevronUp, ChevronDown,
-  List, LayoutGrid, Columns3, FileText, Loader2,
+  List, LayoutGrid, Columns3, CalendarDays, FileText, Loader2,
   Check, Eye, EyeOff, Zap, Euro, CalendarRange, Hash, AlertTriangle, X,
 } from "lucide-react";
 import type { InvoiceDoc, InvoiceListPage } from "@/lib/data/invoices";
-import type { SortKey } from "@/lib/data/invoice-list-params";
+import type { CalendarDay, PeriodFilter, SortKey } from "@/lib/data/invoice-list-params";
 import { SelectionBar } from "./selection-bar";
 import { DocumentCard } from "./document-card";
 import { ColumnsView } from "./columns-view";
+import { CalendarView } from "./calendar-view";
 import { ConfidenceBadge } from "./confidence-badge";
 import { AnomalyTicker } from "./anomaly-ticker";
 import { PaginationBar } from "./pagination-bar";
@@ -24,13 +25,28 @@ const catLabel = (c: string) => (c === "batiment" ? "Bâtiment" : "Éclairage pu
 const frDate = (d: string) => { const [y, m, j] = d.split("-"); return `${j}/${m}/${y}`; };
 
 type CatFilter = "" | "batiment" | "eclairage_public";
-type View = "liste" | "galerie" | "colonnes";
+type View = "liste" | "galerie" | "colonnes" | "calendrier";
 
 const VIEWS: { id: View; label: string; icon: typeof List }[] = [
   { id: "liste", label: "Liste", icon: List },
   { id: "galerie", label: "Galerie", icon: LayoutGrid },
   { id: "colonnes", label: "Colonnes", icon: Columns3 },
+  { id: "calendrier", label: "Calendrier", icon: CalendarDays },
 ];
+
+const frLong = (s: string) => {
+  const [y, m, d] = s.split("-").map(Number);
+  const mois = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+  return `${d} ${mois[m - 1]} ${y}`;
+};
+
+/** Libellé de la période active, reconstruit depuis l'URL (état partageable). */
+function periodLabel(from?: string, to?: string): string | null {
+  if (!from && !to) return null;
+  if (from && to && from === to) return frLong(from);
+  if (from && to) return `${frLong(from)} → ${frLong(to)}`;
+  return from ? `À partir du ${frLong(from)}` : `Jusqu'au ${frLong(to!)}`;
+}
 
 interface Commune { id: string; nom: string }
 interface Site { id: string; nom: string; commune_id: string | null }
@@ -42,6 +58,8 @@ export interface HubFilters {
   siteId?: string;
   onlyAnomalies?: boolean;
   showArchived?: boolean;
+  from?: string;
+  to?: string;
   sort: SortKey;
   dir: "asc" | "desc";
   page: number;
@@ -49,12 +67,14 @@ export interface HubFilters {
 }
 
 export function DocumentsHub({
-  result, communes, sites, filters,
+  result, communes, sites, filters, calendarDays = [],
 }: {
   result: InvoiceListPage;
   communes: Commune[];
   sites: Site[];
   filters: HubFilters;
+  /** Agrégat par jour sur tout le périmètre filtré (la liste, elle, est paginée). */
+  calendarDays?: CalendarDay[];
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -92,7 +112,15 @@ export function DocumentsHub({
 
   // Changer de page/filtre remplace le contenu : une sélection portant sur des lignes
   // qui ne sont plus affichées serait invisible et dangereuse (actions en masse).
-  useEffect(() => { setSelected(new Set()); }, [page, filters.query, filters.categorie, filters.communeId, filters.siteId, filters.onlyAnomalies, filters.showArchived]);
+  useEffect(() => { setSelected(new Set()); }, [page, filters.query, filters.categorie, filters.communeId, filters.siteId, filters.onlyAnomalies, filters.showArchived, filters.from, filters.to]);
+
+  /** Depuis le calendrier : filtre la liste sur la période choisie et bascule en vue Liste. */
+  function pickPeriod(p: PeriodFilter) {
+    setView("liste");
+    setParams({ from: p.from, to: p.to });
+  }
+
+  const activePeriod = periodLabel(filters.from, filters.to);
 
   const sitesForCommune = useMemo(
     () => (filters.communeId ? sites.filter((s) => s.commune_id === filters.communeId) : sites),
@@ -110,7 +138,7 @@ export function DocumentsHub({
   const allSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
   const selectedDocs = useMemo(() => docs.filter((d) => selected.has(d.id)), [docs, selected]);
 
-  const hasFilters = !!(filters.query || filters.categorie || filters.communeId || filters.siteId || filters.onlyAnomalies || filters.showArchived);
+  const hasFilters = !!(filters.query || filters.categorie || filters.communeId || filters.siteId || filters.onlyAnomalies || filters.showArchived || filters.from || filters.to);
 
   /** L'export porte sur tout le périmètre filtré, pas sur la page affichée. */
   function exportCsv() {
@@ -187,6 +215,15 @@ export function DocumentsHub({
             ))}
           </div>
 
+          {activePeriod && (
+            <button onClick={() => setParams({ from: undefined, to: undefined })}
+              title="Retirer le filtre de période"
+              className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-[#f97316] bg-[var(--kn-yellow-soft)] px-2.5 py-1.5 text-[12px] font-medium text-[#9a3412]">
+              <CalendarDays className="size-3.5" /> {activePeriod}
+              <X className="size-3.5" />
+            </button>
+          )}
+
           <div className="relative min-w-[200px] max-w-xs flex-1">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--kn-text-muted)]" strokeWidth={1.75} />
             <input value={queryDraft} onChange={(e) => setQueryDraft(e.target.value)}
@@ -258,7 +295,12 @@ export function DocumentsHub({
           </div>
         )}
 
-        {docs.length === 0 ? (
+        {/* Le calendrier passe AVANT le test « aucune facture » : il s'appuie sur l'agrégat
+            complet et doit rester affiché même si la page courante est vide, sans quoi on ne
+            pourrait plus choisir une autre période après un filtre sans résultat. */}
+        {view === "calendrier" ? (
+          <CalendarView days={calendarDays} onPick={pickPeriod} />
+        ) : docs.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--kn-text-muted)]">
             <FileText className="size-8" strokeWidth={1.4} />
             <p className="text-[13px]">{hasFilters ? "Aucune facture ne correspond à ces filtres." : "Aucune facture pour le moment."}</p>
@@ -297,13 +339,16 @@ export function DocumentsHub({
         )}
       </div>
 
-      <div className="shrink-0">
-        <PaginationBar
-          page={page} pageCount={pageCount} pageSize={pageSize} total={kpis.count} pending={pending}
-          onPage={(p) => setParams({ page: p }, false)}
-          onPageSize={(s) => setParams({ size: s })}
-        />
-      </div>
+      {/* Pas de pagination en vue Calendrier : elle affiche un agrégat, pas la page courante. */}
+      {view !== "calendrier" && (
+        <div className="shrink-0">
+          <PaginationBar
+            page={page} pageCount={pageCount} pageSize={pageSize} total={kpis.count} pending={pending}
+            onPage={(p) => setParams({ page: p }, false)}
+            onPageSize={(s) => setParams({ size: s })}
+          />
+        </div>
+      )}
 
       {selected.size > 0 && <SelectionBar selectedDocs={selectedDocs} onClear={clearSel} />}
     </div>
