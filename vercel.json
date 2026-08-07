@@ -9,5 +9,12 @@
       "path": "/api/cron/maintenance",
       "schedule": "30 5 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "api/internal/generate-report.py": {
+      "maxDuration": 300,
+      "memory": 3009,
+      "includeFiles": "{logo_smem.png,scripts/reports/**}"
+    }
+  }
 }

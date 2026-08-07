@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# script local de purge (ne pas versionner)
+/scripts/purge-invoice-data.ts
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

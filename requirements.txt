@@ -1,0 +1,5 @@
+# Dépendances de la fonction Vercel Python api/internal/generate-report.py.
+# scripts/reports/generate_report.py n'utilise QUE la stdlib en dehors d'openpyxl
+# (json, math, os, sys, urllib, zipfile, shutil, pathlib, datetime, collections).
+# Version alignée sur l'environnement de dev local.
+openpyxl==3.1.5

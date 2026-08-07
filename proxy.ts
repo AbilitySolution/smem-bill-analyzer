@@ -37,7 +37,13 @@ export async function proxy(request: NextRequest) {
     // Auto-save : appelée par le Cron Vercel (Bearer CRON_SECRET, pas de cookie de
     // session) ET par le navigateur (session). La route distingue les deux elle-même
     // et échoue fermée sans secret.
-    request.nextUrl.pathname === "/api/document-jobs/auto-save";
+    request.nextUrl.pathname === "/api/document-jobs/auto-save" ||
+    // Appels serveur-à-serveur vers les fonctions Python : le fetch interne émis
+    // par /api/reports ne porte aucun cookie de session et serait redirigé vers
+    // /login. Chaque fonction sous /api/internal/ DOIT vérifier
+    // REPORTS_INTERNAL_SECRET elle-même — c'est sa seule protection, le
+    // générateur tournant avec la service-role key (RLS contournée).
+    request.nextUrl.pathname.startsWith("/api/internal/");
 
   if (!data.user && !isPublic) {
     const url = request.nextUrl.clone();
