@@ -100,6 +100,39 @@ ANTHROPIC_API_KEY=<clé API Anthropic>
 > Si un cron Vercel pointe encore sur `/api/cron/sync-batches` (ancien import en lot),
 > supprimez-le : la route n'existe plus.
 
+> **⚠️ `/exploitation` (vue « Santé de la file », réservée à l'opérateur) — PAS ENCORE
+> ACTIVABLE.**
+>
+> Cette page compare `ctx.orgId` du membre connecté à la variable d'environnement
+> `PLATFORM_OPERATOR_ORG_ID` (`lib/auth-platform.ts`). Variable absente → tout le monde
+> reçoit 404, y compris l'exploitant légitime (échec fermé, voulu).
+>
+> Or, à ce jour, **une seule organisation existe en base : SMEM**. Il n'y a pas d'org
+> « Ability » distincte à désigner comme opérateur — poser `PLATFORM_OPERATOR_ORG_ID`
+> sur l'id de SMEM donnerait à n'importe quel admin SMEM une vue transverse sur TOUTES
+> les futures organisations clientes, ce qui casse l'isolation que la page est censée
+> garantir.
+>
+> **À faire avant d'activer :**
+>
+> 1. Créer l'organisation Ability :
+>    ```bash
+>    npx tsx scripts/provision-org.ts --org "Ability" --email <email-dédié>@...
+>    ```
+>    Utiliser un **e-mail dédié**, différent de tout compte déjà membre de SMEM — un
+>    utilisateur n'appartient qu'à une seule organisation (`user_roles.org_id`) ; migrer
+>    un compte SMEM existant vers Ability lui ferait perdre l'accès aux données SMEM.
+> 2. Récupérer son id :
+>    ```sql
+>    SELECT id FROM organizations WHERE nom = 'Ability';
+>    ```
+> 3. Poser cet UUID dans `PLATFORM_OPERATOR_ORG_ID` sur Vercel (Production), puis
+>    redéployer.
+>
+> Tant que ce n'est pas fait, `CRON_SECRET` seul suffit à faire tourner l'enregistrement
+> automatique et la maintenance quotidienne — `/exploitation` reste simplement 404 pour
+> tout le monde, sans casser le reste.
+
 Votre application sera alors disponible sur une URL du type :
 
 ```text

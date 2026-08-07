@@ -40,6 +40,11 @@ export const MAX_FILES_PER_REQUEST = 10;
  * le plafond de corps de requête de la plateforme (100 Mo sur Vercel Functions). Le
  * navigateur découpe donc la sélection sur les deux critères, avec de la marge pour
  * l'enveloppe MIME.
+ *
+ * Doit rester ≤ `proxyClientMaxBodySize` (next.config.ts) : Next 16 tronque/rejette
+ * en amont de cette route tout corps dépassant cette limite (10 Mo par défaut, non
+ * lié au plafond « plateforme » ci-dessus). Une valeur augmentée ici sans l'augmenter
+ * là-bas fait échouer en 413 les lots les plus lourds, silencieusement pour les autres.
  */
 export const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
 /**
