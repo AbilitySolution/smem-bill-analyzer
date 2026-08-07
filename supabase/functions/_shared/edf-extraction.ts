@@ -13,7 +13,6 @@
 // conforme plutôt que de l'enregistrer.
 
 export const AI_MODEL_OCR = "claude-sonnet-4-6";
-export const AI_MODEL_PREFILTER = "claude-haiku-4-5";
 
 // Règles générales en system prompt : plus stables, moins sensibles aux variations de mise en page.
 export const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF (électricité) pour des bâtiments publics et points d'éclairage public en France.
@@ -26,10 +25,19 @@ Règles générales :
 - Codes poste_tarifaire canoniques : HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN, EJPP.
   Même si la facture écrit "Heure P", "Heures Pleines", "H.P." → utiliser "HP". Idem pour HC et les variantes TEMPO.
 - Sur contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu lis le même prix pour HP et HC dans la même période, relis attentivement la facture.
-- precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).`;
+- precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).
+
+Classification (document_type) — à déterminer AVANT d'extraire :
+- "facture" : facture d'électricité individuelle — un numéro de facture et un montant pour un contrat/point de livraison. Une facture EDF Collectivités ou d'éclairage public rattachée à un bordereau ou à une facturation groupée reste une facture individuelle.
+- "bordereau_recapitulatif" : document qui ne fait que récapituler plusieurs factures dans un tableau, sans détail de consommation par poste.
+- "autre" : courrier, justificatif, ou tout document qui n'est ni une facture ni un bordereau.
+- En cas de doute, choisis "facture".
+- Si document_type n'est pas "facture" : renseigne document_type puis remplis les autres champs avec des valeurs vides (chaînes vides, 0, false, null, tableaux vides) — ils seront ignorés.`;
 
 // Instructions structurelles EDF dans le message user (contexte spécifique au document).
 export const EXTRACTION_PROMPT = `Extrait toutes les données structurées de cette facture EDF en utilisant l'outil extract_edf_invoice.
+
+Commence par document_type : si le document n'est pas une facture d'électricité individuelle (voir règles système), renseigne document_type et laisse les autres champs vides.
 
 Structure EDF :
 - "Part fixe / abonnement" → fixed_charges (une ligne par poste).
@@ -48,32 +56,19 @@ Autres :
 - commune_hint : nom de commune tel qu'il apparaît sur la facture (adresse client, espace de livraison, en-tête). Texte brut sans normaliser. Null si absent.
 - categorie_hint : "eclairage_public" si la facture mentionne éclairage public, armoire, candélabre, luminaire, voirie ; "batiment" sinon. Null si indéterminable.`;
 
-export const CLASSIFY_SYSTEM_PROMPT =
-  "Tu vérifies si un document est une facture d'électricité individuelle avant son traitement. Réponds uniquement avec l'outil classify_document.";
-
-export const CLASSIFY_PROMPT =
-  "Ce document est-il UNE facture d'électricité individuelle (un numéro de facture, un montant à payer pour un seul contrat) ? Ce n'est PAS une facture s'il s'agit d'un bordereau récapitulatif (liste de plusieurs factures dans un tableau), d'un courrier, d'un justificatif ou de tout autre document. En cas de doute, réponds true. Utilise l'outil classify_document.";
-
-export const classifyTool = {
-  name: "classify_document",
-  description: "Détermine si le document est une facture d'électricité individuelle avant extraction complète.",
-  input_schema: {
-    type: "object",
-    properties: {
-      is_facture_electricite: { type: "boolean" },
-      type_document: { type: "string", enum: ["facture", "bordereau_recapitulatif", "autre"] },
-    },
-    required: ["is_facture_electricite", "type_document"],
-  },
-};
-
 export const extractionTool = {
   name: "extract_edf_invoice",
   description:
-    "Extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, charges fixes, lignes de consommation, taxes).",
+    "Classe le document (facture individuelle, bordereau récapitulatif, autre) puis extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, charges fixes, lignes de consommation, taxes).",
   input_schema: {
     type: "object",
     properties: {
+      document_type: {
+        type: "string",
+        enum: ["facture", "bordereau_recapitulatif", "autre"],
+        description:
+          "'facture' = facture d'électricité individuelle (une facture EDF Collectivités ou d'éclairage public rattachée à un bordereau reste une facture individuelle). 'bordereau_recapitulatif' = tableau récapitulant plusieurs factures sans détail par poste. 'autre' = courrier, justificatif, document hors sujet. En cas de doute : 'facture'.",
+      },
       client: {
         type: "object",
         properties: {
@@ -265,6 +260,7 @@ IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus che
       },
     },
     required: [
+      "document_type",
       "client",
       "contract",
       "invoice",

@@ -95,6 +95,8 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   const [activeUploadJobIds, setActiveUploadJobIds] = useState<string[]>([]);
   const [selectedReviewJobIds, setSelectedReviewJobIds] = useState<Set<string>>(new Set());
   const [deletingReviewJobs, setDeletingReviewJobs] = useState(false);
+  const [deletingAllJobs, setDeletingAllJobs] = useState(false);
+  const [retryingRejected, setRetryingRejected] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   /** Incrémenté par « Actualiser » : relance aussi l'enregistrement automatique en échec. */
   const [manualSyncCount, setManualSyncCount] = useState(0);
@@ -481,13 +483,8 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     });
   }
 
-  async function deleteSelectedReviewJobs() {
-    const ids = [...selectedReviewJobIds];
-    if (!ids.length) return;
-    if (!window.confirm(`Supprimer ${ids.length} facture${ids.length > 1 ? "s" : ""} à réviser ? Les extractions seront perdues.`)) return;
-
-    setDeletingReviewJobs(true);
-    setError(null);
+  /** Suppression en masse, partagée entre la sélection « à réviser » et « Tout supprimer ». */
+  async function deleteJobsByIds(ids: string[]) {
     const results = await Promise.all(ids.map(async (jobId) => {
       try {
         const response = await fetch(`/api/document-jobs/${jobId}`, { method: "DELETE" });
@@ -509,13 +506,68 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     setJobs((current) => current.filter((job) => !deletedIds.includes(job.id)));
     if (failedCount) setError(`${failedCount} suppression${failedCount > 1 ? "s ont" : " a"} échoué. Veuillez réessayer.`);
     await refreshJobs();
+  }
+
+  async function deleteSelectedReviewJobs() {
+    const ids = [...selectedReviewJobIds];
+    if (!ids.length) return;
+    if (!window.confirm(`Supprimer ${ids.length} facture${ids.length > 1 ? "s" : ""} à réviser ? Les extractions seront perdues.`)) return;
+
+    setDeletingReviewJobs(true);
+    setError(null);
+    await deleteJobsByIds(ids);
     setDeletingReviewJobs(false);
+  }
+
+  /** « Tout supprimer » : vide la file visible (tous les jobs non terminés). */
+  async function deleteAllQueueJobs() {
+    const ids = jobs.filter((job) => job.status !== "completed").map((job) => job.id);
+    if (!ids.length || deletingAllJobs) return;
+    if (!window.confirm(`Supprimer les ${ids.length} documents de la file ? Les extractions seront perdues.`)) return;
+
+    setDeletingAllJobs(true);
+    setError(null);
+    await deleteJobsByIds(ids);
+    setDeletingAllJobs(false);
+  }
+
+  /** « Tout traiter quand même » : relance chaque document ignoré en forçant l'extraction. */
+  async function retryAllRejected() {
+    const targets = jobs.filter((job) => job.status === "rejected_non_invoice");
+    if (!targets.length || retryingRejected) return;
+
+    setRetryingRejected(true);
+    setError(null);
+    const results = await Promise.all(targets.map(async (job) => {
+      try {
+        const response = await fetch(`/api/document-jobs/${job.id}`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "retry" }),
+        });
+        return { job, ok: response.ok };
+      } catch {
+        return { job, ok: false };
+      }
+    }));
+    const relaunched = results.filter(({ ok }) => ok);
+    // Un job relancé redevient candidat à l'enregistrement automatique quand son
+    // extraction reviendra — même logique que la relance unitaire.
+    relaunched.forEach(({ job }) => autoProcessedRef.current.delete(job.id));
+    const failedCount = results.length - relaunched.length;
+    if (failedCount) setError(`${failedCount} relance${failedCount > 1 ? "s ont" : " a"} échoué. Utilisez « Actualiser » puis réessayez.`);
+    await refreshJobs();
+    // Démarrage opportuniste groupé par mode, comme au dépôt initial.
+    const directIds = relaunched.filter(({ job }) => job.processing_mode === "direct").map(({ job }) => job.id);
+    const batchIds = relaunched.filter(({ job }) => job.processing_mode !== "direct").map(({ job }) => job.id);
+    if (directIds.length) startProcessing("direct", directIds);
+    if (batchIds.length) startProcessing("batch", batchIds);
+    setRetryingRejected(false);
   }
 
   // File de traitement : tout ce qui n'est pas terminé. Un job `completed` = facture
   // enregistrée (ou doublon déjà en base) → il sort de la file, il reste visible dans
   // Mes documents.
   const queueJobs = jobs.filter((job) => job.status !== "completed");
+  const rejectedQueueCount = queueJobs.filter((job) => job.status === "rejected_non_invoice").length;
   // Repli quand le suivi du dépôt est perdu : les jobs récents, **terminés compris**.
   // L'ancien repli ne gardait que les jobs non terminaux : chaque document qui finissait
   // quittait l'ensemble suivi, si bien que la barre restait bloquée à 0 % puis
@@ -774,7 +826,31 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
       <div className="mt-8">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold text-[var(--kn-text)]">File de traitement</h2>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {rejectedQueueCount > 1 && (
+              <button
+                type="button"
+                disabled={retryingRejected || submitting}
+                onClick={() => void retryAllRejected()}
+                title="Relance tous les documents ignorés en forçant l'extraction complète."
+                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold text-[var(--kn-text)] transition-colors hover:border-[#f97316] hover:bg-[var(--kn-active)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {retryingRejected ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                Tout traiter quand même ({rejectedQueueCount})
+              </button>
+            )}
+            {queueJobs.length > 1 && (
+              <button
+                type="button"
+                disabled={deletingAllJobs || retryingRejected}
+                onClick={() => void deleteAllQueueJobs()}
+                title="Supprime tous les documents de la file. Les extractions seront perdues."
+                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deletingAllJobs ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                Tout supprimer
+              </button>
+            )}
             {selectedReviewJobIds.size > 0 && (
               <button
                 type="button"

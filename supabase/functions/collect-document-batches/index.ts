@@ -4,7 +4,7 @@
 // Invoqué par le Cron `collect-claude-batches` toutes les minutes.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { releaseRemoteFile } from "../_shared/ai-client.ts";
+import { documentTypeOf, releaseRemoteFile } from "../_shared/ai-client.ts";
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
 
@@ -102,18 +102,30 @@ async function collectBatch(
   // et chacun coûte ~4 allers-retours base plus une suppression de fichier chez le
   // fournisseur. En série, une invocation de 10 lots dépasserait la minute du Cron.
   const outcomes = await mapWithConcurrency(lines, LINE_CONCURRENCY, async (line) => {
-    const { data: job } = await supabase.from("document_jobs").select("id, anthropic_file_id").eq("id", line.custom_id).maybeSingle();
+    const { data: job } = await supabase.from("document_jobs").select("id, anthropic_file_id, skip_prefilter").eq("id", line.custom_id).maybeSingle();
     if (!job) return "skipped" as const;
     let outcome: "succeeded" | "failed";
     try {
       const extraction = extractionFromResult(line);
       const resultAvailableAt = new Date().toISOString();
-      await supabase.from("document_jobs").update({
-        status: "needs_review", extraction_json: extraction,
-        validation_json: { anthropic_usage: line.result.message?.usage ?? null },
-        completed_at: resultAvailableAt, result_available_at: resultAvailableAt,
-        updated_at: resultAvailableAt, last_error: null,
-      }).eq("id", job.id);
+      // Verdict rendu par l'extraction elle-même (`document_type`) : un bordereau ou un
+      // document hors sujet est marqué ignoré ici, dans le même appel modèle que
+      // l'extraction. `skip_prefilter` (« Traiter quand même ») force l'acceptation.
+      const documentType = documentTypeOf(extraction);
+      if (documentType !== "facture" && !job.skip_prefilter) {
+        await supabase.from("document_jobs").update({
+          status: "rejected_non_invoice", prefilter_type: documentType,
+          completed_at: resultAvailableAt, result_available_at: resultAvailableAt,
+          updated_at: resultAvailableAt, last_error: null,
+        }).eq("id", job.id);
+      } else {
+        await supabase.from("document_jobs").update({
+          status: "needs_review", extraction_json: extraction,
+          validation_json: { anthropic_usage: line.result.message?.usage ?? null },
+          completed_at: resultAvailableAt, result_available_at: resultAvailableAt,
+          updated_at: resultAvailableAt, last_error: null,
+        }).eq("id", job.id);
+      }
       outcome = "succeeded";
     } catch (error) {
       const { userMessage, logMessage } = toUserSafeError(error);

@@ -188,9 +188,11 @@ perdu ne perd donc jamais de document : la ligne reste en base et reste relança
 2. `POST /api/document-jobs` revérifie tout — un `.pdf` qui n'en est pas un est rejeté
    ici — écrit le fichier sous `invoice-files/{org_id}/{user_id}/queue/…` et crée le job.
    En mode `batch`, le job est mis en file pgmq.
-3. Les workers (Edge Functions Deno) **pré-filtrent** avec un modèle bon marché : un
-   bordereau récapitulatif ou un courrier est marqué `rejected_non_invoice` sans payer
-   l'extraction complète. Le pré-filtre en panne laisse passer — il ne perd rien.
+3. Les workers (Edge Functions Deno) envoient chaque document en extraction ; le modèle
+   **classe le document dans le même appel** (champ `document_type` de l'outil) : un
+   bordereau récapitulatif ou un courrier est marqué `rejected_non_invoice` — un seul
+   appel modèle par document, jamais deux. Verdict absent ou inconnu = facture (biais
+   vers l'acceptation).
 4. Le résultat passe le job en `needs_review`. La page suit la progression en
    **Realtime** ; un sondage prend le relais si le canal décroche.
 5. `POST /api/document-jobs/auto-save` enregistre automatiquement les factures dont
@@ -205,8 +207,9 @@ perdu ne perd donc jamais de document : la ligne reste en base et reste relança
   raccourci pour ne pas attendre le tick suivant.
 - **Facture déjà en base** → le job est clos en pointant la facture existante
   (contrôle sur `facture_number`), aucun doublon créé.
-- **Rejet à tort** → « Traiter quand même » relance en forçant l'extraction
-  (`skip_prefilter`), sans repasser par le classifieur.
+- **Rejet à tort** → « Traiter quand même » (ou « Tout traiter quand même » pour un
+  lot entier) relance en forçant l'acceptation (`skip_prefilter`) : le verdict
+  `document_type` du modèle est alors ignoré.
 - **Plafonds** : 20 Mo par document, 200 documents et 500 Mo par sélection, 100 Mo par
   archive. Contrôlés des deux côtés.
 - **Les fichiers distants sont toujours supprimés** après extraction, et le fichier du

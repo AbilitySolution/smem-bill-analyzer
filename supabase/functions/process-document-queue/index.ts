@@ -1,5 +1,7 @@
 // Worker du mode `batch` : réserve des jobs, téléverse les fichiers chez le
-// fournisseur, pré-filtre, puis soumet un lot Message Batches.
+// fournisseur, puis soumet un lot Message Batches. La classification facture /
+// non-facture est rendue par l'extraction elle-même (`document_type`) et lue à la
+// collecte — plus d'appel modèle séparé.
 //
 // Invoqué par le Cron `dispatch-claude-batches` toutes les minutes, et directement par
 // le navigateur au dépôt pour ne pas attendre le tick suivant.
@@ -11,7 +13,7 @@
 // client qui dépose 200 factures ne fait plus attendre celui qui en dépose 2.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { aiRequest, isRetryableProcessingError, releaseRemoteFile, uploadDocument, classifyDocument } from "../_shared/ai-client.ts";
+import { aiRequest, isRetryableProcessingError, releaseRemoteFile, uploadDocument } from "../_shared/ai-client.ts";
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
@@ -113,7 +115,6 @@ type DispatchScope = { kind: "fair" } | { kind: "org"; orgId: string };
 type PreparedJob = { kind: "prepared"; id: string; mime_type: string; anthropic_file_id: string };
 type UploadOutcome =
   | PreparedJob
-  | { kind: "rejected"; id: string }
   | { kind: "failed"; id: string; error: unknown };
 
 /**
@@ -172,33 +173,10 @@ async function dispatchNextBatch(
           const uploadedAt = new Date().toISOString();
           await supabase.from("document_jobs").update({ anthropic_file_id: uploadedFileId, claude_file_uploaded_at: uploadedAt, updated_at: uploadedAt }).eq("id", job.id);
         }
-        // Figé dans un `const` : le `try/catch` du pré-filtre ci-dessous fait perdre à
-        // TypeScript le rétrécissement d'un `let`, et `fileId` repassait `string | null`.
-        const fileId = uploadedFileId;
-
-        if (!job.skip_prefilter) {
-          try {
-            const classification = await classifyDocument(fileId, job.mime_type, aiApiKey);
-            if (!classification.isInvoice) {
-              const now = new Date().toISOString();
-              await supabase.from("document_jobs").update({
-                status: "rejected_non_invoice",
-                prefilter_type: classification.type,
-                completed_at: now,
-                result_available_at: now,
-                updated_at: now,
-                last_error: null,
-              }).eq("id", job.id);
-              await releaseRemoteFile(supabase, job.id, aiApiKey);
-              return { kind: "rejected", id: job.id };
-            }
-          } catch {
-            // Classifieur indisponible ou réponse invalide : on ne bloque pas le lot,
-            // le document part en extraction normale (biais volontaire vers l'acceptation).
-          }
-        }
-
-        return { kind: "prepared", id: job.id, mime_type: job.mime_type, anthropic_file_id: fileId };
+        // Plus de pré-filtre au dispatch : la classification (`document_type`) est rendue
+        // par l'appel d'extraction lui-même et lue par `collect-document-batches` au
+        // retour du lot — un seul appel modèle par document, quoi qu'il arrive.
+        return { kind: "prepared", id: job.id, mime_type: job.mime_type, anthropic_file_id: uploadedFileId };
       } catch (error) {
         return { kind: "failed", id: job.id, error };
       }
@@ -220,9 +198,7 @@ async function dispatchNextBatch(
       if (terminal) await releaseRemoteFile(supabase, outcome.id, aiApiKey);
     }
 
-    const rejectedJobs = outcomes.filter((outcome) => outcome.kind === "rejected");
     const acceptedJobs = outcomes.filter((outcome): outcome is PreparedJob => outcome.kind === "prepared");
-    rejectedJobs.forEach((job) => settled.add(job.id));
     prepared.push(...acceptedJobs.map(({ id, mime_type, anthropic_file_id }) => ({ id, mime_type, anthropic_file_id })));
 
     if (!prepared.length) return { batchId: null, documentCount: 0, claimedCount: rows.length };
@@ -248,9 +224,9 @@ async function dispatchNextBatch(
     console.error("[process-document-queue] dispatch error:", logMessage);
     await Promise.all(rows.map(async (job) => {
       // `settled` recense les jobs déjà arrivés à un état définitif pendant CE passage
-      // (rejetés par le pré-filtre, ou déjà soumis). `rows` porte l'état lu au moment de
-      // la réservation : sans cette garde, une erreur survenue APRÈS un rejet réécrivait
-      // le job en `failed` et faisait disparaître le motif « pas une facture ».
+      // (échec individuel traité plus haut). `rows` porte l'état lu au moment de la
+      // réservation : sans cette garde, une erreur survenue APRÈS coup réécrivait un
+      // job déjà réglé et effaçait son motif d'origine.
       if (settled.has(job.id) || job.status === "batched") return;
       const terminal = (attemptByJob.get(job.id) ?? 1) >= MAX_ATTEMPTS || !isRetryableProcessingError(error);
       await supabase.from("document_jobs")

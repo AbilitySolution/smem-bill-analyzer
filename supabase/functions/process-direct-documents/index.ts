@@ -7,7 +7,7 @@
 //     est alors filtrée sur `created_by`. Permet de démarrer sans attendre le tick.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { aiRequest, classifyDocument, isRetryableProcessingError, releaseRemoteFile, uploadDocument } from "../_shared/ai-client.ts";
+import { aiRequest, documentTypeOf, isRetryableProcessingError, releaseRemoteFile, uploadDocument } from "../_shared/ai-client.ts";
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
@@ -39,20 +39,7 @@ async function extractInvoice(job: DocumentJob, supabase: ReturnType<typeof crea
     uploadedFileId = await uploadDocument(file, job.original_name, apiKey);
     await supabase.from("document_jobs").update({ anthropic_file_id: uploadedFileId, claude_file_uploaded_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", job.id);
   }
-  // Figé dans un `const` : le `try/catch` du pré-filtre ci-dessous fait perdre à
-  // TypeScript le rétrécissement d'un `let`, et `fileId` repassait `string | null` alors
-  // qu'il est garanti non nul ici. `ExtractionOutcome` le déclare `string`.
   const fileId = uploadedFileId;
-
-  if (!job.skip_prefilter) {
-    try {
-      const classification = await classifyDocument(fileId, job.mime_type, apiKey);
-      if (!classification.isInvoice) return { kind: "rejected", type: classification.type, fileId };
-    } catch {
-      // Classifieur indisponible ou réponse invalide : on ne bloque pas le document,
-      // il part en extraction normale (biais volontaire vers l'acceptation).
-    }
-  }
 
   const blockType = job.mime_type === "application/pdf" ? "document" : "image";
   const response = await aiRequest("/v1/messages", apiKey, {
@@ -76,6 +63,12 @@ async function extractInvoice(job: DocumentJob, supabase: ReturnType<typeof crea
   const message = await response.json() as { content?: Array<{ type: string; input?: unknown }>; usage?: Record<string, number> };
   const toolUse = message.content?.find((block) => block.type === "tool_use");
   if (!toolUse?.input || typeof toolUse.input !== "object") throw new Error("L'extraction structurée n'a pas été retournée");
+  // Classification rendue par l'appel d'extraction lui-même (`document_type`) : plus de
+  // pré-filtre séparé. `skip_prefilter` (« Traiter quand même ») force l'acceptation.
+  const documentType = documentTypeOf(toolUse.input);
+  if (documentType !== "facture" && !job.skip_prefilter) {
+    return { kind: "rejected", type: documentType, fileId };
+  }
   return { kind: "extracted", extraction: toolUse.input, usage: message.usage ?? null, fileId };
 }
 

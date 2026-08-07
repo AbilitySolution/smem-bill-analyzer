@@ -39,6 +39,9 @@ export const taxItemSchema = z.object({
 });
 
 export const invoiceExtractionSchema = z.object({
+  // Classification rendue par l'appel d'extraction lui-même. Optionnel : les extractions
+  // antérieures à ce champ n'en ont pas — absence = facture.
+  document_type: z.enum(["facture", "bordereau_recapitulatif", "autre"]).optional(),
   client: z.object({
     nom: z.string(),
     reference_client: z.string().nullable(),
@@ -82,10 +85,16 @@ export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
 export const invoiceExtractionToolSchema = {
   name: "extract_edf_invoice",
   description:
-    "Extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, charges fixes, lignes de consommation, taxes).",
+    "Classe le document (facture individuelle, bordereau récapitulatif, autre) puis extrait les données structurées d'une facture EDF (client, contrat, en-tête facture, charges fixes, lignes de consommation, taxes).",
   input_schema: {
     type: "object" as const,
     properties: {
+      document_type: {
+        type: "string",
+        enum: ["facture", "bordereau_recapitulatif", "autre"],
+        description:
+          "'facture' = facture d'électricité individuelle (une facture EDF Collectivités ou d'éclairage public rattachée à un bordereau reste une facture individuelle). 'bordereau_recapitulatif' = tableau récapitulant plusieurs factures sans détail par poste. 'autre' = courrier, justificatif, document hors sujet. En cas de doute : 'facture'.",
+      },
       client: {
         type: "object",
         properties: {
@@ -277,6 +286,7 @@ IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus che
       },
     },
     required: [
+      "document_type",
       "client",
       "contract",
       "invoice",

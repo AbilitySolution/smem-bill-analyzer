@@ -35,10 +35,19 @@ Règles générales :
 - Codes poste_tarifaire canoniques : HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN, EJPP.
   Même si la facture écrit "Heure P", "Heures Pleines", "H.P." → utiliser "HP". Idem pour HC et les variantes TEMPO.
 - Sur contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu lis le même prix pour HP et HC dans la même période, relis attentivement la facture.
-- precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).`;
+- precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).
+
+Classification (document_type) — à déterminer AVANT d'extraire :
+- "facture" : facture d'électricité individuelle — un numéro de facture et un montant pour un contrat/point de livraison. Une facture EDF Collectivités ou d'éclairage public rattachée à un bordereau ou à une facturation groupée reste une facture individuelle.
+- "bordereau_recapitulatif" : document qui ne fait que récapituler plusieurs factures dans un tableau, sans détail de consommation par poste.
+- "autre" : courrier, justificatif, ou tout document qui n'est ni une facture ni un bordereau.
+- En cas de doute, choisis "facture".
+- Si document_type n'est pas "facture" : renseigne document_type puis remplis les autres champs avec des valeurs vides (chaînes vides, 0, false, null, tableaux vides) — ils seront ignorés.`;
 
 // Instructions structurelles EDF dans le message user (contexte document spécifique à chaque facture).
 export const EXTRACTION_PROMPT = `Extrait toutes les données structurées de cette facture EDF en utilisant l'outil extract_edf_invoice.
+
+Commence par document_type : si le document n'est pas une facture d'électricité individuelle (voir règles système), renseigne document_type et laisse les autres champs vides.
 
 Structure EDF :
 - "Part fixe / abonnement" → fixed_charges (une ligne par poste).
@@ -89,7 +98,7 @@ export function buildExtractionParams(
 
 export type ParseExtractionResult =
   | { ok: true; data: InvoiceExtraction }
-  | { ok: false; error: string; details?: unknown };
+  | { ok: false; error: string; details?: unknown; documentType?: "bordereau_recapitulatif" | "autre" };
 
 /**
  * Lit le `tool_use` de la réponse et le valide contre le schéma.
@@ -104,6 +113,19 @@ export function parseExtractionResponse(
   const toolUse = content.find((block) => block.type === "tool_use");
   if (!toolUse || toolUse.type !== "tool_use") {
     return { ok: false, error: "Claude n'a pas retourné d'extraction." };
+  }
+
+  // Verdict de classification rendu par l'appel d'extraction lui-même : un document
+  // jugé non-facture n'est pas validé champ à champ (ses champs sont vides à dessein).
+  const documentType = (toolUse.input as { document_type?: unknown } | null)?.document_type;
+  if (documentType === "bordereau_recapitulatif" || documentType === "autre") {
+    return {
+      ok: false,
+      documentType,
+      error: documentType === "bordereau_recapitulatif"
+        ? "Ce document est un bordereau récapitulatif, pas une facture individuelle."
+        : "Ce document n'a pas été reconnu comme une facture d'électricité.",
+    };
   }
 
   const parsed = invoiceExtractionSchema.safeParse(toolUse.input);
