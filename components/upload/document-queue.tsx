@@ -10,13 +10,17 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  BATCH_JOBS_PER_INVOCATION, DIRECT_DOCUMENT_LIMIT, DIRECT_JOBS_PER_INVOCATION,
-  MAX_ARCHIVE_SIZE, MAX_FILES, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
+  BATCH_JOBS_PER_INVOCATION, DIRECT_JOBS_PER_INVOCATION,
+  MAX_ARCHIVE_SIZE, MAX_FILES, MAX_FILE_SIZE, MAX_TOTAL_SIZE, STATUS_PROGRESS, UPLOAD_DEBOUNCE_MS,
   buildQueueStoragePath, chunkForUpload, detectDocumentType, extensionOf, mimeTypeFromName, processingModeFor,
 } from "@/lib/documents/queue";
 import {
   estimateForDocumentCount, estimateRemainingForJobs, type ProcessingEstimateStats,
 } from "@/lib/documents/processing-estimate";
+import { MULTI_INVOICE_PAGE_THRESHOLD, type DetectedInvoice } from "@/lib/anthropic/invoice-splitting";
+import { countPdfPages, splitPdfByRanges } from "@/lib/documents/pdf-split";
+import { SplitConfirmation, type SplitCandidate } from "@/components/upload/split-confirmation";
+import { LocalFileThumb } from "@/components/upload/local-file-thumb";
 import { isTerminalJobStatus, type DocumentJob, type DocumentJobStatus } from "@/lib/types/document-job";
 
 type AutoSavedEntry = { jobId: string; invoiceId: string; factureNumber: string; lowConfidence: boolean };
@@ -197,6 +201,12 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
   const [deletingReviewJobs, setDeletingReviewJobs] = useState(false);
   const [deletingAllJobs, setDeletingAllJobs] = useState(false);
   const [retryingRejected, setRetryingRejected] = useState(false);
+  /**
+   * Scan multi-factures en attente de validation. Tant qu'il est posé, rien n'est mis
+   * en file : l'utilisateur doit d'abord confirmer le découpage.
+   */
+  const [splitCandidate, setSplitCandidate] = useState<(SplitCandidate & { tempPath: string }) | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
   const [fileSearch, setFileSearch] = useState("");
   const [queueSearch, setQueueSearch] = useState("");
   const [queueBucketFilter, setQueueBucketFilter] = useState<QueueBucket | "all">("all");
@@ -498,8 +508,116 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
    * démarrés, seuls les fichiers réellement non envoyés restent dans la sélection. Sans
    * ça, un utilisateur qui relançait après une erreur re-téléversait les lots déjà passés.
    */
+  /**
+   * Cherche dans la sélection le premier PDF assez épais pour contenir plusieurs
+   * factures, et le fait analyser.
+   *
+   * Le fichier est déposé dans le bucket avant l'analyse : la route lit depuis le
+   * stockage plutôt que de recevoir le PDF (jusqu'à 11,5 Mo, très au-delà du plafond
+   * de corps de requête d'une Vercel Function). Le dépôt est temporaire — il est retiré
+   * après découpage comme après annulation.
+   *
+   * Renvoie `true` si un candidat attend une validation : l'appelant s'arrête là.
+   */
+  async function detectSplitCandidate(): Promise<boolean> {
+    const supabase = createClient();
+    for (const file of files) {
+      if (file.type !== "application/pdf") continue;
+      const pageCount = await countPdfPages(file).catch(() => 0);
+      if (pageCount < MULTI_INVOICE_PAGE_THRESHOLD) continue;
+
+      setAnalyzing(true);
+      const tempPath = buildQueueStoragePath(orgId, userId, `split-${crypto.randomUUID()}`, file.name);
+      try {
+        const { error: uploadError } = await supabase.storage.from("invoice-files")
+          .upload(tempPath, file, { contentType: file.type, upsert: false });
+        if (uploadError) throw new Error(uploadError.message);
+
+        const response = await fetch("/api/documents/detect-invoices", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ file_path: tempPath }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error ?? "Analyse impossible.");
+
+        const invoices = (payload.invoices ?? []) as DetectedInvoice[];
+        // Une seule facture détectée : le document est une facture normale qui tient sur
+        // plusieurs pages. Rien à découper, rien à demander à l'utilisateur.
+        if (invoices.length <= 1) {
+          await supabase.storage.from("invoice-files").remove([tempPath]);
+          continue;
+        }
+
+        setSplitCandidate({ file, pageCount: payload.page_count ?? pageCount, invoices, tempPath });
+        return true;
+      } catch (reason) {
+        await supabase.storage.from("invoice-files").remove([tempPath]).catch(() => {});
+        setError(
+          `${file.name} : ${reason instanceof Error ? reason.message : "analyse impossible"} — le document sera importé tel quel.`,
+        );
+        // Analyse en échec : on ne bloque pas l'import, le document part par le chemin
+        // normal. Il ressortira « ignoré » s'il s'agit bien d'un scan multi-factures.
+        continue;
+      } finally {
+        setAnalyzing(false);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Démarrage automatique de l'import, une fois le dépôt stabilisé.
+   *
+   * Remplace le bouton « ajouter à la file » : déposer des fichiers EST l'intention,
+   * la confirmation ne protégeait de rien (une erreur se corrige en supprimant la ligne
+   * dans la liste). Le délai regroupe les glissers successifs en un seul lot — c'est
+   * lui qui permet au tarif réduit de s'appliquer, un lot morcelé coûtant le double.
+   */
+  useEffect(() => {
+    if (!files.length || submitting || analyzing || splitCandidate) return;
+    const timer = window.setTimeout(() => { void submit(); }, UPLOAD_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+    // `submit` est recréé à chaque rendu : le référencer relancerait le minuteur en
+    // boucle. Les états qui doivent vraiment réarmer l'attente sont listés ici.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, submitting, analyzing, splitCandidate]);
+
+  /** Découpe le candidat validé et remplace le scan d'origine par ses morceaux. */
+  async function confirmSplit(accepted: DetectedInvoice[]) {
+    if (!splitCandidate) return;
+    setSubmitting(true);
+    try {
+      const parts = await splitPdfByRanges(splitCandidate.file, accepted);
+      const supabase = createClient();
+      await supabase.storage.from("invoice-files").remove([splitCandidate.tempPath]).catch(() => {});
+      setFiles((current) => current.flatMap((file) => file === splitCandidate.file ? parts : [file]));
+      setSplitCandidate(null);
+    } catch {
+      setError("Découpage impossible — réessayez ou scindez le PDF avant l'import.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** Abandon du découpage : le scan est retiré de la sélection, les autres restent. */
+  async function cancelSplit() {
+    if (!splitCandidate) return;
+    const supabase = createClient();
+    await supabase.storage.from("invoice-files").remove([splitCandidate.tempPath]).catch(() => {});
+    setFiles((current) => current.filter((file) => file !== splitCandidate.file));
+    setSplitCandidate(null);
+    setError(`${splitCandidate.file.name} retiré de la sélection — découpez-le avant de le réimporter.`);
+  }
+
   async function submit() {
-    if (!files.length || submitting) return;
+    if (!files.length || submitting || analyzing) return;
+
+    // Point d'arrêt : un scan multi-factures doit être validé avant toute mise en file.
+    // Sans ça, le pipeline en extrait UNE facture et perd les autres en silence — la
+    // panne qui a produit 14 factures erronées en production.
+    if (await detectSplitCandidate()) return;
+
     setSubmitting(true);
     setUploadedCount(0);
     setError(null);
@@ -769,7 +887,8 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
     count: filteredFiles.length,
     getScrollElement: () => fileListParentRef.current,
     // Ligne à hauteur fixe (nom tronqué sur une ligne) : pas besoin de mesure dynamique.
-    estimateSize: () => 44,
+    // Hauteur de ligne avec vignette (52 px) + l'espacement `gap` ci-dessous.
+    estimateSize: () => 58,
     overscan: 10,
     gap: 6,
   });
@@ -816,10 +935,22 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
   const failedCount = trackedJobs.filter((job) => job.status === "failed").length;
   const rejectedCount = trackedJobs.filter((job) => job.status === "rejected_non_invoice").length;
   const trackedTotal = Math.max(trackedJobs.length, submitting ? uploadedCount : 0);
-  // Progression unique : part des documents arrivés au bout (OCR terminé, échec ou ignoré).
   const progressTotal = trackedTotal || trackedJobs.length || 1;
   const doneCount = Math.min(progressTotal, ocrCompleted + failedCount + rejectedCount);
-  const progressPct = Math.min(100, Math.round((doneCount / progressTotal) * 100));
+  /**
+   * Progression pondérée par étape plutôt que par document terminé.
+   *
+   * L'ancien calcul comptait un document 0 ou 1 : sur un lot en extraction, la barre
+   * restait à 0 % pendant plusieurs minutes alors que le travail avançait — exactement
+   * le reproche fait à cet écran. Chaque document contribue désormais à hauteur de
+   * l'étape qu'il a atteinte (`STATUS_PROGRESS`).
+   */
+  const progressPct = trackedJobs.length
+    ? Math.min(100, Math.round(
+        (trackedJobs.reduce((total, job) => total + (STATUS_PROGRESS[job.status] ?? 0), 0)
+          / Math.max(trackedJobs.length, progressTotal)) * 100,
+      ))
+    : 0;
 
   // Répartition du lot suivi par étape du parcours — alimente la barre segmentée.
   const stageCounts = useMemo(() => {
@@ -914,9 +1045,8 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
     <div className="mx-auto max-w-4xl px-6 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer des factures</h1>
       <p className="mb-7 text-[13px] text-[var(--kn-text-muted)]">
-        De 1 à {DIRECT_DOCUMENT_LIMIT} documents, l&apos;extraction démarre en mode rapide.
-        Les lots plus grands sont traités par sous-lots, à tarif réduit, et restent
-        visibles même si vous quittez cette page.
+        Déposez vos factures : l&apos;import démarre tout seul. Vous pouvez fermer cette
+        page, le traitement continue.
       </p>
 
       <div
@@ -985,8 +1115,10 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
                       ref={fileVirtualizer.measureElement}
                       style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}
                     >
-                      <div className="flex h-[38px] items-center gap-2 rounded-lg bg-[var(--kn-panel)] px-3 text-sm">
-                        <FileText className="size-4 shrink-0 text-[#f97316]" />
+                      <div className="flex h-[52px] items-center gap-2.5 rounded-lg bg-[var(--kn-panel)] px-2.5 text-sm">
+                        {/* Aperçu réel plutôt qu'une icône générique : c'est ce qui permet
+                            de vérifier qu'on a déposé les bons documents. */}
+                        <LocalFileThumb file={file} className="size-10" />
                         <span className="min-w-0 flex-1 truncate">{file.name}</span>
                         <span className="shrink-0 text-xs text-[var(--kn-text-muted)]">{(file.size / 1024 / 1024).toFixed(1)} Mo</span>
                         <button
@@ -1004,11 +1136,28 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
             </div>
           )}
 
-          <button disabled={submitting} onClick={submit} className="mt-3 flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#f97316] px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60">
-            {submitting ? <Loader2 className="size-4 animate-spin" /> : <UploadCloud className="size-4" />}
-            {submitting ? `Envoi… ${fmt(uploadedCount)}/${fmt(files.length)}` : `Ajouter ${fmt(files.length)} fichier${files.length > 1 ? "s" : ""} à la file d’attente`}
-          </button>
+          {/* Plus de bouton d'envoi : l'import part tout seul une fois le dépôt stabilisé.
+              Cette bande dit ce qui se passe et laisse le temps de se raviser. */}
+          <div className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-[var(--kn-panel)] px-4 py-2.5 text-sm font-medium text-[var(--kn-text)]">
+            <Loader2 className="size-4 animate-spin text-[#f97316]" />
+            {analyzing
+              ? "Analyse d’un document de plusieurs pages…"
+              : submitting
+                ? `Envoi en cours… ${fmt(uploadedCount)}/${fmt(files.length)}`
+                : `Import automatique de ${fmt(files.length)} facture${files.length > 1 ? "s" : ""}…`}
+          </div>
         </div>
+      )}
+
+      {/* `key` : un nouveau candidat doit repartir d'un état vierge (vignettes, exclusions). */}
+      {splitCandidate && (
+        <SplitConfirmation
+          key={splitCandidate.tempPath}
+          candidate={splitCandidate}
+          submitting={submitting}
+          onConfirm={(accepted) => void confirmSplit(accepted)}
+          onCancel={() => void cancelSplit()}
+        />
       )}
 
       {error && (
@@ -1117,17 +1266,26 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
             </p>
           )}
 
+          {/* Les factures douteuses ne sont plus listées ici : au-delà de quelques
+              unités, une liste inline dans un panneau de résumé devient illisible et
+              se perd au rechargement. Elles ont leur écran dédié, qui les rassemble
+              toutes — y compris celles des imports précédents. */}
           {lowConfidenceSaved.length > 0 && (
             <div className="mt-3">
-              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-red-700">Enregistrées à confiance réduite — à vérifier en priorité</p>
-              <div className="space-y-1">
-                {lowConfidenceSaved.map((entry) => (
-                  <Link key={entry.jobId} href={`/documents/extraction?id=${entry.invoiceId}`} className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700 hover:bg-red-100">
-                    <span className="truncate">Facture {entry.factureNumber} — commune ou extraction incertaine</span>
-                    <span className="inline-flex shrink-0 items-center gap-1 font-medium">Voir <ExternalLink className="size-3.5" /></span>
-                  </Link>
-                ))}
-              </div>
+              <Link
+                href="/corrections"
+                className="flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-900 transition-colors hover:bg-amber-100"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <AlertCircle className="size-4 shrink-0" />
+                  <span>
+                    <span className="font-semibold">{fmt(lowConfidenceSaved.length)} facture{lowConfidenceSaved.length > 1 ? "s" : ""}</span> {lowConfidenceSaved.length > 1 ? "ont" : "a"} été lue{lowConfidenceSaved.length > 1 ? "s" : ""} avec un doute
+                  </span>
+                </span>
+                <span className="inline-flex shrink-0 items-center gap-1 font-semibold">
+                  Vérifier <ExternalLink className="size-3.5" />
+                </span>
+              </Link>
             </div>
           )}
 

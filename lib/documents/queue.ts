@@ -97,6 +97,43 @@ export const DIRECT_JOBS_PER_INVOCATION = 10;
  * `20260806000002_bigger_batches.sql`) — aucune migration nécessaire pour l'atteindre.
  */
 export const BATCH_JOBS_PER_INVOCATION = 100;
+/**
+ * Délai d'attente après le dernier fichier ajouté avant de lancer l'import.
+ *
+ * L'import démarre tout seul (plus de bouton « ajouter à la file »), mais partir au
+ * premier fichier découperait un même dépôt en plusieurs lots : glisser un dossier de
+ * 40 factures, puis 10 autres deux secondes plus tard, produirait deux lots au lieu
+ * d'un. Or un lot = une soumission au fournisseur, et le regroupement est ce qui rend
+ * le tarif réduit possible.
+ *
+ * Deux secondes : au-dessus du délai entre deux glissers d'affilée, en dessous du seuil
+ * où l'utilisateur se demande s'il ne s'est rien passé.
+ */
+export const UPLOAD_DEBOUNCE_MS = 2000;
+
+/**
+ * Avancement d'un document, de 0 (déposé) à 1 (terminé), par statut.
+ *
+ * Une progression binaire — un document compte 0 puis saute à 100 — ne reflète pas ce
+ * que l'utilisateur observe : sur un lot en cours d'extraction, la barre reste plantée
+ * à 0 % pendant plusieurs minutes alors que le travail avance réellement. Pondérer par
+ * étape donne une barre qui bouge au rythme du traitement.
+ *
+ * Les valeurs suivent la durée relative de chaque étape, pas un découpage régulier :
+ * l'extraction chez le fournisseur domine largement le temps total.
+ */
+export const STATUS_PROGRESS: Record<string, number> = {
+  queued: 0.15,
+  direct_queued: 0.15,
+  uploading_to_claude: 0.35,
+  batched: 0.55,
+  processing: 0.55,
+  direct_processing: 0.55,
+  needs_review: 0.9,
+  completed: 1,
+  failed: 1,
+  rejected_non_invoice: 1,
+};
 
 /**
  * Découpe une liste (fichiers, ou métadonnées de fichiers déjà déposés) par comptage
@@ -111,10 +148,21 @@ export function chunkForUpload<T>(items: T[]): T[][] {
   return chunks;
 }
 /**
- * En deçà, l'extraction part en mode `direct` (synchrone, quelques secondes, plein
- * tarif). Au-delà, mode `batch` (asynchrone, tarif réduit de 50 %).
+ * En deçà, l'extraction part en mode `direct` (synchrone, plein tarif) ; au-delà, en
+ * mode `batch` (asynchrone, tarif réduit de 50 %).
+ *
+ * Fixé à 0 : **tout passe en batch**. Le mode direct facturait le double pour un gain
+ * de latence qui ne s'est jamais matérialisé — mesuré sur les 13 lots réellement
+ * traités, un lot batch se termine en 2,5 minutes en moyenne (1,5 min au plus rapide,
+ * 3,7 au plus lent), très loin de la fourchette « 10 min à 24 h » annoncée par le
+ * fournisseur. Payer 2× pour économiser deux minutes n'a pas de sens à ce délai.
+ *
+ * Le chemin `direct` reste en place (`process-direct-documents`, statuts
+ * `direct_queued`/`direct_processing`) : il sert encore aux relances unitaires et
+ * reste disponible si un besoin de latence apparaît. Il n'est simplement plus emprunté
+ * par un dépôt normal.
  */
-export const DIRECT_DOCUMENT_LIMIT = 20;
+export const DIRECT_DOCUMENT_LIMIT = 0;
 
 export function extensionOf(name: string): string {
   return name.split(".").pop()?.toLowerCase() ?? "";
