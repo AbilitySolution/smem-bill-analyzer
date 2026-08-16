@@ -27,7 +27,8 @@ export function normalizeComm(s: string): string {
     .replace(/\s+/g, " ").trim();
 }
 
-function meaningfulWords(normalized: string): string[] {
+/** Mots porteurs de sens d'un nom **déjà normalisé** : articles et mots d'une lettre retirés. */
+export function meaningfulWords(normalized: string): string[] {
   return normalized.split(" ").filter((w) => w.length > 1 && !COMM_STOP.has(w));
 }
 

@@ -70,7 +70,7 @@ describe("NOMS_EN_BASE_2026_08", () => {
   });
 
   it("n'indexe que des codeInsee présents dans le référentiel", () => {
-    const codes = new Set(REFERENTIEL_MARTINIQUE.map((c) => c.codeInsee));
+    const codes = new Set<string>(REFERENTIEL_MARTINIQUE.map((c) => c.codeInsee));
     for (const code of Object.keys(NOMS_EN_BASE_2026_08)) {
       expect(codes.has(code), `code ${code} absent du référentiel`).toBe(true);
     }
