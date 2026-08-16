@@ -34,16 +34,23 @@ const MAX_ATTEMPTS = 3;
  * que 2 000 documents produisaient 400 lots que le collecteur ne pouvait visiter qu'à
  * 10 par minute — 40 minutes rien que pour les regarder. Découplés : la préparation est
  * bornée par `MAX_DOCUMENTS_PER_INVOCATION`, le lot regroupe tout ce qui a été préparé
- * pour une organisation. 2 000 documents → ~40 lots.
+ * pour une organisation. 2 000 documents → ~20 lots.
+ *
+ * Alignée sur le plafond dur de `claim_fair_document_jobs`/`claim_org_document_jobs`
+ * (`LEAST(job_limit, 100)`, `20260806000002_bigger_batches.sql`) : au-delà, il faudrait
+ * relever ce plafond RPC en plus de cette constante.
  */
-const TARGET_BATCH_SIZE = 50;
+const TARGET_BATCH_SIZE = 100;
 /**
- * Plafond de travail d'une invocation, en documents. Inchangé par rapport à l'ancien
- * `10 lots × 5 documents` : c'est le coût de préparation qui dicte la durée, et il n'a
- * pas bougé. Seul le nombre de lots produits diminue.
+ * Plafond de travail d'une invocation, en documents.
+ *
+ * Doublé de 50 à 100 avec `FILE_UPLOAD_CONCURRENCY` (3→5) pour rester large sous le
+ * timeout d'exécution Supabase (150 s Free / 400 s payant) : à surveiller sur les
+ * premières invocations réelles via les logs Edge Function (durée non encore mesurée
+ * à ce volume — pas de télémétrie persistée sur cette étape).
  */
-const MAX_DOCUMENTS_PER_INVOCATION = 50;
-const FILE_UPLOAD_CONCURRENCY = 3;
+const MAX_DOCUMENTS_PER_INVOCATION = 100;
+const FILE_UPLOAD_CONCURRENCY = 5;
 
 async function createAiBatch(
   jobs: Array<{ id: string; mime_type: string; anthropic_file_id: string }>,

@@ -1,16 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  AlertCircle, Archive, CheckCircle2, Clock3, ExternalLink, FileText,
-  FolderOpen, Loader2, RefreshCw, Trash2, UploadCloud, X,
+  AlertCircle, Archive, CheckCircle2, CheckSquare, Clock3, ExternalLink, FileText,
+  FolderOpen, Loader2, RefreshCw, Search, Square, Trash2, UploadCloud, X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  DIRECT_DOCUMENT_LIMIT, DIRECT_JOBS_PER_INVOCATION, MAX_ARCHIVE_SIZE, MAX_FILES,
-  MAX_FILE_SIZE, MAX_TOTAL_SIZE,
+  BATCH_JOBS_PER_INVOCATION, DIRECT_DOCUMENT_LIMIT, DIRECT_JOBS_PER_INVOCATION,
+  MAX_ARCHIVE_SIZE, MAX_FILES, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
   chunkForUpload, detectDocumentType, extensionOf, mimeTypeFromName, processingModeFor,
 } from "@/lib/documents/queue";
 import {
@@ -79,6 +80,47 @@ const prefilterTypeLabel: Record<string, string> = {
   facture: "facture",
 };
 
+/**
+ * Regroupement des statuts en quelques catégories lisibles pour les puces de filtre.
+ * Plusieurs statuts partagent le même libellé affiché (`statusLabel`) — filtrer sur le
+ * statut brut ferait apparaître deux puces identiques ("En attente" ×2).
+ */
+type QueueBucket = "waiting" | "processing" | "needs_review" | "failed" | "rejected";
+const BUCKET_OF: Record<DocumentJobStatus, QueueBucket> = {
+  queued: "waiting",
+  direct_queued: "waiting",
+  uploading_to_claude: "processing",
+  direct_processing: "processing",
+  batched: "processing",
+  processing: "processing",
+  needs_review: "needs_review",
+  // Jamais rencontré ici : `queueJobs` exclut déjà `completed`. Présent pour l'exhaustivité du Record.
+  completed: "processing",
+  failed: "failed",
+  rejected_non_invoice: "rejected",
+};
+const BUCKET_LABEL: Record<QueueBucket, string> = {
+  waiting: "En attente",
+  processing: "En cours",
+  needs_review: "À réviser",
+  failed: "Échec",
+  rejected: "Ignorés",
+};
+const BUCKET_ORDER: QueueBucket[] = ["waiting", "processing", "needs_review", "failed", "rejected"];
+
+/**
+ * Au-delà, les barres de recherche/filtre et la virtualisation apparaissent — inutile
+ * pour un dépôt de quelques fichiers, le cas le plus fréquent.
+ */
+const LARGE_LIST_THRESHOLD = 20;
+
+const fmt = (n: number) => n.toLocaleString("fr-FR");
+
+/** Deux `File` du navigateur désignent le même document sélectionné. */
+function sameFile(a: File, b: File) {
+  return a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
+}
+
 export function DocumentQueue({ orgId }: { orgId: string }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -97,6 +139,11 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   const [deletingReviewJobs, setDeletingReviewJobs] = useState(false);
   const [deletingAllJobs, setDeletingAllJobs] = useState(false);
   const [retryingRejected, setRetryingRejected] = useState(false);
+  const [fileSearch, setFileSearch] = useState("");
+  const [queueSearch, setQueueSearch] = useState("");
+  const [queueBucketFilter, setQueueBucketFilter] = useState<QueueBucket | "all">("all");
+  const fileListParentRef = useRef<HTMLDivElement>(null);
+  const queueListParentRef = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => Date.now());
   /** Incrémenté par « Actualiser » : relance aussi l'enregistrement automatique en échec. */
   const [manualSyncCount, setManualSyncCount] = useState(0);
@@ -125,15 +172,15 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
 
   const refreshJobs = useCallback(async () => {
     const response = await fetch("/api/document-jobs", { cache: "no-store" }).catch(() => null);
-    if (!response?.ok) return;
+    if (!response?.ok) return null;
     const payload = await response.json().catch(() => null);
-    if (!payload) return;
+    if (!payload) return null;
     const nextJobs: DocumentJob[] = payload.jobs ?? [];
     setJobs(nextJobs);
     if (payload.estimation) setEstimationStats(payload.estimation);
 
     // Purge du suivi : un identifiant qui ne correspond plus à aucun job (supprimé, ou
-    // sorti de la fenêtre de 200) laisserait un panneau de progression fantôme.
+    // sorti de la fenêtre de MAX_FILES) laisserait un panneau de progression fantôme.
     const known = new Set(nextJobs.map((job) => job.id));
     setActiveUploadJobIds((current) => {
       const kept = current.filter((id) => known.has(id));
@@ -142,26 +189,43 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
       else window.localStorage.removeItem(ACTIVE_UPLOAD_STORAGE_KEY);
       return kept;
     });
+    return nextJobs;
   }, []);
 
   /**
-   * Démarrage opportuniste des workers. Le mode `direct` réserve au plus
-   * `DIRECT_JOBS_PER_INVOCATION` jobs par invocation : au-delà, il faut plusieurs
-   * appels, sinon la fin du lot attend le tick de Cron.
+   * Démarrage opportuniste des workers. Chaque invocation ne dispatche qu'un budget fixe
+   * de jobs (`DIRECT_JOBS_PER_INVOCATION` en mode rapide, `BATCH_JOBS_PER_INVOCATION` en
+   * mode lot — miroirs des constantes des Edge Functions) : au-delà, il faut plusieurs
+   * appels, sinon le reste attend le tick de Cron suivant (1 min, partagé entre toutes
+   * les organisations) — c'était le cas du mode lot, qui ne rebouclait pas : un dépôt de
+   * plus de 50 documents semblait bloqué au palier des 50 premiers.
    */
   const startProcessing = useCallback((mode: "direct" | "batch", jobIds: string[]) => {
     const supabase = createClient();
-    if (mode !== "direct") {
-      void supabase.functions.invoke("process-document-queue", { body: {} })
-        .finally(() => void refreshJobs());
+    if (mode === "direct") {
+      void (async () => {
+        for (let index = 0; index < jobIds.length; index += DIRECT_JOBS_PER_INVOCATION) {
+          await supabase.functions.invoke("process-direct-documents", {
+            body: { job_ids: jobIds.slice(index, index + DIRECT_JOBS_PER_INVOCATION) },
+          });
+          await refreshJobs();
+        }
+      })().finally(() => void refreshJobs());
       return;
     }
+
+    // Mode lot : la réservation est server-side (par organisation, pas par identifiant de
+    // job), donc rien à découper en tranches côté navigateur — on relance simplement
+    // l'invocation tant qu'il reste des jobs de CE dépôt encore `queued`. Garde-fou sur le
+    // nombre d'appels : si jamais il est atteint, pg_cron reprend le relais normalement.
+    const idSet = new Set(jobIds);
+    const maxInvocations = Math.max(1, Math.ceil(jobIds.length / BATCH_JOBS_PER_INVOCATION) + 2);
     void (async () => {
-      for (let index = 0; index < jobIds.length; index += DIRECT_JOBS_PER_INVOCATION) {
-        await supabase.functions.invoke("process-direct-documents", {
-          body: { job_ids: jobIds.slice(index, index + DIRECT_JOBS_PER_INVOCATION) },
-        });
-        await refreshJobs();
+      for (let attempt = 0; attempt < maxInvocations; attempt++) {
+        await supabase.functions.invoke("process-document-queue", { body: {} });
+        const latest = await refreshJobs();
+        const stillQueued = (latest ?? []).some((job) => idSet.has(job.id) && job.status === "queued");
+        if (!stillQueued) break;
       }
     })().finally(() => void refreshJobs());
   }, [refreshJobs]);
@@ -251,7 +315,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   /**
    * Inspection côté navigateur : extension, taille, et surtout **magic bytes**. Le
    * serveur revérifie tout — ici c'est pour dire tout de suite ce qui ne passera pas,
-   * sans faire téléverser 200 fichiers pour rien.
+   * sans faire téléverser des centaines de fichiers pour rien.
    */
   async function addFiles(incoming: File[]) {
     if (inspecting || submitting) return;
@@ -568,6 +632,58 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   // Mes documents.
   const queueJobs = jobs.filter((job) => job.status !== "completed");
   const rejectedQueueCount = queueJobs.filter((job) => job.status === "rejected_non_invoice").length;
+
+  // Comptes par catégorie pour les puces de filtre — sur `queueJobs` en entier, pas sur
+  // le résultat déjà filtré : sinon les puces des autres catégories retomberaient à zéro
+  // dès qu'un filtre est actif.
+  //
+  // Dépendance sur `jobs` (pas `queueJobs`) : `queueJobs` est un nouveau tableau à chaque
+  // rendu (`.filter` ci-dessus), il recalculerait ces `useMemo` en boucle sans rien
+  // apporter — `jobs` est la vraie source stable dont `queueJobs` dérive purement.
+  const queueBucketCounts = useMemo(() => {
+    const counts = new Map<QueueBucket, number>();
+    for (const job of queueJobs) counts.set(BUCKET_OF[job.status], (counts.get(BUCKET_OF[job.status]) ?? 0) + 1);
+    return counts;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs]);
+  const filteredQueueJobs = useMemo(() => {
+    const term = queueSearch.trim().toLowerCase();
+    return queueJobs.filter((job) => {
+      if (queueBucketFilter !== "all" && BUCKET_OF[job.status] !== queueBucketFilter) return false;
+      if (term && !job.original_name.toLowerCase().includes(term)) return false;
+      return true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs, queueBucketFilter, queueSearch]);
+  const filteredFiles = useMemo(() => {
+    const term = fileSearch.trim().toLowerCase();
+    if (!term) return files;
+    return files.filter((file) => file.name.toLowerCase().includes(term));
+  }, [files, fileSearch]);
+
+  // « Tout sélectionner » du bouton de suppression groupée : porte sur les jobs
+  // actuellement VISIBLES (recherche/filtre appliqués), pas sur la file entière — cocher
+  // « tout » pendant qu'un filtre est actif ne doit sélectionner que ce qui est affiché.
+  const visibleReviewIds = filteredQueueJobs.filter((job) => job.status === "needs_review").map((job) => job.id);
+  const allVisibleReviewSelected = visibleReviewIds.length > 0 && visibleReviewIds.every((id) => selectedReviewJobIds.has(id));
+
+  const fileVirtualizer = useVirtualizer({
+    count: filteredFiles.length,
+    getScrollElement: () => fileListParentRef.current,
+    // Ligne à hauteur fixe (nom tronqué sur une ligne) : pas besoin de mesure dynamique.
+    estimateSize: () => 44,
+    overscan: 10,
+    gap: 6,
+  });
+  const queueVirtualizer = useVirtualizer({
+    count: filteredQueueJobs.length,
+    getScrollElement: () => queueListParentRef.current,
+    // Hauteur variable (ligne d'erreur optionnelle, boutons d'action) : mesurée réellement.
+    estimateSize: () => 72,
+    overscan: 8,
+    gap: 8,
+  });
+
   // Repli quand le suivi du dépôt est perdu : les jobs récents, **terminés compris**.
   // L'ancien repli ne gardait que les jobs non terminaux : chaque document qui finissait
   // quittait l'ensemble suivi, si bien que la barre restait bloquée à 0 % puis
@@ -641,8 +757,8 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
       // seule déclenche le recalcul d'anomalies portefeuille. Sans ça, les factures des
       // tranches précédentes ne seraient jamais escaladées en `anomaly_flagged`.
       const savedInvoiceIds: string[] = [];
-      // Découpé : un lot de 200 documents dans une seule requête dépasse la durée
-      // maximale de la route, et tout le travail serait perdu d'un coup.
+      // Découpé : un gros lot (jusqu'à MAX_FILES documents) dans une seule requête
+      // dépasse la durée maximale de la route, et tout le travail serait perdu d'un coup.
       for (let index = 0; index < candidates.length; index += AUTO_SAVE_CHUNK) {
         const slice = candidates.slice(index, index + AUTO_SAVE_CHUNK);
         const isLastChunk = index + AUTO_SAVE_CHUNK >= candidates.length;
@@ -682,7 +798,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   }, [reviewableJobKey, manualSyncCount, refreshJobs]);
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className="mx-auto max-w-4xl px-6 py-10">
       <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Importer des factures</h1>
       <p className="mb-7 text-[13px] text-[var(--kn-text-muted)]">
         De 1 à {DIRECT_DOCUMENT_LIMIT} documents, l&apos;extraction démarre en mode rapide.
@@ -719,28 +835,65 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
 
       {files.length > 0 && (
         <div className="mt-4 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-3">
-          <div className="mb-2 flex items-center justify-between">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm font-semibold text-[var(--kn-text)]">
-              {files.length} fichier{files.length > 1 ? "s" : ""} prêt{files.length > 1 ? "s" : ""}
+              {fmt(files.length)} fichier{files.length > 1 ? "s" : ""} prêt{files.length > 1 ? "s" : ""}
               <span className="ml-2 font-normal text-[var(--kn-text-muted)]">
                 — mode {selectionMode === "direct" ? "rapide" : "lot (tarif réduit)"}
               </span>
             </p>
-            <button onClick={() => setFiles([])} className="text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]">Tout retirer</button>
+            <button onClick={() => { setFiles([]); setFileSearch(""); }} className="cursor-pointer text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]">Tout retirer</button>
           </div>
-          <div className="space-y-1.5">
-            {files.map((file, index) => (
-              <div key={`${file.name}-${file.size}-${file.lastModified}-${index}`} className="flex items-center gap-2 rounded-lg bg-[var(--kn-panel)] px-3 py-2 text-sm">
-                <FileText className="size-4 text-[#f97316]" />
-                <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                <span className="text-xs text-[var(--kn-text-muted)]">{(file.size / 1024 / 1024).toFixed(1)} Mo</span>
-                <button aria-label={`Retirer ${file.name}`} onClick={() => setFiles((current) => current.filter((_, i) => i !== index))}><X className="size-4" /></button>
+
+          {files.length > LARGE_LIST_THRESHOLD && (
+            <div className="relative mb-2">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[var(--kn-text-muted)]" />
+              <input
+                type="text"
+                value={fileSearch}
+                onChange={(event) => setFileSearch(event.target.value)}
+                placeholder={`Rechercher parmi ${fmt(files.length)} fichiers…`}
+                className="w-full rounded-lg border border-[var(--kn-border)] bg-[var(--kn-panel)] py-1.5 pl-8 pr-2.5 text-xs text-[var(--kn-text)] outline-none focus:border-[#f97316]"
+              />
+            </div>
+          )}
+
+          {filteredFiles.length === 0 ? (
+            <p className="px-1 py-6 text-center text-xs text-[var(--kn-text-muted)]">Aucun fichier ne correspond à « {fileSearch} ».</p>
+          ) : (
+            <div ref={fileListParentRef} className="max-h-72 overflow-y-auto" style={{ contain: "strict" }}>
+              <div style={{ height: fileVirtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+                {fileVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const file = filteredFiles[virtualRow.index];
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={fileVirtualizer.measureElement}
+                      style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}
+                    >
+                      <div className="flex h-[38px] items-center gap-2 rounded-lg bg-[var(--kn-panel)] px-3 text-sm">
+                        <FileText className="size-4 shrink-0 text-[#f97316]" />
+                        <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                        <span className="shrink-0 text-xs text-[var(--kn-text-muted)]">{(file.size / 1024 / 1024).toFixed(1)} Mo</span>
+                        <button
+                          aria-label={`Retirer ${file.name}`}
+                          onClick={() => setFiles((current) => current.filter((item) => !sameFile(item, file)))}
+                          className="shrink-0 cursor-pointer rounded p-0.5 text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]"
+                        >
+                          <X className="size-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
+
           <button disabled={submitting} onClick={submit} className="mt-3 flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#f97316] px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60">
             {submitting ? <Loader2 className="size-4 animate-spin" /> : <UploadCloud className="size-4" />}
-            {submitting ? `Envoi… ${uploadedCount}/${files.length}` : "Ajouter à la file d’attente"}
+            {submitting ? `Envoi… ${fmt(uploadedCount)}/${fmt(files.length)}` : `Ajouter ${fmt(files.length)} fichier${files.length > 1 ? "s" : ""} à la file d’attente`}
           </button>
         </div>
       )}
@@ -780,7 +933,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
           {trackedJobs.length > 0 && (
             <div className="mt-4">
               <div className="mb-1.5 flex items-center justify-end text-xs">
-                <span className="font-semibold tabular-nums text-[var(--kn-text)]">{doneCount}/{progressTotal} · {progressPct} %</span>
+                <span className="font-semibold tabular-nums text-[var(--kn-text)]">{fmt(doneCount)}/{fmt(progressTotal)} · {progressPct} %</span>
               </div>
               <div className="h-2.5 overflow-hidden rounded-full bg-[var(--kn-panel)]">
                 <div className="h-full rounded-full bg-[#f97316] transition-[width] duration-500" style={{ width: `${progressPct}%` }} />
@@ -825,8 +978,26 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
 
       <div className="mt-8">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-[var(--kn-text)]">File de traitement</h2>
+          <h2 className="text-base font-semibold text-[var(--kn-text)]">
+            File de traitement
+            {queueJobs.length > 0 && <span className="ml-1.5 font-normal text-[var(--kn-text-muted)]">({fmt(queueJobs.length)})</span>}
+          </h2>
           <div className="flex flex-wrap items-center gap-2">
+            {visibleReviewIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedReviewJobIds((current) => {
+                  const next = new Set(current);
+                  if (allVisibleReviewSelected) visibleReviewIds.forEach((id) => next.delete(id));
+                  else visibleReviewIds.forEach((id) => next.add(id));
+                  return next;
+                })}
+                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]"
+              >
+                {allVisibleReviewSelected ? <CheckSquare className="size-3.5" /> : <Square className="size-3.5" />}
+                Tout sélectionner ({fmt(visibleReviewIds.length)})
+              </button>
+            )}
             {rejectedQueueCount > 1 && (
               <button
                 type="button"
@@ -836,7 +1007,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
                 className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold text-[var(--kn-text)] transition-colors hover:border-[#f97316] hover:bg-[var(--kn-active)] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {retryingRejected ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                Tout traiter quand même ({rejectedQueueCount})
+                Tout traiter quand même ({fmt(rejectedQueueCount)})
               </button>
             )}
             {queueJobs.length > 1 && (
@@ -859,7 +1030,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
                 className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {deletingReviewJobs ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
-                Supprimer ({selectedReviewJobIds.size})
+                Supprimer ({fmt(selectedReviewJobIds.size)})
               </button>
             )}
             <button onClick={() => { setError(null); setManualSyncCount((count) => count + 1); void refreshJobs(); }} className="flex cursor-pointer items-center gap-1 text-xs text-[var(--kn-text-muted)] hover:text-[var(--kn-text)]">
@@ -867,52 +1038,105 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
             </button>
           </div>
         </div>
-        <div className="space-y-2">
-          {queueJobs.map((job) => (
-            <div key={job.id} className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
-              {["direct_processing", "uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 animate-spin text-[#f97316]" />
-                : job.status === "needs_review" ? <CheckCircle2 className="size-5 text-emerald-600" />
-                : job.status === "failed" ? <AlertCircle className="size-5 text-red-600" />
-                : job.status === "rejected_non_invoice" ? <AlertCircle className="size-5 text-amber-600" /> : <Clock3 className="size-5 text-amber-600" />}
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-[var(--kn-text)]">{job.original_name}</p>
-                <p className="text-xs text-[var(--kn-text-muted)]">
-                  {statusLabel[job.status] ?? job.status}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}
-                  {job.status === "rejected_non_invoice" && job.prefilter_type ? ` · détecté comme ${prefilterTypeLabel[job.prefilter_type] ?? job.prefilter_type}` : ""}
-                </p>
-                {job.last_error && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.last_error}</p>}
-              </div>
-              {job.status === "needs_review" && (
-                <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="cursor-pointer rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white">Réviser</button>
-              )}
-              {job.status === "failed" && (
-                <button onClick={() => void retry(job.id)} className="cursor-pointer rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>
-              )}
-              {job.status === "rejected_non_invoice" && (
-                <button onClick={() => void retry(job.id)} title="Le document a été jugé non-facture par erreur : relancez pour forcer l'extraction complète." className="cursor-pointer rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Traiter quand même</button>
-              )}
-              {job.status === "needs_review" ? (
+
+        {queueJobs.length > LARGE_LIST_THRESHOLD && (
+          <div className="mb-3 space-y-2">
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={() => setQueueBucketFilter("all")}
+                className={`cursor-pointer rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${queueBucketFilter === "all" ? "bg-[#f97316] text-white" : "bg-[var(--kn-panel)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]"}`}
+              >
+                Tous ({fmt(queueJobs.length)})
+              </button>
+              {BUCKET_ORDER.filter((bucket) => (queueBucketCounts.get(bucket) ?? 0) > 0).map((bucket) => (
                 <button
+                  key={bucket}
                   type="button"
-                  onClick={() => toggleReviewJob(job.id)}
-                  aria-pressed={selectedReviewJobIds.has(job.id)}
-                  title={selectedReviewJobIds.has(job.id) ? "Retirer de la sélection" : "Sélectionner pour suppression"}
-                  aria-label={selectedReviewJobIds.has(job.id) ? `Retirer ${job.original_name} de la sélection` : `Sélectionner ${job.original_name} pour suppression`}
-                  className={`cursor-pointer rounded-lg p-1.5 transition-colors ${selectedReviewJobIds.has(job.id) ? "bg-red-600 text-white" : "text-[var(--kn-text-muted)] hover:bg-[#fef2f2] hover:text-[#b91c1c]"}`}
+                  onClick={() => setQueueBucketFilter((current) => current === bucket ? "all" : bucket)}
+                  className={`cursor-pointer rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${queueBucketFilter === bucket ? "bg-[#f97316] text-white" : "bg-[var(--kn-panel)] text-[var(--kn-text-muted)] hover:bg-[var(--kn-active)]"}`}
                 >
-                  <Trash2 className="size-4" />
+                  {BUCKET_LABEL[bucket]} ({fmt(queueBucketCounts.get(bucket) ?? 0)})
                 </button>
-              ) : (
-                <button onClick={() => void deleteJob(job.id)} title="Supprimer de la file" aria-label="Supprimer de la file" className="cursor-pointer rounded-lg p-1.5 text-[var(--kn-text-muted)] transition-colors hover:bg-[#fef2f2] hover:text-[#b91c1c]"><Trash2 className="size-4" /></button>
-              )}
+              ))}
             </div>
-          ))}
-          {!queueJobs.length && (
-            <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">
-              Aucun document dans la file.
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[var(--kn-text-muted)]" />
+              <input
+                type="text"
+                value={queueSearch}
+                onChange={(event) => setQueueSearch(event.target.value)}
+                placeholder="Rechercher un document…"
+                className="w-full rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] py-1.5 pl-8 pr-2.5 text-xs text-[var(--kn-text)] outline-none focus:border-[#f97316]"
+              />
             </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        {!queueJobs.length ? (
+          <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">
+            Aucun document dans la file.
+          </div>
+        ) : !filteredQueueJobs.length ? (
+          <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">
+            Aucun document ne correspond à ce filtre.
+            <button type="button" onClick={() => { setQueueBucketFilter("all"); setQueueSearch(""); }} className="ml-1 cursor-pointer font-semibold text-[#f97316] hover:underline">Réinitialiser</button>
+          </div>
+        ) : (
+          <div ref={queueListParentRef} className="max-h-[36rem] overflow-y-auto" style={{ contain: "strict" }}>
+            <div style={{ height: queueVirtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+              {queueVirtualizer.getVirtualItems().map((virtualRow) => {
+                const job = filteredQueueJobs[virtualRow.index];
+                return (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={queueVirtualizer.measureElement}
+                    style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}
+                  >
+                    <div className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
+                      {["direct_processing", "uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 shrink-0 animate-spin text-[#f97316]" />
+                        : job.status === "needs_review" ? <CheckCircle2 className="size-5 shrink-0 text-emerald-600" />
+                        : job.status === "failed" ? <AlertCircle className="size-5 shrink-0 text-red-600" />
+                        : job.status === "rejected_non_invoice" ? <AlertCircle className="size-5 shrink-0 text-amber-600" /> : <Clock3 className="size-5 shrink-0 text-amber-600" />}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-[var(--kn-text)]">{job.original_name}</p>
+                        <p className="text-xs text-[var(--kn-text-muted)]">
+                          {statusLabel[job.status] ?? job.status}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}
+                          {job.status === "rejected_non_invoice" && job.prefilter_type ? ` · détecté comme ${prefilterTypeLabel[job.prefilter_type] ?? job.prefilter_type}` : ""}
+                        </p>
+                        {job.last_error && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.last_error}</p>}
+                      </div>
+                      {job.status === "needs_review" && (
+                        <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="shrink-0 cursor-pointer rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white">Réviser</button>
+                      )}
+                      {job.status === "failed" && (
+                        <button onClick={() => void retry(job.id)} className="shrink-0 cursor-pointer rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>
+                      )}
+                      {job.status === "rejected_non_invoice" && (
+                        <button onClick={() => void retry(job.id)} title="Le document a été jugé non-facture par erreur : relancez pour forcer l'extraction complète." className="shrink-0 cursor-pointer rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Traiter quand même</button>
+                      )}
+                      {job.status === "needs_review" ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleReviewJob(job.id)}
+                          aria-pressed={selectedReviewJobIds.has(job.id)}
+                          title={selectedReviewJobIds.has(job.id) ? "Retirer de la sélection" : "Sélectionner pour suppression"}
+                          aria-label={selectedReviewJobIds.has(job.id) ? `Retirer ${job.original_name} de la sélection` : `Sélectionner ${job.original_name} pour suppression`}
+                          className={`shrink-0 cursor-pointer rounded-lg p-1.5 transition-colors ${selectedReviewJobIds.has(job.id) ? "bg-red-600 text-white" : "text-[var(--kn-text-muted)] hover:bg-[#fef2f2] hover:text-[#b91c1c]"}`}
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      ) : (
+                        <button onClick={() => void deleteJob(job.id)} title="Supprimer de la file" aria-label="Supprimer de la file" className="shrink-0 cursor-pointer rounded-lg p-1.5 text-[var(--kn-text-muted)] transition-colors hover:bg-[#fef2f2] hover:text-[#b91c1c]"><Trash2 className="size-4" /></button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

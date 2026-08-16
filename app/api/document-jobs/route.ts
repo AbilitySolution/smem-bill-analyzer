@@ -5,6 +5,7 @@ import { getUserContext } from "@/lib/auth";
 import { safeFileName } from "@/lib/extraction/storage-path";
 import {
   MAX_FILE_SIZE,
+  MAX_FILES,
   MAX_FILES_PER_REQUEST,
   MAX_REQUEST_BYTES,
   detectDocumentType,
@@ -197,7 +198,7 @@ export async function GET() {
       .select("id, original_name, mime_type, file_size, status, processing_mode, attempt_count, last_error, created_at, updated_at, queued_at, dispatch_started_at, claude_file_uploaded_at, batch_created_at, result_available_at, started_at, completed_at, processed_invoice_id, anthropic_batch_id, prefilter_type")
       .eq("org_id", ctx.orgId)
       .order("created_at", { ascending: false })
-      .limit(200),
+      .limit(MAX_FILES),
     processingEstimateStats(supabase, ctx.orgId),
   ]);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

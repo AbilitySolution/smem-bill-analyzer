@@ -25,18 +25,26 @@ const EXTENSION_MIME_TYPES: Record<string, AcceptedMimeType> = {
 
 /** Aligné sur le CHECK `file_size` de `document_jobs` et sur la limite du bucket. */
 export const MAX_FILE_SIZE = 20 * 1024 * 1024;
-/** Documents retenus en une sélection. Au-delà, on invite à scinder. */
-export const MAX_FILES = 200;
+/**
+ * Documents retenus en une sélection. Au-delà, on invite à scinder.
+ *
+ * Pur garde-fou de rendu navigateur (liste non virtualisée) — aucune limite serveur
+ * n'existe sur le total par organisation. Doit rester égal à la limite `.limit(...)`
+ * de `GET /api/document-jobs` ([app/api/document-jobs/route.ts]) : sinon la file
+ * affichée ne pourrait jamais dépasser l'ancienne valeur même si plus de documents
+ * sont réellement en attente.
+ */
+export const MAX_FILES = 1000;
 /** Poids d'une archive ZIP acceptée à la lecture navigateur. */
 export const MAX_ARCHIVE_SIZE = 100 * 1024 * 1024;
 /** Poids cumulé d'une sélection. */
-export const MAX_TOTAL_SIZE = 500 * 1024 * 1024;
+export const MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024;
 /** Documents par appel à `POST /api/document-jobs` — borne la taille du multipart. */
-export const MAX_FILES_PER_REQUEST = 10;
+export const MAX_FILES_PER_REQUEST = 50;
 /**
  * Volume cumulé par appel.
  *
- * Le nombre de fichiers ne suffit pas à borner le multipart : 10 × 20 Mo dépasserait
+ * Le nombre de fichiers ne suffit pas à borner le multipart : 50 × 20 Mo dépasserait
  * le plafond de corps de requête de la plateforme (100 Mo sur Vercel Functions). Le
  * navigateur découpe donc la sélection sur les deux critères, avec de la marge pour
  * l'enveloppe MIME.
@@ -46,7 +54,7 @@ export const MAX_FILES_PER_REQUEST = 10;
  * lié au plafond « plateforme » ci-dessus). Une valeur augmentée ici sans l'augmenter
  * là-bas fait échouer en 413 les lots les plus lourds, silencieusement pour les autres.
  */
-export const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
+export const MAX_REQUEST_BYTES = 80 * 1024 * 1024;
 /**
  * Jobs réservés par une invocation du worker `direct`.
  *
@@ -56,6 +64,19 @@ export const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
  * mode rapide n'en démarrait que 10, les autres attendaient le tick de Cron.
  */
 export const DIRECT_JOBS_PER_INVOCATION = 10;
+/**
+ * Documents dispatchés par invocation du worker `batch`.
+ *
+ * Miroir de `MAX_DOCUMENTS_PER_INVOCATION`/`TARGET_BATCH_SIZE` (`supabase/functions/
+ * process-document-queue/index.ts`) — même symptôme que `DIRECT_JOBS_PER_INVOCATION`
+ * ci-dessus : un dépôt de plus de ce budget en mode lot ne démarrait que les premiers
+ * via l'appel opportuniste du navigateur, les autres attendaient le tick de Cron
+ * suivant (1 min, partagé entre toutes les organisations). Le navigateur boucle donc
+ * dessus aussi. Valeur alignée sur le plafond déjà en place côté RPC
+ * (`claim_fair_document_jobs`/`claim_org_document_jobs` : `LEAST(job_limit, 100)`,
+ * `20260806000002_bigger_batches.sql`) — aucune migration nécessaire pour l'atteindre.
+ */
+export const BATCH_JOBS_PER_INVOCATION = 100;
 
 /**
  * Découpe une sélection en envois qui respectent les deux bornes.
