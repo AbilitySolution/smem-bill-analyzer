@@ -10,11 +10,14 @@ import type { InvoiceExtraction } from "@/lib/anthropic/invoice-schema";
 
 const COMM_STOP = new Set(["de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au"]);
 
-/** Minuscules, accents retirés, abréviations développées, genre neutralisé (saint == sainte). */
+/** Minuscules, accents retirés, ligatures développées, abréviations développées, genre neutralisé (saint == sainte). */
 export function normalizeComm(s: string): string {
   return s
     .toLowerCase()
     .normalize("NFD").replace(/\p{Mn}/gu, "")
+    // NFD ne décompose pas les ligatures : sans ça « Schœlcher » devient « sch lcher »
+    // (le œ tombe dans le filtre [^a-z0-9 ] plus bas) et ne matche jamais « SCHOELCHER ».
+    .replace(/œ/g, "oe").replace(/æ/g, "ae")
     .replace(/\bste\b/g, "sainte")
     .replace(/\bst\b/g, "saint")
     .replace(/\bsainte\b/g, "saint") // neutralize gender: saint == sainte

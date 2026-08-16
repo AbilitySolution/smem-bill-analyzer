@@ -22,6 +22,12 @@ describe("normalizeComm", () => {
   it("neutralise le genre : sainte devient saint", () => {
     expect(normalizeComm("Sainte Marie")).toBe(normalizeComm("Saint Marie"));
   });
+
+  it("développe la ligature œ : Schœlcher matche SCHOELCHER", () => {
+    expect(normalizeComm("Schœlcher")).toBe("schoelcher");
+    expect(normalizeComm("SCHOELCHER")).toBe(normalizeComm("Schœlcher"));
+    expect(scoreCommune("SCHOELCHER", "Schœlcher")).toBe(100);
+  });
 });
 
 describe("scoreCommune", () => {
