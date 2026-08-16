@@ -1,8 +1,8 @@
 "use client";
 
-import { Suspense, useEffect, useState, useMemo } from "react";
+import { Suspense, useEffect, useState, useMemo, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, AlertCircle, Save, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Loader2, AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, Save, CheckCircle2, AlertTriangle } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -324,18 +324,85 @@ function ValidationPanel({ result }: { result: ValidationResult }) {
   );
 }
 
+/**
+ * Enveloppe du flux de révision.
+ *
+ * Deux rôles, tous deux impossibles à tenir depuis `ReviewPageInner` :
+ *
+ * 1. **Poser une `key` par document.** Le flux enchaîne les documents en changeant
+ *    seulement `?job=`, sans démonter le composant. La `key` force React à repartir
+ *    d'un état vierge à chaque changement — mécanisme prévu pour ça, préférable à une
+ *    réinitialisation manuelle champ par champ dans un effet (qui laisserait le
+ *    formulaire du document précédent visible pendant le chargement du suivant, et
+ *    ferait fuiter un commentaire de justification d'une facture à l'autre).
+ * 2. **Détenir la file de révision**, justement parce qu'elle ne doit PAS être remontée
+ *    à chaque document : rechargée à chaque navigation, la position « 3 sur 12 »
+ *    disparaîtrait le temps du fetch, et le compteur bougerait sous les yeux de
+ *    l'utilisateur au fil des enregistrements du Cron.
+ */
+function ReviewFlow() {
+  const jobId = useSearchParams().get("job");
+  /**
+   * Identifiants `needs_review` de l'organisation, dans l'ordre de dépôt (celui de la
+   * file). Chargée une fois : la position affichée reste stable pendant tout le
+   * passage. Les documents traités par cette session sont retirés localement plutôt
+   * que par un rechargement (`reviewedIds`).
+   */
+  const [reviewQueue, setReviewQueue] = useState<string[]>([]);
+  const [reviewedIds, setReviewedIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      // Réutilise le GET existant de la file — pas de nouvelle route à maintenir.
+      const res = await fetch("/api/document-jobs", { cache: "no-store" }).catch(() => null);
+      if (!res?.ok) return;
+      const json = await res.json().catch(() => null);
+      if (cancelled || !json?.jobs) return;
+      const ids = (json.jobs as Array<{ id: string; status: string; created_at: string }>)
+        .filter((job) => job.status === "needs_review")
+        .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+        .map((job) => job.id);
+      setReviewQueue(ids);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const markReviewed = useCallback((id: string) => {
+    setReviewedIds((current) => new Set(current).add(id));
+  }, []);
+
+  return (
+    <ReviewPageInner
+      key={jobId ?? "none"}
+      reviewQueue={reviewQueue}
+      reviewedIds={reviewedIds}
+      onReviewed={markReviewed}
+    />
+  );
+}
+
 export default function ReviewPage() {
-  return <Suspense><ReviewPageInner /></Suspense>;
+  return <Suspense><ReviewFlow /></Suspense>;
 }
 
 /**
- * Révision d'un document de la file.
+ * Révision d'un document de la file — en **flux** : la page connaît la liste complète
+ * des documents à réviser de l'organisation et permet d'enchaîner (précédent/suivant,
+ * enregistrement → document suivant automatiquement) sans jamais repasser par
+ * `/upload`. Avant, chaque enregistrement renvoyait à la file entière : l'utilisateur
+ * perdait sa position et devait retrouver le prochain document à la main — intenable
+ * sur un dépôt de dizaines de factures.
  *
  * La page est ouverte sur `?job=<id>` depuis `/upload` : elle relit l'extraction
  * enregistrée sur le job plutôt qu'un résultat volatil de sessionStorage. Recharger ou
  * partager l'URL retrouve donc exactement le même document.
  */
-function ReviewPageInner() {
+function ReviewPageInner({ reviewQueue, reviewedIds, onReviewed }: {
+  reviewQueue: string[];
+  reviewedIds: Set<string>;
+  onReviewed: (id: string) => void;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const jobId = searchParams.get("job");
@@ -355,6 +422,23 @@ function ReviewPageInner() {
   const [overrideFlagAnomaly, setOverrideFlagAnomaly] = useState<boolean | null>(null);
   const [customFieldDefs, setCustomFieldDefs] = useState<CustomFieldDef[]>([]);
   const [customFieldEntries, setCustomFieldEntries] = useState<CustomFieldEntry[]>([]);
+  const remainingQueue = useMemo(
+    () => reviewQueue.filter((id) => !reviewedIds.has(id)),
+    [reviewQueue, reviewedIds],
+  );
+  const queuePosition = jobId ? remainingQueue.indexOf(jobId) : -1;
+  const previousJobId = queuePosition > 0 ? remainingQueue[queuePosition - 1] : null;
+  const nextJobId = queuePosition >= 0 && queuePosition < remainingQueue.length - 1
+    ? remainingQueue[queuePosition + 1]
+    : null;
+
+  /** Navigation interne du flux, avec garde sur les modifications non enregistrées. */
+  const goToJob = useCallback((targetId: string | null, options?: { skipDirtyCheck?: boolean }) => {
+    if (isDirty && !options?.skipDirtyCheck
+      && !confirm("Des modifications non sauvegardées seront perdues. Continuer ?")) return;
+    if (targetId) router.replace(`/upload/review?job=${targetId}`);
+    else router.push("/upload");
+  }, [isDirty, router]);
 
   // Garde "modifications non sauvegardées" sur navigation navigateur (fermer onglet, recharger)
   useEffect(() => {
@@ -370,6 +454,9 @@ function ReviewPageInner() {
     if (!jobId) { router.replace("/upload"); return; }
     let cancelled = false;
 
+    // Pas de remise à zéro manuelle ici : la `key` posée par `ReviewPageKeyed` remonte
+    // le composant à chaque changement de document, l'état repart vierge tout seul.
+
     void (async () => {
       const res = await fetch(`/api/document-jobs/${jobId}`, { cache: "no-store" });
       const json = await res.json().catch(() => ({}));
@@ -381,8 +468,10 @@ function ReviewPageInner() {
       }
       const job = json.job as ReviewJob;
       if (job.status !== "needs_review") {
-        // Déjà enregistré (ou en échec) : rien à réviser, on renvoie vers la file.
-        router.replace("/upload");
+        // Déjà enregistré entre-temps (Cron d'enregistrement automatique, autre
+        // onglet…) : on le retire du flux — l'effet de position ci-dessous enchaîne
+        // sur le document suivant au lieu de renvoyer à la file.
+        onReviewed(job.id);
         return;
       }
 
@@ -418,7 +507,25 @@ function ReviewPageInner() {
       .catch(() => {});
 
     return () => { cancelled = true; };
-  }, [jobId, router]);
+  }, [jobId, router, onReviewed]);
+
+  // Avance automatique du flux : dès que le document courant est marqué traité
+  // (enregistré ici, ou rattrapé par le Cron), on passe au suivant restant — au plus
+  // proche de son ancienne position. Plus rien à réviser → retour à la file.
+  useEffect(() => {
+    if (!jobId || !reviewedIds.has(jobId) || reviewQueue.length === 0) return;
+    const originalIndex = reviewQueue.indexOf(jobId);
+    const nextId = reviewQueue.slice(originalIndex + 1).find((id) => !reviewedIds.has(id))
+      ?? remainingQueue[0]
+      ?? null;
+    // Navigation immédiate sauf bannière de succès affichée (laisser le temps de la lire).
+    const delay = savedBanner ? 1200 : 0;
+    const timer = window.setTimeout(() => {
+      if (nextId) router.replace(`/upload/review?job=${nextId}`);
+      else router.push("/upload");
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [jobId, reviewedIds, reviewQueue, remainingQueue, savedBanner, router]);
 
   // Real-time validation re-run whenever ext changes
   const validation = useMemo<ValidationResult | null>(() => {
@@ -477,8 +584,11 @@ function ReviewPageInner() {
 
       setIsDirty(false);
       setSavedBanner(true);
-      // Retour à la file : il reste probablement d'autres documents à réviser.
-      setTimeout(() => router.push("/upload"), 1500);
+      // Document traité : l'effet d'avance automatique enchaîne sur le suivant du
+      // flux (ou renvoie à la file s'il ne reste rien) — plus d'aller-retour /upload
+      // entre chaque facture.
+      if (jobId) onReviewed(jobId);
+      else setTimeout(() => router.push("/upload"), 1500);
     } catch {
       setError("Erreur réseau.");
       setSaving(false);
@@ -570,6 +680,45 @@ function ReviewPageInner() {
       {/* ── Right: Form ── */}
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-2xl px-6 py-8">
+          {/* Barre de flux : position dans la file de révision + navigation, sans
+              repasser par /upload. Visible dès que la file est connue. */}
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => goToJob(null)}
+              className="flex cursor-pointer items-center gap-1.5 text-[13px] font-medium text-[var(--kn-text-muted)] transition-colors hover:text-[var(--kn-text)]"
+            >
+              <ArrowLeft className="size-4" /> File d&apos;attente
+            </button>
+            {remainingQueue.length > 0 && queuePosition >= 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-[13px] font-semibold tabular-nums text-[var(--kn-text)]">
+                  Document {queuePosition + 1} <span className="font-normal text-[var(--kn-text-muted)]">sur {remainingQueue.length} à réviser</span>
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={!previousJobId}
+                    onClick={() => goToJob(previousJobId)}
+                    aria-label="Document précédent"
+                    className="cursor-pointer rounded-lg border border-[var(--kn-border)] p-1.5 text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ChevronLeft className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!nextJobId}
+                    onClick={() => goToJob(nextJobId)}
+                    aria-label="Document suivant"
+                    className="cursor-pointer rounded-lg border border-[var(--kn-border)] p-1.5 text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ChevronRight className="size-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Header */}
           <div className="mb-6 flex items-start justify-between gap-4">
             <div>
@@ -588,7 +737,7 @@ function ReviewPageInner() {
 
           {savedBanner && (
             <div role="status" className="mb-4 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 font-semibold">
-              <CheckCircle2 className="size-4 shrink-0" /> Facture enregistrée — redirection…
+              <CheckCircle2 className="size-4 shrink-0" /> Facture enregistrée{remainingQueue.length > 1 ? " — document suivant…" : " — retour à la file…"}
             </div>
           )}
 
@@ -958,15 +1107,20 @@ function ReviewPageInner() {
           {/* Bottom save */}
           <div className="flex justify-end gap-3 pb-8">
             <button
-              onClick={() => {
-                if (isDirty && !confirm("Des modifications non sauvegardées seront perdues. Continuer ?")) return;
-                router.push("/upload");
-              }}
-              className="rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]">
+              onClick={() => goToJob(null)}
+              className="cursor-pointer rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]">
               Annuler
             </button>
+            {nextJobId && (
+              <button
+                onClick={() => goToJob(nextJobId)}
+                title="Laisser ce document en attente et passer au suivant."
+                className="flex cursor-pointer items-center gap-1.5 rounded-xl border border-[var(--kn-border)] px-5 py-2.5 text-[13px] font-medium text-[var(--kn-text)] hover:bg-[var(--kn-active)]">
+                Passer <ChevronRight className="size-4" />
+              </button>
+            )}
             <button onClick={handleSave} disabled={saving}
-              className="flex items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
+              className="flex cursor-pointer items-center gap-2 rounded-xl bg-[var(--kn-solid)] px-5 py-2.5 text-[13px] font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
               {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
               {hasErrors ? "Enregistrer avec justification" : "Enregistrer"}
             </button>

@@ -117,6 +117,46 @@ const BUCKET_OF: Record<DocumentJobStatus, QueueBucket> = {
   failed: "failed",
   rejected_non_invoice: "rejected",
 };
+/**
+ * Étapes du parcours d'un document, dans l'ordre où il les traverse. Sert la barre de
+ * progression segmentée : une seule barre en pourcentage ne disait pas OÙ en était le
+ * lot — 40 % pouvait aussi bien signifier « tout est encore en file d'attente » que
+ * « la moitié attend une révision humaine », deux situations qui n'appellent pas du
+ * tout la même action.
+ */
+type PipelineStage = "waiting" | "preparing" | "extracting" | "review" | "saved" | "issue";
+const STAGE_OF: Record<DocumentJobStatus, PipelineStage> = {
+  queued: "waiting",
+  direct_queued: "waiting",
+  uploading_to_claude: "preparing",
+  direct_processing: "extracting",
+  batched: "extracting",
+  processing: "extracting",
+  needs_review: "review",
+  completed: "saved",
+  failed: "issue",
+  rejected_non_invoice: "issue",
+};
+/** Ordre d'affichage de la barre + libellés. `issue` en dernier : c'est une sortie de route. */
+const PIPELINE_STAGES: Array<{ key: PipelineStage; label: string; className: string; dotClassName: string }> = [
+  { key: "waiting", label: "En attente", className: "bg-[#cbd5e1]", dotClassName: "bg-[#94a3b8]" },
+  { key: "preparing", label: "Préparation", className: "bg-[#fdba74]", dotClassName: "bg-[#fb923c]" },
+  { key: "extracting", label: "Extraction", className: "bg-[#f97316]", dotClassName: "bg-[#f97316]" },
+  { key: "review", label: "À réviser", className: "bg-[#fbbf24]", dotClassName: "bg-[#f59e0b]" },
+  { key: "saved", label: "Enregistrées", className: "bg-emerald-500", dotClassName: "bg-emerald-500" },
+  { key: "issue", label: "À traiter", className: "bg-red-400", dotClassName: "bg-red-500" },
+];
+
+/** Teintes des badges de statut par étape — texte foncé sur fond clair (contraste ≥ 4,5:1). */
+const STAGE_BADGE_CLASS: Record<PipelineStage, string> = {
+  waiting: "bg-slate-100 text-slate-700",
+  preparing: "bg-orange-100 text-orange-800",
+  extracting: "bg-orange-100 text-orange-800",
+  review: "bg-amber-100 text-amber-800",
+  saved: "bg-emerald-100 text-emerald-800",
+  issue: "bg-red-100 text-red-700",
+};
+
 const BUCKET_LABEL: Record<QueueBucket, string> = {
   waiting: "En attente",
   processing: "En cours",
@@ -781,6 +821,20 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
   const doneCount = Math.min(progressTotal, ocrCompleted + failedCount + rejectedCount);
   const progressPct = Math.min(100, Math.round((doneCount / progressTotal) * 100));
 
+  // Répartition du lot suivi par étape du parcours — alimente la barre segmentée.
+  const stageCounts = useMemo(() => {
+    const counts = new Map<PipelineStage, number>();
+    for (const job of trackedJobs) counts.set(STAGE_OF[job.status], (counts.get(STAGE_OF[job.status]) ?? 0) + 1);
+    return counts;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs, activeUploadJobIds, now]);
+  const visibleStages = PIPELINE_STAGES.filter((stage) => (stageCounts.get(stage.key) ?? 0) > 0);
+  const reviewPendingCount = stageCounts.get("review") ?? 0;
+  /** Premier document à réviser du lot, dans l'ordre de dépôt — cible du bouton d'action. */
+  const firstReviewJobId = trackedJobs
+    .filter((job) => job.status === "needs_review")
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())[0]?.id ?? null;
+
   const hasAutoResult = autoResult.autoSaved.length > 0 || autoResult.toReview.length > 0 || autoResult.duplicates.length > 0;
   const lowConfidenceSaved = autoResult.autoSaved.filter((entry) => entry.lowConfidence);
 
@@ -991,12 +1045,53 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
 
           {trackedJobs.length > 0 && (
             <div className="mt-4">
-              <div className="mb-1.5 flex items-center justify-end text-xs">
+              <div className="mb-1.5 flex items-center justify-between text-xs">
+                <span className="text-[var(--kn-text-muted)]">
+                  {fmt(trackedJobs.length)} document{trackedJobs.length > 1 ? "s" : ""} dans ce dépôt
+                </span>
                 <span className="font-semibold tabular-nums text-[var(--kn-text)]">{fmt(doneCount)}/{fmt(progressTotal)} · {progressPct} %</span>
               </div>
-              <div className="h-2.5 overflow-hidden rounded-full bg-[var(--kn-panel)]">
-                <div className="h-full rounded-full bg-[#f97316] transition-[width] duration-500" style={{ width: `${progressPct}%` }} />
+
+              {/* Barre segmentée : chaque segment = une étape du parcours, largeur
+                  proportionnelle au nombre de documents qui s'y trouvent. Dit d'un
+                  coup d'œil OÙ le lot est bloqué, ce qu'un pourcentage unique ne
+                  pouvait pas exprimer. */}
+              <div className="flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-[var(--kn-panel)]">
+                {visibleStages.map((stage) => (
+                  <div
+                    key={stage.key}
+                    className={`h-full transition-[width] duration-500 ${stage.className}`}
+                    style={{ width: `${((stageCounts.get(stage.key) ?? 0) / (trackedJobs.length || 1)) * 100}%` }}
+                    title={`${stage.label} : ${fmt(stageCounts.get(stage.key) ?? 0)}`}
+                  />
+                ))}
               </div>
+
+              {/* Légende chiffrée — le vrai contenu informatif : couleur seule ne
+                  suffit pas (contraste, daltonisme), chaque étape porte son compte. */}
+              <div className="mt-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+                {visibleStages.map((stage) => (
+                  <span key={stage.key} className="inline-flex items-center gap-1.5 text-xs text-[var(--kn-text-muted)]">
+                    <span className={`size-2 shrink-0 rounded-full ${stage.dotClassName}`} aria-hidden />
+                    <span className="font-semibold tabular-nums text-[var(--kn-text)]">{fmt(stageCounts.get(stage.key) ?? 0)}</span>
+                    {stage.label}
+                  </span>
+                ))}
+              </div>
+
+              {/* Action directe quand des documents attendent une révision : évite de
+                  chercher le premier dans la liste plus bas. */}
+              {reviewPendingCount > 0 && firstReviewJobId && (
+                <button
+                  type="button"
+                  onClick={() => router.push(`/upload/review?job=${firstReviewJobId}`)}
+                  className="mt-3 flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#f97316] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                >
+                  <FileText className="size-4" />
+                  Réviser {fmt(reviewPendingCount)} document{reviewPendingCount > 1 ? "s" : ""}
+                </button>
+              )}
+
               {failedCount > 0 && <p className="mt-2 text-xs font-medium text-red-600">{failedCount} document{failedCount > 1 ? "s" : ""} en échec — vous pouvez les relancer individuellement.</p>}
               {rejectedCount > 0 && <p className="mt-2 text-xs font-medium text-amber-700">{rejectedCount} document{rejectedCount > 1 ? "s" : ""} ignoré{rejectedCount > 1 ? "s" : ""} (pas reconnu{rejectedCount > 1 ? "s" : ""} comme facture) — vérifiez et forcez le traitement si besoin.</p>}
             </div>
@@ -1170,21 +1265,31 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
                     ref={queueVirtualizer.measureElement}
                     style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}
                   >
-                    <div className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
+                    <div className={`flex items-center gap-3 rounded-xl border bg-[var(--kn-card)] px-4 py-3 transition-colors ${
+                      job.status === "needs_review" ? "border-amber-300" : "border-[var(--kn-border)]"
+                    }`}>
                       {["direct_processing", "uploading_to_claude", "batched", "processing"].includes(job.status) ? <Loader2 className="size-5 shrink-0 animate-spin text-[#f97316]" />
                         : job.status === "needs_review" ? <CheckCircle2 className="size-5 shrink-0 text-emerald-600" />
                         : job.status === "failed" ? <AlertCircle className="size-5 shrink-0 text-red-600" />
                         : job.status === "rejected_non_invoice" ? <AlertCircle className="size-5 shrink-0 text-amber-600" /> : <Clock3 className="size-5 shrink-0 text-amber-600" />}
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium text-[var(--kn-text)]">{job.original_name}</p>
-                        <p className="text-xs text-[var(--kn-text-muted)]">
-                          {statusLabel[job.status] ?? job.status}{job.attempt_count ? ` · tentative ${job.attempt_count}` : ""}
-                          {job.status === "rejected_non_invoice" && job.prefilter_type ? ` · détecté comme ${prefilterTypeLabel[job.prefilter_type] ?? job.prefilter_type}` : ""}
-                        </p>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                          {/* Badge de statut : la couleur double le texte, jamais seule
+                              (contraste/daltonisme) — le libellé reste toujours lisible. */}
+                          <span className={`rounded-full px-1.5 py-0.5 text-[11px] font-semibold ${STAGE_BADGE_CLASS[STAGE_OF[job.status]]}`}>
+                            {statusLabel[job.status] ?? job.status}
+                          </span>
+                          <span className="text-xs text-[var(--kn-text-muted)]">
+                            {(job.file_size / 1024 / 1024).toFixed(1)} Mo
+                            {job.attempt_count > 1 ? ` · tentative ${job.attempt_count}` : ""}
+                            {job.status === "rejected_non_invoice" && job.prefilter_type ? ` · détecté comme ${prefilterTypeLabel[job.prefilter_type] ?? job.prefilter_type}` : ""}
+                          </span>
+                        </div>
                         {job.last_error && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.last_error}</p>}
                       </div>
                       {job.status === "needs_review" && (
-                        <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="shrink-0 cursor-pointer rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white">Réviser</button>
+                        <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="shrink-0 cursor-pointer rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90">Réviser</button>
                       )}
                       {job.status === "failed" && (
                         <button onClick={() => void retry(job.id)} className="shrink-0 cursor-pointer rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>
