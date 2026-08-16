@@ -4,7 +4,35 @@
  *
  * Le navigateur filtre pour donner un retour immédiat ; le serveur revalide tout, y
  * compris les magic bytes — un client peut mentir sur le type déclaré.
+ *
+ * Les octets des fichiers ne transitent PLUS par `POST /api/document-jobs` : ils sont
+ * envoyés directement du navigateur vers le bucket Supabase Storage (policy RLS
+ * `org_upload_invoice_files`, `20260801000003_rls_performance.sql` — vérifie déjà que
+ * le chemin commence par `{org_id}/{user_id}/`, aucun contournement possible côté
+ * client). La route ne reçoit plus qu'un lot de métadonnées JSON (chemins déjà
+ * déposés) ; elle retélécharge chaque fichier depuis le bucket pour revalider les
+ * magic bytes avant de créer la ligne `document_jobs`.
+ *
+ * Pourquoi ce détour : une Vercel Function a un plafond de corps de requête entrant de
+ * **4,5 Mo, fixe, non configurable** (`FUNCTION_PAYLOAD_TOO_LARGE` — vérifié sur la doc
+ * Vercel, pas supposé). `proxyClientMaxBodySize` (next.config.ts) ne règle QUE le
+ * tampon du proxy Next, une couche AU-DESSUS de ce plafond — aucune valeur qu'on y met
+ * ne peut le dépasser. Un seul PDF de plus de 4,5 Mo (bien en dessous de
+ * `MAX_FILE_SIZE`) suffisait à le déclencher, indépendamment du regroupement par lot.
  */
+
+import { safeFileName } from "@/lib/extraction/storage-path";
+
+/**
+ * Chemin de dépôt d'un document en file, identique à ce que la route posait
+ * elle-même avant ce changement — seul l'appelant (désormais le navigateur) change.
+ * Les deux premiers segments sont ceux vérifiés par la policy RLS
+ * `org_upload_invoice_files` : un chemin construit autrement est rejeté à l'écriture,
+ * pas seulement ignoré.
+ */
+export function buildQueueStoragePath(orgId: string, userId: string, jobId: string, originalName: string): string {
+  return `${orgId}/${userId}/queue/${jobId}-${safeFileName(originalName)}`;
+}
 
 export const ACCEPTED_MIME_TYPES = [
   "application/pdf",
@@ -39,22 +67,14 @@ export const MAX_FILES = 1000;
 export const MAX_ARCHIVE_SIZE = 100 * 1024 * 1024;
 /** Poids cumulé d'une sélection. */
 export const MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024;
-/** Documents par appel à `POST /api/document-jobs` — borne la taille du multipart. */
-export const MAX_FILES_PER_REQUEST = 50;
 /**
- * Volume cumulé par appel.
- *
- * Le nombre de fichiers ne suffit pas à borner le multipart : 50 × 20 Mo dépasserait
- * le plafond de corps de requête de la plateforme (100 Mo sur Vercel Functions). Le
- * navigateur découpe donc la sélection sur les deux critères, avec de la marge pour
- * l'enveloppe MIME.
- *
- * Doit rester ≤ `proxyClientMaxBodySize` (next.config.ts) : Next 16 tronque/rejette
- * en amont de cette route tout corps dépassant cette limite (10 Mo par défaut, non
- * lié au plafond « plateforme » ci-dessus). Une valeur augmentée ici sans l'augmenter
- * là-bas fait échouer en 413 les lots les plus lourds, silencieusement pour les autres.
+ * Entrées de métadonnées par appel à `POST /api/document-jobs` (un fichier déjà
+ * déposé dans le bucket = une entrée, quelques centaines d'octets de JSON — plus
+ * question de taille de corps ici). Borne la DURÉE de la requête, pas son poids :
+ * chaque entrée fait retélécharger son fichier depuis le bucket pour revalider les
+ * magic bytes, un aller-retour réseau par document.
  */
-export const MAX_REQUEST_BYTES = 80 * 1024 * 1024;
+export const MAX_FILES_PER_REQUEST = 50;
 /**
  * Jobs réservés par une invocation du worker `direct`.
  *
@@ -79,28 +99,15 @@ export const DIRECT_JOBS_PER_INVOCATION = 10;
 export const BATCH_JOBS_PER_INVOCATION = 100;
 
 /**
- * Découpe une sélection en envois qui respectent les deux bornes.
- *
- * Un fichier seul dépassant le budget part quand même dans son propre envoi : il est
- * déjà sous `MAX_FILE_SIZE`, donc toujours largement sous le plafond de la plateforme.
+ * Découpe une liste (fichiers, ou métadonnées de fichiers déjà déposés) par comptage
+ * pur — plus de critère de poids : les octets ne transitent plus par cette route, le
+ * découpage ne borne que la durée côté serveur (`MAX_FILES_PER_REQUEST`).
  */
-export function chunkForUpload<T extends { size: number }>(files: T[]): T[][] {
+export function chunkForUpload<T>(items: T[]): T[][] {
   const chunks: T[][] = [];
-  let current: T[] = [];
-  let currentBytes = 0;
-
-  for (const file of files) {
-    const wouldExceed = current.length >= MAX_FILES_PER_REQUEST
-      || (current.length > 0 && currentBytes + file.size > MAX_REQUEST_BYTES);
-    if (wouldExceed) {
-      chunks.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-    current.push(file);
-    currentBytes += file.size;
+  for (let i = 0; i < items.length; i += MAX_FILES_PER_REQUEST) {
+    chunks.push(items.slice(i, i + MAX_FILES_PER_REQUEST));
   }
-  if (current.length) chunks.push(current);
   return chunks;
 }
 /**

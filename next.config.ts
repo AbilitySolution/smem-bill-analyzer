@@ -3,16 +3,22 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   experimental: {
     // Next 16 : le proxy (proxy.ts) mémorise le corps de chaque requête pour
-    // pouvoir le relire, plafonné par défaut à 10 Mo — non configuré jusqu'ici.
-    // L'import en lot envoie des multiparts jusqu'à MAX_REQUEST_BYTES
-    // (lib/documents/queue.ts, 80 Mo) : au-delà de 10 Mo, le corps était
-    // tronqué/rejeté avant d'atteindre app/api/document-jobs/route.ts, avec un
-    // 413 sur les lots les plus lourds — symptôme observé à l'origine : sur un
-    // dépôt de 72 fichiers, seuls les lots restés sous 10 Mo passaient (52/72).
-    // Marge au-delà de 80 Mo pour l'enveloppe multipart (limites de parties,
-    // en-têtes), sous le plafond réel de la plateforme (100 Mo sur Vercel
-    // Functions) — au-delà, Vercel rejette avant même que Next ne voie la requête.
-    proxyClientMaxBodySize: "90mb",
+    // pouvoir le relire, plafonné par défaut à 10 Mo.
+    //
+    // Historique : ce réglage a été monté à 90 Mo pour laisser passer l'upload en lot
+    // de factures en multipart — corrigeait bien un premier symptôme (413 sur un gros
+    // dépôt), mais sur de mauvaises bases. La vraie limite qui a fini par mordre est
+    // celle des Vercel Functions elles-mêmes : 4,5 Mo de corps de requête ENTRANT,
+    // fixe, non configurable (`FUNCTION_PAYLOAD_TOO_LARGE`, vérifié sur la doc Vercel).
+    // Ce réglage-ci est une couche AU-DESSUS de cette limite, donc incapable de la
+    // dépasser quelle que soit sa valeur — le vrai fix a été de sortir les octets des
+    // fichiers de cette route (dépôt direct navigateur → Supabase Storage, voir
+    // lib/documents/queue.ts). `POST /api/document-jobs` ne reçoit plus que des lots de
+    // métadonnées JSON, largement sous le défaut de 10 Mo — cette valeur n'a donc plus
+    // besoin d'être relevée, gardée à titre de marge pour d'éventuels gros lots de
+    // métadonnées (des milliers de fichiers en un seul lot, cas non atteint en pratique
+    // vu `MAX_FILES_PER_REQUEST`).
+    proxyClientMaxBodySize: "4mb",
   },
 };
 

@@ -12,7 +12,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   BATCH_JOBS_PER_INVOCATION, DIRECT_DOCUMENT_LIMIT, DIRECT_JOBS_PER_INVOCATION,
   MAX_ARCHIVE_SIZE, MAX_FILES, MAX_FILE_SIZE, MAX_TOTAL_SIZE,
-  chunkForUpload, detectDocumentType, extensionOf, mimeTypeFromName, processingModeFor,
+  buildQueueStoragePath, chunkForUpload, detectDocumentType, extensionOf, mimeTypeFromName, processingModeFor,
 } from "@/lib/documents/queue";
 import {
   estimateForDocumentCount, estimateRemainingForJobs, type ProcessingEstimateStats,
@@ -60,6 +60,24 @@ function isZip(file: File) {
     || file.type === "application/x-zip-compressed"
     || extensionOf(file.name) === "zip";
 }
+
+/** Parallélise un travail par fichier sans dépasser `limit` en vol — même forme que
+ * côté Edge Functions/route serveur (`mapWithConcurrency`), gardée locale ici plutôt
+ * que partagée : la version navigateur n'a rien de spécifique à mutualiser. */
+async function mapWithConcurrency<T, R>(values: T[], limit: number, worker: (value: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(values.length);
+  let nextIndex = 0;
+  async function run() {
+    while (nextIndex < values.length) {
+      const index = nextIndex++;
+      results[index] = await worker(values[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => run()));
+  return results;
+}
+/** Envois directs navigateur → Storage en vol simultanément. */
+const UPLOAD_CONCURRENCY = 6;
 
 const statusLabel: Record<DocumentJobStatus, string> = {
   direct_queued: "En attente",
@@ -121,7 +139,7 @@ function sameFile(a: File, b: File) {
   return a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
 }
 
-export function DocumentQueue({ orgId }: { orgId: string }) {
+export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -424,9 +442,17 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   }
 
   /**
-   * Envoi de la sélection, découpée par nombre ET par volume : le plafond de corps de
-   * requête de la plateforme est atteint bien avant les 10 fichiers si les scans sont
-   * lourds.
+   * Envoi de la sélection, en deux temps.
+   *
+   * 1. Chaque fichier est déposé DIRECTEMENT du navigateur vers le bucket Supabase
+   *    Storage (policy RLS `org_upload_invoice_files`) — les octets ne passent plus
+   *    par notre route. Une Vercel Function a un plafond de corps de requête entrant
+   *    fixe et non configurable (4,5 Mo, `FUNCTION_PAYLOAD_TOO_LARGE`) : un seul PDF
+   *    au-delà — bien en dessous de `MAX_FILE_SIZE` — le déclenchait, quel que soit le
+   *    découpage par lot côté serveur.
+   * 2. Une fois déposés, leurs métadonnées (chemins, pas de contenu) sont envoyées par
+   *    lots JSON à `/api/document-jobs`, qui retélécharge chaque fichier pour revalider
+   *    les magic bytes avant de créer sa ligne `document_jobs`.
    *
    * Un envoi qui échoue ne fait plus tout perdre : les jobs déjà créés sont conservés et
    * démarrés, seuls les fichiers réellement non envoyés restent dans la sélection. Sans
@@ -444,6 +470,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
     setAutoResult({ autoSaved: [], toReview: [], duplicates: [] });
 
     const processingMode = processingModeFor(files.length);
+    const supabase = createClient();
     const submittedJobIds: string[] = [];
     const notSent: File[] = [];
     const failures: string[] = [];
@@ -456,35 +483,66 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
       window.localStorage.setItem(ACTIVE_UPLOAD_STORAGE_KEY, JSON.stringify(submittedJobIds));
     };
 
-    for (const chunk of chunkForUpload(files)) {
+    // 1. Dépôt direct vers Storage, en parallèle borné.
+    type UploadedMeta = { id: string; file_path: string; original_name: string; mime_type: string; file_size: number };
+    const byId = new Map<string, File>();
+    const uploaded: UploadedMeta[] = [];
+
+    await mapWithConcurrency(files, UPLOAD_CONCURRENCY, async (file) => {
+      const jobId = crypto.randomUUID();
+      byId.set(jobId, file);
+      const filePath = buildQueueStoragePath(orgId, userId, jobId, file.name);
+      const { error: uploadError } = await supabase.storage.from("invoice-files").upload(
+        filePath, file, { contentType: file.type, upsert: false },
+      );
+      if (uploadError) {
+        failures.push(`${file.name} : ${uploadError.message}`);
+        notSent.push(file);
+        return;
+      }
+      uploaded.push({ id: jobId, file_path: filePath, original_name: file.name, mime_type: file.type, file_size: file.size });
+      sent += 1;
+      setUploadedCount(sent);
+    });
+
+    // 2. Création des jobs par lots de métadonnées — JSON léger, plus de contrainte de
+    // poids ici, seulement de nombre (chaque entrée fait retélécharger son fichier
+    // côté serveur pour la revalidation).
+    for (const chunk of chunkForUpload(uploaded)) {
+      const chunkFiles = chunk.map((meta) => byId.get(meta.id)!).filter(Boolean);
       try {
-        const formData = new FormData();
-        formData.append("processing_mode", processingMode);
-        chunk.forEach((file) => formData.append("files", file));
-        const response = await fetch("/api/document-jobs", { method: "POST", body: formData });
+        const response = await fetch("/api/document-jobs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ processing_mode: processingMode, files: chunk }),
+        });
         const payload = await response.json().catch(() => ({}));
 
         if (!response.ok && !(payload.jobs ?? []).length) {
           failures.push(payload.error ?? `Envoi refusé (${response.status}).`);
-          notSent.push(...chunk);
+          notSent.push(...chunkFiles);
           continue;
         }
 
         trackSubmitted((payload.jobs ?? []).map((job: { id: string }) => job.id));
-        // Le serveur nomme les fichiers qu'il n'a pas pu mettre en file : eux seuls
-        // restent en sélection, les autres sont bien partis.
-        const rejectedNames = new Set<string>(
-          ((payload.errors ?? []) as Array<{ name?: string; message?: string }>).map((item) => item.name ?? ""),
+        // Le serveur identifie les fichiers qu'il n'a pas pu mettre en file par leur
+        // id (celui-là même utilisé pour le chemin de dépôt) : eux seuls restent en
+        // sélection, les autres sont bien partis.
+        const rejectedIds = new Set<string>(
+          ((payload.errors ?? []) as Array<{ id?: string; name?: string; message?: string }>).map((item) => item.id ?? ""),
         );
         for (const item of (payload.errors ?? []) as Array<{ name?: string; message?: string }>) {
           failures.push(`${item.name ?? "document"} : ${item.message ?? "mise en file impossible"}`);
         }
-        notSent.push(...chunk.filter((file) => rejectedNames.has(file.name)));
-        sent += chunk.length - rejectedNames.size;
-        setUploadedCount(sent);
+        for (const meta of chunk) {
+          if (rejectedIds.has(meta.id)) {
+            const file = byId.get(meta.id);
+            if (file) notSent.push(file);
+          }
+        }
       } catch {
         failures.push("Erreur réseau pendant l'envoi.");
-        notSent.push(...chunk);
+        notSent.push(...chunkFiles);
       }
     }
 
