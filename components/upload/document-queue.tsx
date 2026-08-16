@@ -19,7 +19,7 @@ import {
 } from "@/lib/documents/processing-estimate";
 import { isTerminalJobStatus, type DocumentJob, type DocumentJobStatus } from "@/lib/types/document-job";
 
-type AutoSavedEntry = { jobId: string; invoiceId: string; factureNumber: string };
+type AutoSavedEntry = { jobId: string; invoiceId: string; factureNumber: string; lowConfidence: boolean };
 type DuplicateEntry = { jobId: string; existingInvoiceId: string; factureNumber: string };
 type ToReviewEntry = { jobId: string; factureNumber: string; reason: string };
 
@@ -724,6 +724,7 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
   const progressPct = Math.min(100, Math.round((doneCount / progressTotal) * 100));
 
   const hasAutoResult = autoResult.autoSaved.length > 0 || autoResult.toReview.length > 0 || autoResult.duplicates.length > 0;
+  const lowConfidenceSaved = autoResult.autoSaved.filter((entry) => entry.lowConfidence);
 
   // Lot qui vient de se terminer : on garde le panneau le temps que l'utilisateur voie
   // le résultat. Au-delà, plus rien à afficher.
@@ -949,15 +950,32 @@ export function DocumentQueue({ orgId }: { orgId: string }) {
         <div className="mt-4 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
           <p className="text-sm font-semibold text-[var(--kn-text)]">Résultat du traitement</p>
           <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1.5 text-[13px]">
-            <span className="inline-flex items-center gap-1.5 text-emerald-700"><CheckCircle2 className="size-4" /> {autoResult.autoSaved.length} enregistrée{autoResult.autoSaved.length > 1 ? "s" : ""} auto</span>
-            <span className="inline-flex items-center gap-1.5 text-amber-700"><Clock3 className="size-4" /> {autoResult.toReview.length} à réviser</span>
-            <span className="inline-flex items-center gap-1.5 text-[var(--kn-text-muted)]"><FileText className="size-4" /> {autoResult.duplicates.length} déjà en base</span>
+            <span className="inline-flex items-center gap-1.5 text-emerald-700">
+              <CheckCircle2 className="size-4" /> {fmt(autoResult.autoSaved.length)} enregistrée{autoResult.autoSaved.length > 1 ? "s" : ""} auto
+              {lowConfidenceSaved.length > 0 && <span className="font-normal text-[var(--kn-text-muted)]"> (dont {fmt(lowConfidenceSaved.length)} à vérifier)</span>}
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-amber-700"><Clock3 className="size-4" /> {fmt(autoResult.toReview.length)} à réviser</span>
+            <span className="inline-flex items-center gap-1.5 text-[var(--kn-text-muted)]"><FileText className="size-4" /> {fmt(autoResult.duplicates.length)} déjà en base</span>
           </div>
 
           {autoResult.autoSaved.length > 0 && (
             <p className="mt-2 text-xs text-[var(--kn-text-muted)]">
               Les factures enregistrées automatiquement arrivent « à contrôler » dans Mes documents.
             </p>
+          )}
+
+          {lowConfidenceSaved.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-red-700">Enregistrées à confiance réduite — à vérifier en priorité</p>
+              <div className="space-y-1">
+                {lowConfidenceSaved.map((entry) => (
+                  <Link key={entry.jobId} href={`/documents/extraction?id=${entry.invoiceId}`} className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700 hover:bg-red-100">
+                    <span className="truncate">Facture {entry.factureNumber} — commune ou extraction incertaine</span>
+                    <span className="inline-flex shrink-0 items-center gap-1 font-medium">Voir <ExternalLink className="size-3.5" /></span>
+                  </Link>
+                ))}
+              </div>
+            </div>
           )}
 
           {autoResult.duplicates.length > 0 && (
