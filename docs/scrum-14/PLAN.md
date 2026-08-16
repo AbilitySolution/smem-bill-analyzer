@@ -229,10 +229,10 @@ fois le précédent vert (typecheck + lint + `vitest`).
 Pas de table en base : c'est de la donnée de référence publique, immuable, qui n'a aucune raison
 d'être requêtable. Un fichier versionné est plus simple à relire, à tester et à faire évoluer.
 
-⚠️ **Avant de figer le fichier, l'agent doit vérifier les 34 `code_insee` contre le COG INSEE
-officiel** (fichier communes des DOM). Les valeurs de §8 suivent l'ordre alphabétique 97201→97234
-et sont fiables, mais un identifiant erroné est le genre d'erreur qu'on ne détecte que six mois
-plus tard.
+✅ **Fait.** Les 34 `code_insee` ont été vérifiés contre le COG INSEE officiel : **31 étaient
+faux** et ont été corrigés (cf. §8). L'hypothèse « ordre alphabétique 97201→97234 » était l'erreur.
+C'est exactement le genre de bug qu'on ne détecte que six mois plus tard, une fois les factures
+rattachées au mauvais code.
 
 **1b. Rapprochement référentiel ↔ base (le point délicat)**
 
@@ -374,7 +374,7 @@ Le plan passe donc de 5 à **4 lots**.
 bidon) :
 
 1. Le sélecteur propose exactement 14 communes, dont Le Lamentin, et aucune des 20 existantes.
-2. Créer Le Lamentin → `code_insee = 97214`, `latitude`/`longitude` renseignées automatiquement.
+2. Créer Le Lamentin → `code_insee = 97213`, `latitude`/`longitude` renseignées automatiquement.
 3. Elle apparaît dans Paramètres, dans le sélecteur de rapport, dans la vue couverture (à 0),
    dans le sélecteur de rattachement de facture.
 4. Le sélecteur ne propose plus que 13 communes.
@@ -407,7 +407,7 @@ bidon) :
 2. Reporter les réponses **en commentaire du ticket SCRUM-14** — les deux questions ouvertes y
    sont depuis le début, elles doivent être fermées noir sur blanc.
 3. Confirmer avec Laurent : le rôle qu'il souhaite (créer lui-même vs demander à Ability).
-4. Vérifier les 34 `code_insee` contre le COG INSEE, puis lancer l'agent sur le lot 1.
+4. ~~Vérifier les 34 `code_insee` contre le COG INSEE~~ → ✅ fait au lot 1a, 31 codes corrigés.
 
 ---
 
@@ -415,51 +415,62 @@ bidon) :
 
 Contenu de `lib/communes/referentiel-martinique.ts`.
 
-**Statut des données** : `code_insee` en séquence alphabétique 97201→97234, conforme à la
-codification INSEE des DOM — **à confirmer contre le COG officiel avant de figer** (lot 1a).
-Coordonnées = centroïdes approximatifs, même niveau de précision que la migration
-`20260728000000_communes-latlng.sql` existante : largement suffisant pour une correction météo ou
-un calcul de longueur de nuit à l'échelle mensuelle, à quelques kilomètres près.
+**Statut des données** : ✅ **vérifié et corrigé au lot 1a** contre deux sources officielles
+concordantes (COG INSEE 2026 `v_commune_2026.csv` et `geo.api.gouv.fr`, département 972).
+
+⚠️ **La version initiale de ce tableau était fausse sur 31 des 34 codes.** Elle supposait une
+séquence strictement alphabétique 97201→97234. Le COG ne l'est pas : **Le Morne-Vert (97233)** et
+**Bellefontaine (97234)** ont été créées tardivement (détachées du Carbet et de Case-Pilote) et
+numérotées à la fin. D'où un décalage de −1 à partir du Carbet, puis de −2 à partir du Prêcheur.
+Le décalage n'étant pas uniforme, **tout remapping doit se faire par nom, jamais par arithmétique
+sur le code**. Ne pas « ranger » ce tableau par ordre alphabétique en réattribuant les codes :
+`lib/communes/referentiel-martinique.test.ts` échoue si on le fait.
+
+Coordonnées = centroïdes des polygones communaux renvoyés par `geo.api.gouv.fr`, arrondis à 4
+décimales. Elles remplacent les valeurs approximatives initiales, fausses de plus de 3 km sur 7
+communes et de plus de 10 km sur Case-Pilote, Ducos et Le Marigot (points hors du territoire
+communal). Ces mêmes valeurs fausses sont en base depuis `20260728000000_communes-latlng.sql` :
+le lot 1c les corrige.
 
 **Colonne « État »** : `en base` = déjà dans l'org SMEM (20) · `à ajouter` = proposable dans le
 sélecteur (14).
 
 | code_insee | Nom (référentiel) | Latitude | Longitude | État | Nom en base |
 |---|---|---|---|---|---|
-| 97201 | L'Ajoupa-Bouillon | 14.8333 | -61.1333 | **à ajouter** | — |
-| 97202 | Les Anses-d'Arlet | 14.4967 | -61.0800 | en base | Les Anses d'Arlet |
-| 97203 | Basse-Pointe | 14.8667 | -61.1000 | **à ajouter** | — |
-| 97204 | Bellefontaine | 14.6667 | -61.1667 | en base | Bellefontaine |
-| 97205 | Le Carbet | 14.7167 | -61.1667 | en base | Carbet |
-| 97206 | Case-Pilote | 14.6167 | -61.2167 | en base | Case Pilote |
-| 97207 | Le Diamant | 14.4833 | -61.0333 | **à ajouter** | — |
-| 97208 | Ducos | 14.6833 | -60.9833 | en base | Ducos |
-| 97209 | Fonds-Saint-Denis | 14.7333 | -61.1167 | en base | Fonds Saint Denis |
-| 97210 | Fort-de-France | 14.6000 | -61.0667 | **à ajouter** | — |
-| 97211 | Le François | 14.6167 | -60.9000 | **à ajouter** | — |
-| 97212 | Grand'Rivière | 14.8667 | -61.2167 | en base | Grand Rivière |
-| 97213 | Gros-Morne | 14.7667 | -61.0167 | en base | Gros Morne |
-| 97214 | Le Lamentin | 14.6100 | -61.0000 | **à ajouter** | — |
-| 97215 | Le Lorrain | 14.8333 | -61.0500 | **à ajouter** | — |
-| 97216 | Macouba | 14.8667 | -61.1167 | en base | Macouba |
-| 97217 | Le Marigot | 14.8667 | -61.0167 | en base | Le Marigot |
-| 97218 | Le Marin | 14.4667 | -60.8667 | **à ajouter** | — |
-| 97219 | Le Morne-Rouge | 14.7833 | -61.1333 | en base | Le Morne Rouge |
-| 97220 | Le Morne-Vert | 14.7167 | -61.1333 | en base | Le Morne Vert |
-| 97221 | Le Prêcheur | 14.8000 | -61.2333 | en base | Le Prêcheur |
-| 97222 | Rivière-Pilote | 14.4833 | -60.9000 | **à ajouter** | — |
-| 97223 | Rivière-Salée | 14.5333 | -60.9667 | **à ajouter** | — |
-| 97224 | Le Robert | 14.6767 | -60.9367 | en base | Le Robert |
-| 97225 | Saint-Esprit | 14.5533 | -60.9433 | en base | Saint Esprit |
-| 97226 | Saint-Joseph | 14.6667 | -61.0333 | **à ajouter** | — |
-| 97227 | Saint-Pierre | 14.7500 | -61.1667 | **à ajouter** | — |
-| 97228 | Sainte-Anne | 14.4333 | -60.8667 | en base | Sainte Anne |
-| 97229 | Sainte-Luce | 14.4667 | -60.9333 | **à ajouter** | — |
-| 97230 | Sainte-Marie | 14.7833 | -60.9833 | en base | Sainte Marie |
-| 97231 | Schœlcher | 14.6167 | -61.1000 | **à ajouter** | — |
-| 97232 | La Trinité | 14.7333 | -60.9667 | en base | La Trinité |
-| 97233 | Les Trois-Îlets | 14.5367 | -61.0367 | en base | Les Trois Ilets |
-| 97234 | Le Vauclin | 14.5500 | -60.8500 | en base | Le Vauclin |
+| 97201 | L'Ajoupa-Bouillon | 14.8160 | -61.1305 | **à ajouter** | — |
+| 97202 | Les Anses-d'Arlet | 14.4996 | -61.0736 | en base | Les Anses d'Arlet |
+| 97203 | Basse-Pointe | 14.8410 | -61.1237 | **à ajouter** | — |
+| 97204 | Le Carbet | 14.7041 | -61.1583 | en base | Carbet |
+| 97205 | Case-Pilote | 14.6594 | -61.1297 | en base | Case Pilote |
+| 97206 | Le Diamant | 14.4787 | -61.0165 | **à ajouter** | — |
+| 97207 | Ducos | 14.5785 | -60.9685 | en base | Ducos |
+| 97208 | Fonds-Saint-Denis | 14.7228 | -61.1207 | en base | Fonds Saint Denis |
+| 97209 | Fort-de-France | 14.6492 | -61.0686 | **à ajouter** | — |
+| 97210 | Le François | 14.6093 | -60.8976 | **à ajouter** | — |
+| 97211 | Grand'Rivière | 14.8470 | -61.1836 | en base | Grand Rivière |
+| 97212 | Gros-Morne | 14.7084 | -61.0303 | en base | Gros Morne |
+| 97213 | Le Lamentin | 14.6231 | -60.9923 | **à ajouter** | — |
+| 97214 | Le Lorrain | 14.7995 | -61.0740 | **à ajouter** | — |
+| 97215 | Macouba | 14.8474 | -61.1465 | en base | Macouba |
+| 97216 | Le Marigot | 14.7795 | -61.0530 | en base | Le Marigot |
+| 97217 | Le Marin | 14.4822 | -60.8589 | **à ajouter** | — |
+| 97218 | Le Morne-Rouge | 14.7695 | -61.1217 | en base | Le Morne Rouge |
+| 97219 | Le Prêcheur | 14.8221 | -61.1963 | en base | Le Prêcheur |
+| 97220 | Rivière-Pilote | 14.5027 | -60.8970 | **à ajouter** | — |
+| 97221 | Rivière-Salée | 14.5262 | -60.9623 | **à ajouter** | — |
+| 97222 | Le Robert | 14.6786 | -60.9243 | en base | Le Robert |
+| 97223 | Saint-Esprit | 14.5617 | -60.9233 | en base | Saint Esprit |
+| 97224 | Saint-Joseph | 14.6835 | -61.0407 | **à ajouter** | — |
+| 97225 | Saint-Pierre | 14.7717 | -61.1735 | **à ajouter** | — |
+| 97226 | Sainte-Anne | 14.4314 | -60.8516 | en base | Sainte Anne |
+| 97227 | Sainte-Luce | 14.4904 | -60.9467 | **à ajouter** | — |
+| 97228 | Sainte-Marie | 14.7730 | -61.0084 | en base | Sainte Marie |
+| 97229 | Schœlcher | 14.6518 | -61.1001 | **à ajouter** | — |
+| 97230 | La Trinité | 14.7518 | -60.9469 | en base | La Trinité |
+| 97231 | Les Trois-Îlets | 14.5329 | -61.0376 | en base | Les Trois Ilets |
+| 97232 | Le Vauclin | 14.5420 | -60.8595 | en base | Le Vauclin |
+| 97233 | Le Morne-Vert | 14.7046 | -61.1362 | en base | Le Morne Vert |
+| 97234 | Bellefontaine | 14.6747 | -61.1460 | en base | Bellefontaine |
 
 **Total : 34 · en base : 20 · à ajouter : 14** ✅
 
