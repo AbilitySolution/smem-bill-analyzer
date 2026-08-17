@@ -106,7 +106,7 @@ function snapshot(): InvoiceSnapshot {
       is_duplicata: false, categorie: "batiment",
     },
     client: { id: "cli-1", nom: "Mairie", reference_client: "C1", reference_compte: "A1", adresse: "1 rue X" },
-    contract: { id: "con-1", contract_number: "CT-1", pdl: "PDL1", tarif_type: "HPHC", puissance_souscrite_kva: 36 },
+    contract: { id: "con-1", contract_number: "CT-1", tarif_type: "HPHC", puissance_souscrite_kva: 36 },
     consumption: [{
       id: "cp-1", invoice_id: "inv-1",
       poste_tarifaire: "HP", period_start: "2026-01-01", period_end: "2026-01-31",

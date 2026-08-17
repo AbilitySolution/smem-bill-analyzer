@@ -30,7 +30,6 @@ const GROUPS: { titre: string; champs: { nom: string; type: string; desc: string
     titre: "Contrat",
     champs: [
       { nom: "Numéro de contrat", type: "Code", desc: "Identifiant du contrat de fourniture (contracts.contract_number)." },
-      { nom: "PDL (14 chiffres)", type: "Code", desc: "Point de Livraison — identifiant Enedis du compteur (contracts.pdl)." },
       { nom: "Type tarifaire", type: "Enum", desc: "BASE, HPHC, TEMPO ou EJP (contracts.tarif_type)." },
       { nom: "Offre", type: "Texte", desc: "Nom commercial de l'offre (contracts.offre)." },
       { nom: "Service", type: "Texte", desc: "Type de service souscrit (contracts.service)." },
@@ -45,7 +44,6 @@ const GROUPS: { titre: string; champs: { nom: string; type: string; desc: string
     titre: "Site / point de livraison",
     champs: [
       { nom: "Nom du site", type: "Texte", desc: "Nom du bâtiment ou point d'éclairage (sites.nom)." },
-      { nom: "PDL", type: "Code", desc: "Point de Livraison rattaché au site (sites.pdl)." },
       { nom: "Puissance (kVA)", type: "Nombre", desc: "Puissance souscrite au niveau du site (sites.kva)." },
       { nom: "Calibre (A)", type: "Nombre", desc: "Ampérage du disjoncteur (sites.ampere)." },
       { nom: "Catégorie", type: "Enum", desc: "batiment ou eclairage_public (sites.categorie)." },
