@@ -250,7 +250,6 @@ export async function getInvoiceDocsPage(filters: InvoiceListFilters = {}): Prom
 }
 
 /**
-<<<<<<< HEAD
  * Nombre de factures et total TTC par jour, pour la heatmap de la vue Calendrier.
  *
  * Agrégé en SQL et NON paginé : la liste, elle, l'est — un calendrier construit à partir de
@@ -283,12 +282,8 @@ export async function getInvoiceCalendarDays(filters: InvoiceListFilters = {}): 
 }
 
 /**
- * Factures portant au moins une anomalie ouverte (page /anomalies).
- * Filtré en base via open_anomaly_count : inutile de charger tout le portefeuille pour
-=======
  * Factures portant au moins une anomalie — ouvertes OU résolues (page /anomalies).
  * Filtré en base via anomaly_count : inutile de charger tout le portefeuille pour
->>>>>>> a510282 (upload facture en batch v2- fix suite au merge)
  * n'en garder ensuite qu'une poignée côté JS.
  *
  * `anomaly_count` (total) et non `open_anomaly_count` : filtrer sur les seules alertes
@@ -329,40 +324,12 @@ export async function getInvoiceDocs(): Promise<InvoiceDoc[] | null> {
   return docs;
 }
 
-/** Point du nuage « Montant vs consommation » de la page Anomalies. */
-export interface PortfolioPoint {
-  id: string;
-  kwh: number;
-  totalTtc: number;
-}
-
-/**
- * Portefeuille complet (non archivé) pour le nuage de la page Anomalies.
- *
- * `getInvoiceDocs` ne charge que les factures portant une anomalie ouverte — c'est
- * voulu pour le fil d'alertes, mais le nuage comparait alors les factures anormales
- * à… rien : sans les factures saines, impossible de voir un point sortir du nuage.
- * Trois colonnes seulement : le poids reste négligeable même à quelques milliers de
- * factures.
- */
-export async function getPortfolioScatter(): Promise<PortfolioPoint[] | null> {
-  const ctx = await getUserContext();
-  if (!ctx) return null;
-  const supabase = await createClient();
-  const rows = await selectAll<{ id: string; total_kwh: number | null; total_ttc: number | null }>(
-    (from, to) => supabase
-      .from("invoice_analytics")
-      .select("id, total_kwh, total_ttc")
-      .eq("org_id", ctx.orgId)
-      .eq("archived", false)
-      .order("id", { ascending: true })
-      .range(from, to),
-  );
-  if (!rows) return null;
-  return rows
-    .filter((row) => Number(row.total_kwh ?? 0) > 0)
-    .map((row) => ({ id: row.id, kwh: Number(row.total_kwh ?? 0), totalTtc: Number(row.total_ttc ?? 0) }));
-}
+// `PortfolioPoint` / `getPortfolioScatter` ont été retirés avec le nuage « Montant vs
+// consommation » de la page Anomalies. Ce graphique visualisait le portefeuille, pas les
+// anomalies : un point qui « sortait du nuage » était simplement une grosse facture, et
+// le coût unitaire — la seule information utile — n'y était lisible que comme une pente,
+// ce que l'œil lit très mal. Le contexte de consommation est désormais fourni par
+// lib/data/anomaly-context.ts, au niveau de chaque alerte.
 
 /** Instantané des VRAIES factures (capturé via SQL) — repli pour le preview public. */
 export const DEMO_INVOICE_DOCS: InvoiceDoc[] = [

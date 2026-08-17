@@ -156,7 +156,11 @@ describe("validateInvoice", () => {
     expect(result.issues.some((i) => i.code === "TARIF_TYPE_MISMATCH")).toBe(true);
   });
 
-  it("HP et HC même prix sur la même période -> avertissement (probable erreur OCR)", () => {
+  it("HP et HC au même prix ne produit PLUS d'avertissement", () => {
+    // La règle HPHC_SAME_PRICE a été retirée : elle représentait 95 des 330 anomalies du
+    // portefeuille, dont aucune n'a jamais été traitée. Beaucoup d'offres récentes — et
+    // les factures à tarif unique typées HPHC par erreur — ont légitimement le même prix
+    // sur les deux postes. Ce test garde la suppression contre une réintroduction.
     const result = validateInvoice(baseExtraction({
       contract: { ...baseExtraction().contract, tarif_type: "HPHC" },
       consumption_lines: [
@@ -164,7 +168,7 @@ describe("validateInvoice", () => {
         { poste_tarifaire: "HC", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 12, montant_eur: 12, index_estime: false },
       ],
     }));
-    expect(result.issues.some((i) => i.code === "HPHC_SAME_PRICE")).toBe(true);
+    expect(result.issues.some((i) => i.code === "HPHC_SAME_PRICE")).toBe(false);
   });
 
   it("faible confiance sur un champ critique -> issue LOW_CONFIDENCE", () => {

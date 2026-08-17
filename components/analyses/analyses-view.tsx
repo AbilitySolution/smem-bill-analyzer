@@ -6,8 +6,9 @@ import {
   LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, Brush,
 } from "recharts";
-import { Gauge, Zap, Euro, FileText, AlertTriangle, Plug } from "lucide-react";
+import { Gauge, Zap, Euro, FileText, AlertTriangle, Plug, Layers, Info } from "lucide-react";
 import type { AnalysisData, Metric, MonthBucket } from "@/lib/data/consumption";
+import { MIN_PANEL_COVERAGE, MIN_PANEL_MONTHS } from "@/lib/data/series-bias";
 
 interface Commune { id: string; nom: string }
 interface Site { id: string; nom: string; commune_id: string | null; categorie: string }
@@ -49,6 +50,20 @@ function reBucket(months: MonthBucket[], gran: Gran): Bucket[] {
   return [...map.values()].sort((a, b) => a.order.localeCompare(b.order));
 }
 
+/** Clé de bucket d'un mois "YYYY-MM", pour aligner couverture et indice sur la courbe. */
+function bucketKeyOf(monthKey: string, gran: Gran): string {
+  const y = monthKey.slice(0, 4);
+  const mo = +monthKey.slice(5, 7);
+  if (gran === "year") return y;
+  if (gran === "semester") return `${y}-${mo <= 6 ? 1 : 2}`;
+  return monthKey;
+}
+
+/** "2023-05" → "mai 2023" */
+function frMonth(key: string): string {
+  return `${MO[+key.slice(5, 7) - 1]} ${key.slice(0, 4)}`;
+}
+
 export function AnalysesView({
   analysis, communes, sites, filters,
 }: {
@@ -63,8 +78,18 @@ export function AnalysesView({
   const [gran, setGran] = useState<Gran>("semester");
   const [poste, setPoste] = useState<PosteFilter>("all");
   const [curveMode, setCurveMode] = useState<"total" | "detail">("total");
+  const [scopeMode, setScopeMode] = useState<"brut" | "comparable">("brut");
   const unit = metric === "kwh" ? "kWh" : "€";
   const isEur = metric === "eur";
+
+  // Un filtre commune ou site restreint le périmètre : on bascule alors sur le panel
+  // figé, seul moyen d'afficher une VRAIE évolution en kWh. Sur tout le portefeuille,
+  // aucun panel n'aurait de sens (2 sites sur 17 seraient retenus) — on y répond par
+  // la couverture affichée et l'indice chaîné.
+  const restricted = Boolean(filters.commune || filters.site);
+  const panel = analysis.panel;
+  const panelBlocked = restricted && !panel.ok;
+  const series = restricted && panel.ok ? analysis.panelMonths : analysis.months;
 
   function setFilter(next: Partial<Filters>) {
     const f = { ...filters, ...next };
@@ -76,17 +101,50 @@ export function AnalysesView({
     startTransition(() => router.push(`/analyses/consommation${params.toString() ? "?" + params : ""}`));
   }
 
-  const buckets = useMemo(() => reBucket(analysis.months, gran), [analysis.months, gran]);
+  const buckets = useMemo(() => reBucket(series, gran), [series, gran]);
+
+  // Couverture ré-agrégée à la granularité choisie : moyenne des sites couverts sur la
+  // période. La moyenne plutôt que le max — un semestre couvert un seul mois sur six ne
+  // doit pas s'afficher comme pleinement couvert.
+  const coverageByBucket = useMemo(() => {
+    const acc = new Map<string, { sum: number; n: number }>();
+    for (const c of analysis.coverage) {
+      const k = bucketKeyOf(c.key, gran);
+      const a = acc.get(k) ?? { sum: 0, n: 0 };
+      a.sum += c.sites; a.n += 1;
+      acc.set(k, a);
+    }
+    return acc;
+  }, [analysis.coverage, gran]);
+
+  // Indice chaîné : on retient la DERNIÈRE valeur de chaque période (indice de fin de
+  // période, convention usuelle). Une moyenne d'indices n'aurait pas de sens : un indice
+  // est un niveau cumulé, pas un flux qu'on additionne ou qu'on moyenne.
+  const chainedByBucket = useMemo(() => {
+    const acc = new Map<string, number | null>();
+    for (const c of analysis.chained) acc.set(bucketKeyOf(c.key, gran), c.index);
+    return acc;
+  }, [analysis.chained, gran]);
+
+  const siteNameById = useMemo(() => new Map(sites.map((s) => [s.id, s.nom])), [sites]);
+  const showComparable = !restricted && scopeMode === "comparable";
 
   // Courbe (gauche). Total = variable+abonnement (€) / total kWh. Détaillé = variable & fixe (€)
   // ou HP/HC/Base (kWh).
-  const lineData = buckets.map((b) => ({
-    label: b.label,
-    total: isEur ? Math.round(b.hpEur + b.hcEur + b.baseEur + b.aboEur) : b.hpKwh + b.hcKwh + b.baseKwh,
-    variable: isEur ? Math.round(b.hpEur + b.hcEur + b.baseEur) : b.hpKwh + b.hcKwh + b.baseKwh,
-    abo: Math.round(b.aboEur),
-    hp: b.hpKwh, hc: b.hcKwh, base: b.baseKwh,
-  }));
+  const lineData = buckets.map((b) => {
+    const cov = coverageByBucket.get(b.order);
+    return {
+      label: b.label,
+      total: isEur ? Math.round(b.hpEur + b.hcEur + b.baseEur + b.aboEur) : b.hpKwh + b.hcKwh + b.baseKwh,
+      variable: isEur ? Math.round(b.hpEur + b.hcEur + b.baseEur) : b.hpKwh + b.hcKwh + b.baseKwh,
+      abo: Math.round(b.aboEur),
+      hp: b.hpKwh, hc: b.hcKwh, base: b.baseKwh,
+      sites: cov && cov.n > 0 ? Math.round((cov.sum / cov.n) * 10) / 10 : 0,
+      // `null` interrompt le tracé chez recharts : c'est exactement le comportement
+      // voulu quand la chaîne est rompue faute de sites communs.
+      indice: chainedByBucket.get(b.order) ?? null,
+    };
+  });
 
   // Histogramme (droite) : empilé par poste (+ abonnement en €), filtrable.
   const barData = buckets.map((b) => ({
@@ -146,6 +204,30 @@ export function AnalysesView({
         </p>
       )}
 
+      {/* Périmètre : ce bandeau dit sur QUOI porte la courbe. Sans lui, une série de
+          totaux mensuels sur un portefeuille à couverture variable se lit comme une
+          évolution de consommation alors qu'elle décrit surtout l'avancement du
+          versement des factures. */}
+      {restricted && panel.ok && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-panel)] px-3 py-2.5">
+          <Layers className="mt-0.5 size-4 shrink-0 text-[var(--kn-text-muted)]" />
+          <p className="text-[12px] text-[var(--kn-text)]">
+            <strong>Périmètre constant</strong> — {panel.siteIds.length} site{panel.siteIds.length > 1 ? "s" : ""} sur {panel.totalSites},
+            de {panel.from ? frMonth(panel.from) : "?"} à {panel.to ? frMonth(panel.to) : "?"}.
+            {panel.excluded.length > 0 && (
+              <span className="text-[var(--kn-text-muted)]">
+                {" "}Exclus faute de couverture continue :{" "}
+                {panel.excluded.map((e) => `${siteNameById.get(e.siteId) ?? "site inconnu"}${e.firstMonth ? ` (depuis ${frMonth(e.firstMonth)})` : ""}`).join(", ")}.
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+
+      {panelBlocked ? (
+        <PanelBlocked panel={panel} siteNameById={siteNameById} />
+      ) : (
+        <>
       {/* Contrôles centrés au-dessus des deux graphiques */}
       <div className="mb-4 flex flex-wrap items-center justify-center gap-3">
         <div className="flex items-center gap-0.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] p-1">
@@ -155,19 +237,31 @@ export function AnalysesView({
           <button onClick={() => setMetric("kwh")} className={seg(metric === "kwh")}>kWh</button>
           <button onClick={() => setMetric("eur")} className={seg(metric === "eur")}>€</button>
         </div>
+        {!restricted && (
+          <div className="flex items-center gap-0.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] p-1">
+            <button onClick={() => setScopeMode("brut")} className={seg(scopeMode === "brut")}>Totaux bruts</button>
+            <button onClick={() => setScopeMode("comparable")} className={seg(scopeMode === "comparable")}>Périmètre comparable</button>
+          </div>
+        )}
       </div>
 
       <div className={`grid grid-cols-1 gap-4 lg:grid-cols-2 ${pending ? "opacity-60" : ""}`}>
-        {/* Courbe : total ou détaillé dans le temps */}
+        {/* Courbe : total, détaillé, ou indice chaîné à périmètre comparable */}
         <Card
-          title={`Évolution de la consommation (${unit})`}
-          subtitle={curveMode === "total" ? (isEur ? "total (variable + abonnement)" : "total HP+HC+Base") : (isEur ? "part variable vs abonnement" : "détail par poste")}
-          action={
+          title={showComparable ? "Évolution à périmètre comparable (base 100)" : `Évolution de la consommation (${unit})`}
+          subtitle={
+            showComparable
+              ? "variations calculées mois par mois sur les seuls sites présents dans les deux mois"
+              : curveMode === "total"
+                ? (isEur ? "total (variable + abonnement)" : "total HP+HC+Base")
+                : (isEur ? "part variable vs abonnement" : "détail par poste")
+          }
+          action={!showComparable && (
             <div className="flex items-center gap-0.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-panel)] p-0.5">
               <button onClick={() => setCurveMode("total")} className={seg(curveMode === "total")}>Total</button>
               <button onClick={() => setCurveMode("detail")} className={seg(curveMode === "detail")}>Détaillé</button>
             </div>
-          }
+          )}
         >
           <ChartBox height={300}>
             {(w) => (
@@ -175,18 +269,47 @@ export function AnalysesView({
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--kn-border)" vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
                 <YAxis tick={{ fontSize: 12, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
-                <Tooltip formatter={(v, n) => [`${nf(Number(v))} ${unit}`, n]} contentStyle={tip} />
-                {curveMode === "detail" && <Legend wrapperStyle={{ fontSize: 12 }} iconSize={9} />}
-                {curveMode === "total" && <Line type="monotone" dataKey="total" name="Total" stroke={C.total} strokeWidth={2.5} dot={{ r: 2.5 }} />}
-                {curveMode === "detail" && isEur && <Line type="monotone" dataKey="variable" name="Part variable" stroke={C.hp} strokeWidth={2.5} dot={{ r: 2 }} />}
-                {curveMode === "detail" && isEur && <Line type="monotone" dataKey="abo" name="Abonnement" stroke="#94a3b8" strokeWidth={2.5} dot={{ r: 2 }} />}
-                {curveMode === "detail" && !isEur && <Line type="monotone" dataKey="hp" name="Heures pleines" stroke={C.hp} strokeWidth={2.5} dot={{ r: 2 }} />}
-                {curveMode === "detail" && !isEur && <Line type="monotone" dataKey="hc" name="Heures creuses" stroke={C.hc} strokeWidth={2.5} dot={{ r: 2 }} />}
-                {curveMode === "detail" && !isEur && <Line type="monotone" dataKey="base" name="Base" stroke={C.base} strokeWidth={2.5} dot={{ r: 2 }} />}
+                <Tooltip contentStyle={tip}
+                  formatter={(v, n) => [
+                    n === "Indice" ? nf(Number(v)) : n === "Sites couverts" ? String(v) : `${nf(Number(v))} ${unit}`,
+                    n,
+                  ]} />
+                {(curveMode === "detail" || showComparable) && <Legend wrapperStyle={{ fontSize: 12 }} iconSize={9} />}
+                {showComparable
+                  ? <Line type="monotone" dataKey="indice" name="Indice" stroke={C.total} strokeWidth={2.5} dot={{ r: 2.5 }} connectNulls={false} />
+                  : <>
+                      {curveMode === "total" && <Line type="monotone" dataKey="total" name="Total" stroke={C.total} strokeWidth={2.5} dot={{ r: 2.5 }} />}
+                      {curveMode === "detail" && isEur && <Line type="monotone" dataKey="variable" name="Part variable" stroke={C.hp} strokeWidth={2.5} dot={{ r: 2 }} />}
+                      {curveMode === "detail" && isEur && <Line type="monotone" dataKey="abo" name="Abonnement" stroke="#94a3b8" strokeWidth={2.5} dot={{ r: 2 }} />}
+                      {curveMode === "detail" && !isEur && <Line type="monotone" dataKey="hp" name="Heures pleines" stroke={C.hp} strokeWidth={2.5} dot={{ r: 2 }} />}
+                      {curveMode === "detail" && !isEur && <Line type="monotone" dataKey="hc" name="Heures creuses" stroke={C.hc} strokeWidth={2.5} dot={{ r: 2 }} />}
+                      {curveMode === "detail" && !isEur && <Line type="monotone" dataKey="base" name="Base" stroke={C.base} strokeWidth={2.5} dot={{ r: 2 }} />}
+                    </>}
                 {lineData.length > 6 && <Brush dataKey="label" height={18} travellerWidth={8} stroke="var(--kn-border)" fill="var(--kn-panel)" />}
               </LineChart>
             )}
           </ChartBox>
+
+          {/* Bande de couverture : le garde-fou. Elle rend le biais visible en permanence,
+              y compris en mode « totaux bruts » où il est le plus trompeur. Inutile sur un
+              périmètre figé, où la couverture est constante par construction. */}
+          {!restricted && (
+            <div className="mt-2 border-t border-[var(--kn-border)] pt-2">
+              <p className="mb-1 text-[11px] text-[var(--kn-text-muted)]">
+                Sites couverts par période — un point de la courbe ne vaut que ce que vaut sa couverture
+              </p>
+              <ChartBox height={64}>
+                {(w) => (
+                  <BarChart width={w} height={64} data={lineData} margin={{ top: 2, right: 12, left: -8, bottom: 0 }}>
+                    <XAxis dataKey="label" hide />
+                    <YAxis allowDecimals={false} width={28} tick={{ fontSize: 10, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
+                    <Tooltip contentStyle={tip} formatter={(v) => [`${v} site(s)`, "Sites couverts"]} />
+                    <Bar dataKey="sites" name="Sites couverts" fill="#94a3b8" radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                )}
+              </ChartBox>
+            </div>
+          )}
         </Card>
 
         {/* Histogramme : détail par poste (empilé) */}
@@ -216,6 +339,73 @@ export function AnalysesView({
           </ChartBox>
         </Card>
       </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Écran de refus : aucune fenêtre ne permet une série honnête sur ce périmètre.
+ *
+ * Afficher malgré tout une courbe « de la commune » construite sur une minorité de ses
+ * sites, ou sur une poignée de mois, produirait une évolution qui n'existe pas. Le
+ * message nomme donc les sites qui manquent et depuis quand ils sont couverts : c'est
+ * une consigne de travail, pas une erreur.
+ */
+function PanelBlocked({ panel, siteNameById }: {
+  panel: AnalysisData["panel"];
+  siteNameById: Map<string, string>;
+}) {
+  const needed = Math.max(1, Math.ceil(MIN_PANEL_COVERAGE * panel.totalSites));
+  const found = panel.siteIds.length;
+  const months = panel.months.length;
+
+  return (
+    <div className="rounded-xl border border-dashed border-[var(--kn-border)] bg-[var(--kn-panel)] p-6">
+      <div className="mb-3 flex items-center gap-2.5">
+        <Info className="size-5 shrink-0 text-[#ea580c]" />
+        <h3 className="font-heading text-[15px] font-semibold text-[var(--kn-text)]">
+          Évolution non affichable sur ce périmètre
+        </h3>
+      </div>
+      <p className="mb-3 max-w-2xl text-[13px] text-[var(--kn-text)]">
+        Pour tracer une évolution qui décrive réellement la consommation, il faut un ensemble de sites
+        couverts <strong>sans interruption</strong> sur au moins <strong>{MIN_PANEL_MONTHS} mois</strong> consécutifs
+        (un cycle saisonnier complet) et représentant au moins <strong>{Math.round(MIN_PANEL_COVERAGE * 100)} %</strong> des sites
+        du périmètre — soit {needed} site{needed > 1 ? "s" : ""} sur {panel.totalSites}.
+      </p>
+      <p className="mb-4 max-w-2xl text-[13px] text-[var(--kn-text-muted)]">
+        {months > 0
+          ? <>La meilleure fenêtre trouvée ne réunit que <strong>{found} site{found > 1 ? "s" : ""}</strong> sur {months} mois consécutifs — insuffisant. </>
+          : <>Aucune fenêtre continue n&apos;a été trouvée sur ce périmètre. </>}
+        Une courbe tracée dans ces conditions mélangerait des mois où les sites couverts ne sont pas les mêmes :
+        elle montrerait l&apos;avancement du versement des factures, pas l&apos;évolution de la consommation.
+      </p>
+
+      {/* On s'appuie sur les empans de couverture, pas sur les sites « exclus » : quand la
+          meilleure fenêtre est simplement trop courte, elle contient tous les sites et la
+          liste des exclus est vide — l'utilisateur n'aurait alors aucune explication. */}
+      {panel.siteSpans.length > 0 && (
+        <div className="mb-4">
+          <p className="mb-1.5 text-[12px] font-medium text-[var(--kn-text)]">
+            Couverture réelle de chaque site — les moins couverts en premier :
+          </p>
+          <ul className="space-y-1">
+            {panel.siteSpans.map((s) => (
+              <li key={s.siteId} className="text-[12px] text-[var(--kn-text-muted)]">
+                • <span className="text-[var(--kn-text)]">{siteNameById.get(s.siteId) ?? "Site inconnu"}</span>
+                {" — "}{s.months} mois couvert{s.months > 1 ? "s" : ""}, de {frMonth(s.firstMonth)} à {frMonth(s.lastMonth)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <a href="/analyses/couverture"
+        className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-3 py-2 text-[12px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]">
+        Voir la couverture détaillée
+      </a>
     </div>
   );
 }

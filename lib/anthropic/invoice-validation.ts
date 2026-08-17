@@ -267,33 +267,14 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
     }
   }
 
-  // 3. HP/HC même prix unitaire dans une même période.
-  // Sur contrat HPHC EDF, HP est toujours plus cher que HC.
-  // Même tarif pour les deux postes = l'OCR a probablement extrait le même prix pour HP et HC.
-  {
-    const pairMap = new Map<string, { hp?: number; hc?: number }>();
-    for (const line of consumption_lines) {
-      if (line.prix_unitaire_ckwh == null) continue;
-      // Normaliser avant comparaison : "Heure P", "H.P.", etc. → "HP"
-      const poste = normalizePosteTarifaire(line.poste_tarifaire);
-      if (poste !== "HP" && poste !== "HC") continue;
-      const key = `${line.date_debut ?? ""}|${line.date_fin ?? ""}`;
-      const pair = pairMap.get(key) ?? {};
-      if (poste === "HP") pair.hp = line.prix_unitaire_ckwh;
-      else pair.hc = line.prix_unitaire_ckwh;
-      pairMap.set(key, pair);
-    }
-    for (const [, pair] of pairMap) {
-      if (pair.hp != null && pair.hc != null && Math.abs(pair.hp - pair.hc) < 0.001) {
-        issues.push({
-          code: "HPHC_SAME_PRICE",
-          severity: "warning",
-          message: `HP et HC ont le même prix unitaire (${pair.hp} c€/kWh) — l'OCR a peut-être extrait le même tarif pour les deux postes`,
-        });
-        break; // un seul avertissement par facture suffit
-      }
-    }
-  }
+  // 3. (retiré) HP/HC au même prix unitaire.
+  //
+  // La règle signalait un contrat HPHC dont les deux postes portent le même tarif, en
+  // supposant une erreur d'OCR. Elle produisait 95 des 330 anomalies du portefeuille —
+  // 29 % à elle seule — dont aucune n'a jamais été traitée par un utilisateur. Beaucoup
+  // d'offres récentes, et les factures à tarif unique typées HPHC par erreur, ont
+  // légitimement le même prix sur les deux postes : le taux de faux positifs ne
+  // justifiait pas la place occupée. Supprimée le 2026-08-17.
 
   // 4. Low composite-confidence flags (use fieldConfidence, not raw precision)
   const criticalFields = ["total_ttc", "total_ht", "facture_number", "contract_number"] as const;
