@@ -1,4 +1,4 @@
--- Rollback de 20260816190000_communes_creation.sql (SCRUM-14, lot 1c)
+-- Rollback de 20260817042337_communes_creation.sql (SCRUM-14, lot 1c)
 --
 -- 🟠 PERTE DE DONNÉES PARTIELLE — lire jusqu'au bout avant d'exécuter.
 --
