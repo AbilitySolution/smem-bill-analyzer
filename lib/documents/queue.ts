@@ -148,21 +148,27 @@ export function chunkForUpload<T>(items: T[]): T[][] {
   return chunks;
 }
 /**
- * En deçà, l'extraction part en mode `direct` (synchrone, plein tarif) ; au-delà, en
- * mode `batch` (asynchrone, tarif réduit de 50 %).
+ * Jusqu'à ce nombre de documents, l'extraction part en mode `direct` (synchrone, plein
+ * tarif) ; au-delà, en mode `batch` (asynchrone, tarif réduit de 50 %).
  *
- * Fixé à 0 : **tout passe en batch**. Le mode direct facturait le double pour un gain
- * de latence qui ne s'est jamais matérialisé — mesuré sur les 13 lots réellement
- * traités, un lot batch se termine en 2,5 minutes en moyenne (1,5 min au plus rapide,
- * 3,7 au plus lent), très loin de la fourchette « 10 min à 24 h » annoncée par le
- * fournisseur. Payer 2× pour économiser deux minutes n'a pas de sens à ce délai.
+ * Le seuil arbitre entre coût et attente, et les deux termes ne pèsent pas pareil selon
+ * le volume. Mesuré sur 312 traitements réels : un document coûte ~0,04 $ en direct,
+ * ~0,02 $ en batch, et un lot batch se termine en ~3 minutes bout en bout.
  *
- * Le chemin `direct` reste en place (`process-direct-documents`, statuts
- * `direct_queued`/`direct_processing`) : il sert encore aux relances unitaires et
- * reste disponible si un besoin de latence apparaît. Il n'est simplement plus emprunté
- * par un dépôt normal.
+ *   - Gros dépôt (le cas courant ici : lots de 42 à 105 documents) → batch. L'économie
+ *     est réelle en valeur absolue, et l'utilisateur qui dépose cent factures ne les
+ *     attend pas devant son écran.
+ *   - Petit dépôt (1 à 5 documents) → direct. Le batch y ferait attendre trois minutes
+ *     pour économiser moins de 0,10 $ : personne ne fait ce troc. En direct la réponse
+ *     arrive en quelques dizaines de secondes.
+ *
+ * Fixé à 5 plutôt qu'à 10 : `DIRECT_JOBS_PER_INVOCATION` en traite 10 par invocation,
+ * donc un dépôt sous le seuil est toujours absorbé d'un seul coup, sans second tour.
+ *
+ * Les deux modes convergent sur le même statut terminal (`needs_review`) et le même
+ * enregistrement automatique côté client — seul le délai change, jamais le résultat.
  */
-export const DIRECT_DOCUMENT_LIMIT = 0;
+export const DIRECT_DOCUMENT_LIMIT = 5;
 
 export function extensionOf(name: string): string {
   return name.split(".").pop()?.toLowerCase() ?? "";

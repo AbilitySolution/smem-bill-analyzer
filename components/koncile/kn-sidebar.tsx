@@ -41,6 +41,7 @@ const mainNav: NavItem[] = [
       { href: "/upload", label: "Importer des documents", match: (p) => p.startsWith("/upload") },
       { href: "/documents", label: "Mes documents", match: (p) => p === "/documents" },
       { href: "/corrections", label: "Contrôle qualité", match: (p) => p.startsWith("/corrections") },
+      { href: "/qualite-extraction", label: "Qualité d'extraction", match: (p) => p.startsWith("/qualite-extraction") },
       { href: "/documents/extraction", label: "Extraction", match: (p) => p.startsWith("/documents/extraction") },
     ],
   },

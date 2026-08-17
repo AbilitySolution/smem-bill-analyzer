@@ -12,10 +12,33 @@ import { CorrectionsView } from "@/components/corrections/corrections-view";
  */
 export const dynamic = "force-dynamic";
 
-export default async function CorrectionsPage() {
+/** Lignes par page. Tient dans un écran sans défilement interminable, et garde le HTML
+ *  rendu côté serveur léger — cette liste n'est pas virtualisée. */
+const PAGE_SIZE = 20;
+
+export default async function CorrectionsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
   const ctx = await getUserContext();
   if (!ctx) redirect("/login");
 
-  const items = await getCorrectionItems();
-  return <CorrectionsView items={items} />;
+  const { page } = await searchParams;
+  const allItems = await getCorrectionItems();
+  const totalPages = Math.max(1, Math.ceil(allItems.length / PAGE_SIZE));
+  // Page hors bornes (lien périmé, saisie manuelle) ramenée dans l'intervalle plutôt
+  // que rendue vide : une liste vide sans explication passerait pour un bug.
+  const currentPage = Math.min(totalPages, Math.max(1, Number(page) || 1));
+  const items = allItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+  return (
+    <CorrectionsView
+      items={items}
+      allItemIds={allItems.map((item) => item.id)}
+      currentPage={currentPage}
+      totalPages={totalPages}
+      totalItems={allItems.length}
+    />
+  );
 }

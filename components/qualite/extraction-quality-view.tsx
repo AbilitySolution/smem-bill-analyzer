@@ -21,6 +21,10 @@ export function ExtractionQualityView({ data }: { data: ExtractionQuality }) {
 
   const measured = data.fields.filter((f) => f.precision != null);
   const unmeasured = data.fields.filter((f) => f.precision == null);
+  // Dénominateur des « champs notés » : tous ceux qui ont au moins une facture où le champ
+  // avait une valeur à extraire. Afficher le seul `measured.length` laisserait croire qu'un
+  // seul champ est suivi tant que l'échantillon est trop court.
+  const trackedCount = measured.length + unmeasured.length;
 
   // Par défaut : les champs les moins fiables d'abord — c'est là qu'il y a à agir.
   const sorted = [...measured].sort((a, b) =>
@@ -33,9 +37,11 @@ export function ExtractionQualityView({ data }: { data: ExtractionQuality }) {
         <Target className="size-6 text-[var(--kn-text)]" strokeWidth={1.75} />
         <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Qualité d&apos;extraction</h1>
       </div>
-      <p className="mb-5 text-[13px] text-[var(--kn-text-muted)]">
+      <p className="mb-5 max-w-3xl text-[13px] text-[var(--kn-text-muted)]">
         Précision réelle de l&apos;extraction automatique, mesurée sur les corrections que vos équipes
-        ont effectivement apportées — pas une estimation du modèle sur lui-même.
+        ont effectivement apportées — pas une estimation du modèle sur lui-même. Seules les factures
+        ouvertes et relues champ par champ comptent : accepter une facture sans la lire ne dit rien
+        de la justesse de sa lecture.
       </p>
 
       {data.isDemo && (
@@ -58,23 +64,30 @@ export function ExtractionQualityView({ data }: { data: ExtractionQuality }) {
             {data.overallPrecision != null ? pct(data.overallPrecision) : "—"}
           </p>
           <p className="text-[12px] text-[var(--kn-text-muted)]">
-            Sur {data.invoiceCount} facture{data.invoiceCount > 1 ? "s" : ""} validée{data.invoiceCount > 1 ? "s" : ""}
+            Sur {data.invoiceCount} facture{data.invoiceCount > 1 ? "s" : ""} relue{data.invoiceCount > 1 ? "s" : ""} à la main
             {" — "}part des champs extraits qui n&apos;ont demandé aucune retouche.
           </p>
         </div>
       </div>
 
       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Kpi icon={<FileCheck2 className="size-4" />} label="Factures mesurées" value={String(data.invoiceCount)} />
+        <Kpi
+          icon={<FileCheck2 className="size-4" />}
+          label="Factures relues"
+          value={String(data.invoiceCount)}
+          hint="Ouvertes et enregistrées par un humain"
+        />
         <Kpi
           icon={<Sparkles className="size-4" />}
-          label="Validées sans retouche"
+          label="Relues sans retouche"
           value={`${data.untouchedCount} (${data.invoiceCount ? pct(data.untouchedCount / data.invoiceCount) : "—"})`}
+          hint="L'IA avait tout lu correctement"
         />
         <Kpi
           icon={<Target className="size-4" />}
-          label="Champs suivis"
-          value={`${measured.length}${unmeasured.length ? ` (+${unmeasured.length} en attente)` : ""}`}
+          label="Champs notés"
+          value={`${measured.length} sur ${trackedCount}`}
+          hint={`${data.minSample} factures relues minimum par champ`}
         />
       </div>
 
@@ -97,8 +110,9 @@ export function ExtractionQualityView({ data }: { data: ExtractionQuality }) {
         </div>
 
         {sorted.length === 0 ? (
-          <p className="py-10 text-center text-[13px] text-[var(--kn-text-muted)]">
-            Pas encore assez de factures validées pour mesurer la précision.
+          <p className="mx-auto max-w-md py-10 text-center text-[13px] text-[var(--kn-text-muted)]">
+            Pas encore assez de factures relues pour mesurer la précision. Chaque facture ouverte
+            et enregistrée depuis Contrôle qualité ou Extraction alimente cette page.
           </p>
         ) : (
           <div className="flex flex-col">
@@ -166,13 +180,16 @@ function FieldRow({ field }: { field: FieldQuality }) {
   );
 }
 
-function Kpi({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+function Kpi({ icon, label, value, hint }: { icon: React.ReactNode; label: string; value: string; hint?: string }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] px-4 py-3">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[var(--kn-yellow-soft)] text-[#ea580c]">{icon}</span>
       <div className="min-w-0">
         <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--kn-text-muted)]">{label}</p>
         <p className="truncate text-[16px] font-bold tabular-nums text-[var(--kn-text)]">{value}</p>
+        {/* Un chiffre encore à zéro doit expliquer ce qui le débloque, sinon il se lit
+            comme une panne plutôt que comme un compteur qui démarre. */}
+        {hint && <p className="mt-0.5 text-[11px] leading-tight text-[var(--kn-text-muted)]">{hint}</p>}
       </div>
     </div>
   );
