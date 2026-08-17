@@ -38,7 +38,7 @@ export function CorrectionsView({ items }: { items: CorrectionItem[] }) {
   if (!items.length) {
     return (
       <div className="mx-auto max-w-4xl px-6 py-10">
-        <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Factures à vérifier</h1>
+        <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Contrôle qualité</h1>
         <div className="mt-6 flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--kn-border)] px-6 py-14 text-center">
           <CheckCircle2 className="size-9 text-emerald-500" strokeWidth={1.5} />
           <p className="text-sm font-medium text-[var(--kn-text)]">Rien à vérifier</p>
@@ -55,22 +55,37 @@ export function CorrectionsView({ items }: { items: CorrectionItem[] }) {
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">
-            {items.length} facture{items.length > 1 ? "s" : ""} à vérifier
+            Contrôle qualité
+            <span className="ml-2 text-lg font-normal text-[var(--kn-text-muted)]">
+              {items.length} facture{items.length > 1 ? "s" : ""}
+            </span>
           </h1>
           <p className="mt-1 max-w-xl text-[13px] text-[var(--kn-text-muted)]">
             Elles sont déjà enregistrées et comptées dans vos analyses. Leur lecture a été
             jugée incertaine — un contrôle rapide évite qu&apos;une erreur passe inaperçue.
+            Rien ne presse : vous pouvez quitter cette page et y revenir, elles resteront ici.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={dismissAll}
-          disabled={pending}
-          className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl border border-[var(--kn-border)] px-4 py-2.5 text-[13px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)] disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {pending ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
-          Tout accepter
-        </button>
+        {/* Les trois sorties, dans l'ordre d'engagement croissant : partir sans rien
+            faire (le lien de gauche suffit — aucune action n'est imposée), tout
+            accepter, ou corriger en série. */}
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={dismissAll}
+            disabled={pending}
+            className="flex cursor-pointer items-center gap-2 rounded-xl border border-[var(--kn-border)] px-4 py-2.5 text-[13px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {pending ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+            Tout accepter
+          </button>
+          <Link
+            href={`/documents/extraction?id=${items[0].id}&review=1`}
+            className="flex items-center gap-2 rounded-xl bg-[#f97316] px-4 py-2.5 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
+          >
+            Corriger une par une <ChevronRight className="size-4" />
+          </Link>
+        </div>
       </div>
 
       {error && (

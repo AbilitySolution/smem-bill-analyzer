@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, FileText, Loader2, ScanLine, UploadCloud, X } from "lucide-react";
-import type { DetectedInvoice } from "@/lib/anthropic/invoice-splitting";
+import { looksOverSplit, type DetectedInvoice } from "@/lib/anthropic/invoice-splitting";
 import { renderPagePreviews } from "@/lib/documents/pdf-split";
 
 /**
@@ -141,6 +141,20 @@ export function SplitConfirmation({
         Cliquez une vignette pour l&apos;exclure du découpage. Vérifiez que chaque vignette
         correspond bien au <span className="font-medium text-[var(--kn-text)]">début</span> d&apos;une facture.
       </p>
+
+      {/* Découpage suspect : on prévient sans décider à la place de l'utilisateur —
+          un lot de factures réellement mono-page produirait le même profil. */}
+      {looksOverSplit(candidate.invoices, candidate.pageCount) && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          <span>
+            <span className="font-semibold">Découpage à vérifier de près.</span> Presque autant
+            de factures que de pages ont été détectées. Une facture EDF fait souvent 2 pages ou
+            plus : les vignettes qui montrent un tableau de consommation ou des mentions légales
+            sont des suites de facture, pas des débuts — excluez-les.
+          </span>
+        </div>
+      )}
 
       {accepted.length === 0 && (
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">

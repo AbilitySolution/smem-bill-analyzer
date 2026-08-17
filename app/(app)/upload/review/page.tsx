@@ -66,6 +66,8 @@ type ReviewJob = {
   extraction_json: Extraction;
   suggested_commune_id: string | null;
   suggested_site_id: string | null;
+  /** Champs que l'OCR n'a pas su lire — à compléter avant de pouvoir enregistrer. */
+  missing_fields?: string[];
 };
 
 type CustomFieldSection = "localisation" | "invoice" | "client" | "contract";
@@ -416,6 +418,8 @@ function ReviewPageInner({ reviewQueue, reviewedIds, onReviewed }: {
   const [error, setError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [savedBanner, setSavedBanner] = useState(false);
+  /** Champs non lus par l'OCR, signalés en tête d'écran plutôt que laissés à chercher. */
+  const [missingFields, setMissingFields] = useState<string[]>([]);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileUrlError, setFileUrlError] = useState(false);
   const [overrideComment, setOverrideComment] = useState("");
@@ -481,6 +485,7 @@ function ReviewPageInner({ reviewQueue, reviewedIds, onReviewed }: {
         suggested_commune_id: job.suggested_commune_id,
         suggested_site_id: job.suggested_site_id,
       };
+      setMissingFields(job.missing_fields ?? []);
       setOcr(result);
       setExt(result.extraction);
       if (result.suggested_commune_id) setCommuneId(result.suggested_commune_id);
@@ -744,6 +749,23 @@ function ReviewPageInner({ reviewQueue, reviewedIds, onReviewed }: {
           {error && (
             <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               <AlertCircle className="size-4 shrink-0" /> {error}
+            </div>
+          )}
+
+          {/* L'OCR n'a pas tout lu : on ouvre quand même la révision — c'est son rôle —
+              mais on dit exactement quoi compléter. Avant, ce cas renvoyait « résultat
+              OCR incomplet » et bloquait l'écran, sans moyen de corriger. */}
+          {missingFields.length > 0 && (
+            <div className="mb-4 rounded-xl border-2 border-amber-300 bg-amber-50 p-3">
+              <p className="flex items-center gap-2 text-[13px] font-semibold text-amber-900">
+                <AlertTriangle className="size-4 shrink-0" />
+                {missingFields.length} champ{missingFields.length > 1 ? "s" : ""} non lu{missingFields.length > 1 ? "s" : ""} sur le document
+              </p>
+              <p className="mt-1 text-[12px] text-amber-800">
+                À compléter avant d&apos;enregistrer : <span className="font-medium">{missingFields.join(", ")}</span>.
+                {" "}Si la page ne contient pas cette information, il s&apos;agit probablement
+                d&apos;une page de détail plutôt que d&apos;une facture complète.
+              </p>
             </div>
           )}
 

@@ -207,6 +207,13 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
    */
   const [splitCandidate, setSplitCandidate] = useState<(SplitCandidate & { tempPath: string }) | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  /**
+   * Documents écartés avant import parce qu'ils ne contiennent pas de factures
+   * (bordereaux récapitulatifs, courriers). Signalés discrètement plutôt que mis en
+   * file : ils n'ont rien à y faire, et les y laisser reviendrait à payer leur
+   * extraction pour finir par les marquer « ignorés ».
+   */
+  const [skipped, setSkipped] = useState<Array<{ name: string; kind: string }>>([]);
   const [fileSearch, setFileSearch] = useState("");
   const [queueSearch, setQueueSearch] = useState("");
   const [queueBucketFilter, setQueueBucketFilter] = useState<QueueBucket | "all">("all");
@@ -541,6 +548,16 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error ?? "Analyse impossible.");
 
+        // Bordereau ou document hors sujet : il ne CONTIENT pas de factures, il les
+        // récapitule. On l'écarte ici, avant toute mise en file — sans quoi on paierait
+        // son extraction complète pour finir par le marquer « ignoré ».
+        if (payload.kind && payload.kind !== "factures") {
+          await supabase.storage.from("invoice-files").remove([tempPath]).catch(() => {});
+          setFiles((current) => current.filter((item) => item !== file));
+          setSkipped((current) => [...current, { name: file.name, kind: payload.kind as string }]);
+          continue;
+        }
+
         const invoices = (payload.invoices ?? []) as DetectedInvoice[];
         // Une seule facture détectée : le document est une facture normale qui tient sur
         // plusieurs pages. Rien à découper, rien à demander à l'utilisateur.
@@ -846,7 +863,28 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
   // File de traitement : tout ce qui n'est pas terminé. Un job `completed` = facture
   // enregistrée (ou doublon déjà en base) → il sort de la file, il reste visible dans
   // Mes documents.
-  const queueJobs = jobs.filter((job) => job.status !== "completed");
+  /**
+   * File affichée : ni les documents terminés, ni ceux écartés comme non-factures.
+   *
+   * Les `rejected_non_invoice` restent en base (traçabilité, et le bouton « Traiter
+   * quand même » doit rester possible via la puce de filtre), mais ils encombraient la
+   * liste principale d'entrées sur lesquelles l'utilisateur n'a rien à faire. Ils
+   * restent atteignables par le filtre « Ignorés ».
+   */
+  const queueJobs = jobs.filter((job) =>
+    job.status !== "completed"
+    && (queueBucketFilter === "rejected" || job.status !== "rejected_non_invoice"),
+  );
+
+  /**
+   * Documents en attente de révision, sur TOUTE la file — pas seulement sur le dépôt
+   * suivi (`trackedJobs`, borné à 2 h). Après un rechargement de page ou le lendemain,
+   * l'appel à l'action doit rester visible tant qu'il reste du travail : c'est
+   * précisément là que l'utilisateur risque d'oublier des factures en attente.
+   */
+  const pendingReviewJobs = jobs
+    .filter((job) => job.status === "needs_review")
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   const rejectedQueueCount = queueJobs.filter((job) => job.status === "rejected_non_invoice").length;
 
   // Comptes par catégorie pour les puces de filtre — sur `queueJobs` en entier, pas sur
@@ -858,9 +896,14 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
   // apporter — `jobs` est la vraie source stable dont `queueJobs` dérive purement.
   const queueBucketCounts = useMemo(() => {
     const counts = new Map<QueueBucket, number>();
-    for (const job of queueJobs) counts.set(BUCKET_OF[job.status], (counts.get(BUCKET_OF[job.status]) ?? 0) + 1);
+    // Compté sur TOUS les documents non terminés, pas sur la liste affichée : les
+    // `rejected_non_invoice` sont masqués de la liste principale, mais leur puce doit
+    // rester visible et cliquable — sinon ils deviendraient inatteignables.
+    for (const job of jobs) {
+      if (job.status === "completed") continue;
+      counts.set(BUCKET_OF[job.status], (counts.get(BUCKET_OF[job.status]) ?? 0) + 1);
+    }
     return counts;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobs]);
   const filteredQueueJobs = useMemo(() => {
     const term = queueSearch.trim().toLowerCase();
@@ -1101,10 +1144,14 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
             </div>
           )}
 
+          {/* `contain` volontairement sans `size` (que `strict` inclut) : un conteneur
+              qui ignore son contenu pour se dimensionner retombe à 0 px dès lors que
+              seule une hauteur MAX est fixée — la liste devenait alors invisible tout
+              en annonçant son nombre d'éléments. */}
           {filteredFiles.length === 0 ? (
             <p className="px-1 py-6 text-center text-xs text-[var(--kn-text-muted)]">Aucun fichier ne correspond à « {fileSearch} ».</p>
           ) : (
-            <div ref={fileListParentRef} className="max-h-72 overflow-y-auto" style={{ contain: "strict" }}>
+            <div ref={fileListParentRef} className="max-h-72 overflow-y-auto" style={{ contain: "layout paint style" }}>
               <div style={{ height: fileVirtualizer.getTotalSize(), position: "relative", width: "100%" }}>
                 {fileVirtualizer.getVirtualItems().map((virtualRow) => {
                   const file = filteredFiles[virtualRow.index];
@@ -1163,6 +1210,26 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
       {error && (
         <div className="mt-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           <AlertCircle className="mt-0.5 size-4 shrink-0" />{error}
+        </div>
+      )}
+
+      {/* Documents écartés avant import. Information, pas alerte : l'utilisateur n'a
+          rien à faire — c'est le comportement attendu, pas un problème à régler. */}
+      {skipped.length > 0 && (
+        <div className="mt-4 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-panel)] px-3 py-2.5 text-[13px] text-[var(--kn-text-muted)]">
+          <p className="flex items-center gap-2">
+            <FileText className="size-4 shrink-0" />
+            <span>
+              <span className="font-medium text-[var(--kn-text)]">
+                {fmt(skipped.length)} document{skipped.length > 1 ? "s" : ""} écarté{skipped.length > 1 ? "s" : ""}
+              </span>{" "}
+              — ce ne sont pas des factures (récapitulatifs ou courriers). Aucun traitement
+              n&apos;a été lancé dessus.
+            </span>
+          </p>
+          <p className="mt-1 truncate pl-6 text-xs">
+            {skipped.map((entry) => entry.name).join(", ")}
+          </p>
         </div>
       )}
 
@@ -1306,9 +1373,36 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
       )}
 
       <div className="mt-8">
+        {/* Appel à l'action, avant la liste.
+            Le défaut de l'écran précédent : 44 documents listés à égalité, alors que la
+            plupart n'attendaient rien de l'utilisateur. Ce bloc isole la seule chose qui
+            demande son intervention, et l'ouvre en un clic sur le flux de révision
+            enchaîné — plutôt que de le laisser chercher dans la liste. */}
+        {pendingReviewJobs.length > 0 && (
+          <button
+            type="button"
+            onClick={() => router.push(`/upload/review?job=${pendingReviewJobs[0].id}`)}
+            className="mb-4 flex w-full cursor-pointer items-center gap-3 rounded-xl border-2 border-amber-300 bg-amber-50 px-4 py-3.5 text-left transition-colors hover:border-[#f97316]"
+          >
+            <CheckCircle2 className="size-6 shrink-0 text-amber-600" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold text-amber-900">
+                {fmt(pendingReviewJobs.length)} document{pendingReviewJobs.length > 1 ? "s" : ""} bloqué{pendingReviewJobs.length > 1 ? "s" : ""} — informations manquantes
+              </span>
+              <span className="mt-0.5 block text-xs text-amber-800">
+                {pendingReviewJobs.length > 1 ? "Ces factures ne sont pas" : "Cette facture n’est pas"} encore enregistrée{pendingReviewJobs.length > 1 ? "s" : ""} :
+                complétez ce qui manque pour {pendingReviewJobs.length > 1 ? "les" : "l’"}ajouter. Le document suivant s&apos;ouvre automatiquement.
+              </span>
+            </span>
+            <span className="shrink-0 rounded-lg bg-[#f97316] px-3.5 py-2 text-xs font-semibold text-white">
+              Compléter
+            </span>
+          </button>
+        )}
+
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold text-[var(--kn-text)]">
-            File de traitement
+            Documents importés
             {queueJobs.length > 0 && <span className="ml-1.5 font-normal text-[var(--kn-text-muted)]">({fmt(queueJobs.length)})</span>}
           </h2>
           <div className="flex flex-wrap items-center gap-2">
@@ -1412,7 +1506,7 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
             <button type="button" onClick={() => { setQueueBucketFilter("all"); setQueueSearch(""); }} className="ml-1 cursor-pointer font-semibold text-[#f97316] hover:underline">Réinitialiser</button>
           </div>
         ) : (
-          <div ref={queueListParentRef} className="max-h-[36rem] overflow-y-auto" style={{ contain: "strict" }}>
+          <div ref={queueListParentRef} className="max-h-[36rem] overflow-y-auto" style={{ contain: "layout paint style" }}>
             <div style={{ height: queueVirtualizer.getTotalSize(), position: "relative", width: "100%" }}>
               {queueVirtualizer.getVirtualItems().map((virtualRow) => {
                 const job = filteredQueueJobs[virtualRow.index];
@@ -1447,7 +1541,7 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
                         {job.last_error && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.last_error}</p>}
                       </div>
                       {job.status === "needs_review" && (
-                        <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="shrink-0 cursor-pointer rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90">Réviser</button>
+                        <button onClick={() => router.push(`/upload/review?job=${job.id}`)} className="shrink-0 cursor-pointer rounded-lg bg-[#f97316] px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90">Compléter</button>
                       )}
                       {job.status === "failed" && (
                         <button onClick={() => void retry(job.id)} className="shrink-0 cursor-pointer rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-xs font-semibold"><RefreshCw className="mr-1 inline size-3" />Réessayer</button>

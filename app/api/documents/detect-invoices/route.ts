@@ -7,6 +7,7 @@ import {
   MAX_PAGES_PER_DETECTION,
   buildSplitDetectionParams,
   parseDetectedInvoices,
+  parseDocumentKind,
 } from "@/lib/anthropic/invoice-splitting";
 
 export const runtime = "nodejs";
@@ -81,9 +82,14 @@ export async function POST(request: Request) {
       anthropic.beta.messages.create(buildSplitDetectionParams(uploaded.id)),
     );
 
-    const invoices = parseDetectedInvoices(message.content, pageCount);
+    const kind = parseDocumentKind(message.content);
+    // Un bordereau ne contient pas de factures : il les récapitule. Le signaler ici
+    // évite de le mettre en file, donc d'en payer l'extraction complète pour finir par
+    // le marquer « ignoré ».
+    const invoices = kind === "factures" ? parseDetectedInvoices(message.content, pageCount) : [];
     return NextResponse.json({
       page_count: pageCount,
+      kind,
       invoices,
       usage: {
         input_tokens: message.usage.input_tokens,

@@ -6,6 +6,8 @@ import { SplitPane } from "@/components/factures/split-pane";
 import { InvoiceEditPanel, type InvoiceEditData } from "@/components/factures/invoice-edit-panel";
 import { InvoicePicker, type PickerInvoice } from "@/components/documents/invoice-picker";
 import { ScanText } from "lucide-react";
+import { getCorrectionItems } from "@/lib/data/corrections";
+import { CorrectionNav } from "@/components/corrections/correction-nav";
 
 type Row = Record<string, unknown>;
 
@@ -31,11 +33,33 @@ async function selectAllInvoices(
   }
 }
 
-export default async function ExtractionPage({ searchParams }: { searchParams: Promise<{ id?: string }> }) {
-  const { id } = await searchParams;
+export default async function ExtractionPage({ searchParams }: { searchParams: Promise<{ id?: string; review?: string }> }) {
+  const { id, review } = await searchParams;
   const ctx = await getUserContext();
   if (!ctx) redirect("/login");
   const supabase = await createClient();
+
+  /**
+   * Mode « corriger une par une », arrivé depuis le contrôle qualité.
+   *
+   * Le sélecteur habituel liste TOUTES les factures de l'organisation — utile pour
+   * retrouver une facture précise, inutilisable pour enchaîner une poignée de
+   * corrections ciblées. Dans ce mode il cède la place à une barre bornée à la file de
+   * contrôle qualité, avec la position et le passage à la suivante.
+   */
+  if (review === "1" && id) {
+    const items = await getCorrectionItems();
+    return (
+      <div className="flex h-full flex-col">
+        <div className="shrink-0 px-6 pb-3 pt-4">
+          <CorrectionNav items={items} currentId={id} />
+        </div>
+        <div className="min-h-0 flex-1 overflow-hidden px-6 pb-5">
+          <Detail id={id} />
+        </div>
+      </div>
+    );
+  }
 
   // Liste légère pour le sélecteur
   const list = await selectAllInvoices(supabase, ctx.orgId);

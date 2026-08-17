@@ -82,6 +82,53 @@ export const invoiceExtractionSchema = z.object({
 
 export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
 
+/**
+ * Variante tolérante, pour la **révision humaine uniquement**.
+ *
+ * Le schéma strict ci-dessus refuse une extraction dont `total_ht`, `total_ttc`,
+ * `facture_number` ou `facture_date` manquent — ce qui est juste au moment
+ * d'enregistrer, mais absurde au moment de réviser : la page de révision existe
+ * précisément pour combler ce que l'OCR n'a pas su lire. Avec le schéma strict, un
+ * total illisible produisait « Le résultat OCR est incomplet » et un cul-de-sac —
+ * impossible de corriger, impossible d'avancer.
+ *
+ * Cette variante laisse donc l'extraction s'ouvrir avec des trous, que l'utilisateur
+ * remplit à l'écran. L'enregistrement, lui, continue de passer par le schéma strict
+ * (`/api/invoices`) : rien n'entre en base sans ces champs.
+ *
+ * `missingRequiredFields` liste ce qui manque, pour que l'écran puisse le signaler
+ * plutôt que de laisser l'utilisateur chercher.
+ */
+const REVIEW_PLACEHOLDER_DATE = "";
+
+export const invoiceExtractionReviewSchema = invoiceExtractionSchema.extend({
+  invoice: z.object({
+    facture_number: z.string().nullable().transform((v) => v ?? ""),
+    facture_date: z.string().nullable().transform((v) => v ?? REVIEW_PLACEHOLDER_DATE),
+    date_limite_paiement: z.string().nullable(),
+    date_prochain_releve: z.string().nullable(),
+    date_prochaine_facture: z.string().nullable(),
+    total_ht: z.number().nullable().transform((v) => v ?? 0),
+    tva: z.number().nullable(),
+    autres_taxes: z.number().nullable(),
+    total_ttc: z.number().nullable().transform((v) => v ?? 0),
+    is_duplicata: z.boolean().nullable().transform((v) => v ?? false),
+  }),
+  precision: z.record(z.string(), z.number()).nullable().transform((v) => v ?? {}),
+});
+
+/** Champs que l'utilisateur devra compléter avant de pouvoir enregistrer. */
+export function missingRequiredFields(extraction: unknown): string[] {
+  const invoice = (extraction as { invoice?: Record<string, unknown> } | null)?.invoice;
+  if (!invoice) return ["invoice"];
+  const missing: string[] = [];
+  if (!invoice.facture_number) missing.push("Numéro de facture");
+  if (!invoice.facture_date) missing.push("Date de facture");
+  if (invoice.total_ttc === null || invoice.total_ttc === undefined) missing.push("Total TTC");
+  if (invoice.total_ht === null || invoice.total_ht === undefined) missing.push("Total HT");
+  return missing;
+}
+
 export const invoiceExtractionToolSchema = {
   name: "extract_edf_invoice",
   description:

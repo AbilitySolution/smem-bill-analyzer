@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getUserContext } from "@/lib/auth";
-import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
+import { invoiceExtractionReviewSchema, missingRequiredFields } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice } from "@/lib/anthropic/invoice-validation";
 import { matchCommuneScored, matchSiteByContract } from "@/lib/extraction/matching";
 
@@ -28,13 +28,19 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ job });
   }
 
-  const extraction = invoiceExtractionSchema.safeParse(job.extraction_json);
+  // Schéma tolérant : la révision doit s'ouvrir même sur une extraction incomplète —
+  // c'est tout son objet. Le schéma strict garde la porte à l'enregistrement
+  // (`/api/invoices`), donc rien d'incomplet n'entre en base pour autant.
+  const extraction = invoiceExtractionReviewSchema.safeParse(job.extraction_json);
   if (!extraction.success) {
+    // Illisible même en tolérant : l'extraction est structurellement inexploitable
+    // (mauvais type, blocs absents), pas simplement trouée.
     return NextResponse.json(
-      { error: "Le résultat OCR est incomplet.", details: extraction.error.format() },
+      { error: "Le résultat OCR est inexploitable — relancez le document.", details: extraction.error.format() },
       { status: 422 },
     );
   }
+  const missingFields = missingRequiredFields(job.extraction_json);
 
   // Rapprochement au premier affichage. L'enregistrement automatique l'a déjà fait pour
   // les jobs passés par lui ; ce chemin couvre les relances et les ouvertures directes.
@@ -62,6 +68,9 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       validation_json: validateInvoice(extraction.data),
       suggested_commune_id: suggestedCommuneId,
       suggested_site_id: suggestedSiteId,
+      // Champs que l'OCR n'a pas lus : l'écran les signale pour que l'utilisateur
+      // sache quoi compléter, au lieu de chercher ce qui cloche.
+      missing_fields: missingFields,
     },
   });
 }
