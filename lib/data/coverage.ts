@@ -42,7 +42,12 @@ export async function getCoverageData(filters: CoverageFilters): Promise<Coverag
   const supabase = await createClient();
 
   // org_id explicite en plus de la RLS (défense en profondeur).
-  const [invRes, perRes] = await Promise.all([
+  //
+  // Les communes et les sites sont chargés depuis leurs tables, PAS dérivés des factures
+  // (§3.1 du PLAN) : une commune fraîchement créée n'a par définition aucune facture, et
+  // se serait donc affichée nulle part — la fonctionnalité aurait semblé ne pas marcher.
+  // Le rapprochement avec les agrégats de factures se fait ensuite, en left join logique.
+  const [invRes, perRes, commRes, siteRes] = await Promise.all([
     supabase
       .from("invoices")
       .select("id, facture_number, facture_date, total_ttc, site_id, commune_id, sites(nom), communes(nom)")
@@ -53,9 +58,21 @@ export async function getCoverageData(filters: CoverageFilters): Promise<Coverag
       .from("consumption_periods")
       .select("invoice_id, period_start, period_end, invoices!inner(org_id)")
       .eq("invoices.org_id", filters.orgId),
+    supabase
+      .from("communes")
+      .select("id, nom")
+      .eq("org_id", filters.orgId)
+      .eq("archived", false),
+    supabase
+      .from("sites")
+      .select("id, nom, commune_id")
+      .eq("org_id", filters.orgId),
   ]);
 
-  if (invRes.error || !invRes.data || invRes.data.length === 0) return null;
+  // Une organisation sans aucune commune n'a rien à afficher. En revanche des communes
+  // sans la moindre facture, si : elles apparaissent à zéro.
+  if (commRes.error || !commRes.data || commRes.data.length === 0) return null;
+  if (invRes.error) return null;
 
   // Span par facture : [min(period_start), max(period_end)] sur ses lignes de conso.
   const span = new Map<string, { start: string; end: string }>();
@@ -70,19 +87,35 @@ export async function getCoverageData(filters: CoverageFilters): Promise<Coverag
   }
 
   const invoices: CoverageInvoice[] = [];
-  const communesMap = new Map<string, string>();
-  const sitesMap = new Map<string, { nom: string; communeId: string }>();
 
-  for (const i of invRes.data as unknown as RawInv[]) {
+  // Le référentiel de l'organisation d'abord : toutes les communes actives et tous leurs
+  // sites, factures ou pas. Les factures ne font qu'alimenter les cases de la heatmap.
+  const communesMap = new Map<string, string>(
+    (commRes.data as Array<{ id: string; nom: string }>).map((c) => [c.id, c.nom]),
+  );
+  const sitesMap = new Map<string, { nom: string; communeId: string }>(
+    (siteRes.data ?? [])
+      .filter((s) => s.commune_id && communesMap.has(s.commune_id))
+      .map((s) => [s.id as string, { nom: s.nom as string, communeId: s.commune_id as string }]),
+  );
+
+  for (const i of (invRes.data ?? []) as unknown as RawInv[]) {
     if (!i.site_id || !i.commune_id) continue;
+    // Facture rattachée à une commune archivée : on ne la fait pas réapparaître dans la
+    // vue par la bande. La commune a été retirée, ses factures le suivent.
+    const communeNom = communesMap.get(i.commune_id);
+    if (communeNom === undefined) continue;
+
     const s = span.get(i.id);
     // Repli : facture sans période détaillée → span ponctuel = date de facture.
     const spanStart = s?.start ?? i.facture_date;
     const spanEnd = s?.end ?? i.facture_date;
     const siteNom = i.sites?.nom ?? "—";
-    const communeNom = i.communes?.nom ?? "—";
-    communesMap.set(i.commune_id, communeNom);
-    sitesMap.set(i.site_id, { nom: siteNom, communeId: i.commune_id });
+    // Le site vient normalement de sitesMap ; on complète au cas où il aurait échappé à
+    // la requête (site d'une autre org filtré par RLS, par exemple).
+    if (!sitesMap.has(i.site_id)) {
+      sitesMap.set(i.site_id, { nom: siteNom, communeId: i.commune_id });
+    }
     invoices.push({
       id: i.id,
       factureNumber: i.facture_number ?? "—",

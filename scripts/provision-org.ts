@@ -2,14 +2,16 @@
  * Provisionne une nouvelle organisation cliente + son premier utilisateur org_admin.
  * Usage : npx tsx scripts/provision-org.ts --org "Acme Corp" --email admin@acme.com
  *
- * Ne seed AUCUNE commune (donnée propre à chaque organisation, contrairement à la
- * liste Martinique historique de SMEM) — le nouvel org_admin crée ses communes/sites
- * lui-même via la policy INSERT org-scopée désormais en place.
+ * Seed le socle des 20 communes de Martinique (SCRUM-14) : un nouveau client démarre
+ * avec la même base que le SMEM, puis complète lui-même parmi les 14 restantes depuis
+ * la page Paramètres. Les noms, codes INSEE et coordonnées viennent du référentiel —
+ * une organisation neuve n'a aucun historique d'orthographe à préserver.
  */
 import { createClient } from "@supabase/supabase-js";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { communesDuSocle } from "../lib/communes/socle";
 
 function loadEnv(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -73,7 +75,22 @@ async function main() {
     .insert(DEFAULT_TAGS.map((t) => ({ ...t, org_id: org.id })));
   if (tagErr) console.warn(`Avertissement seed tags: ${tagErr.message}`);
 
+  // Socle des 20 communes. Échec bloquant, contrairement aux tags : une organisation
+  // sans commune ne peut ni recevoir de facture ni afficher la moindre analyse.
+  const socle = communesDuSocle();
+  const { error: communeErr } = await admin.from("communes").insert(
+    socle.map((c) => ({
+      org_id: org.id,
+      nom: c.nom,
+      code_insee: c.codeInsee,
+      latitude: c.latitude,
+      longitude: c.longitude,
+    })),
+  );
+  if (communeErr) throw new Error(`Seed des communes échoué: ${communeErr.message}`);
+
   console.log(`✔ Organisation "${orgName}" créée (id: ${org.id})`);
+  console.log(`✔ ${socle.length} communes du socle Martinique créées (14 restantes ajoutables depuis /parametres)`);
   console.log(`✔ Utilisateur admin ${email} créé (id: ${userData.user.id})`);
   console.log(`  Mot de passe temporaire (à transmettre de façon sécurisée, forcer un reset à la 1ère connexion) : ${tempPassword}`);
 }

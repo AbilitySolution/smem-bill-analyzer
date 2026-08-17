@@ -61,7 +61,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
   const supabase = await createClient();
   const [result, communesRes, sitesRes, calendarDays] = await Promise.all([
     getInvoiceDocsPage(filters),
-    supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).order("nom"),
+    supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).eq("archived", false).order("nom"),
     supabase.from("sites").select("id, nom, commune_id").eq("org_id", ctx.orgId).order("nom"),
     getInvoiceCalendarDays(filters),
   ]);

@@ -10,11 +10,14 @@ import type { InvoiceExtraction } from "@/lib/anthropic/invoice-schema";
 
 const COMM_STOP = new Set(["de", "du", "la", "le", "les", "des", "l", "d", "en", "et", "a", "au"]);
 
-/** Minuscules, accents retirés, abréviations développées, genre neutralisé (saint == sainte). */
+/** Minuscules, accents retirés, ligatures développées, abréviations développées, genre neutralisé (saint == sainte). */
 export function normalizeComm(s: string): string {
   return s
     .toLowerCase()
     .normalize("NFD").replace(/\p{Mn}/gu, "")
+    // NFD ne décompose pas les ligatures : sans ça « Schœlcher » devient « sch lcher »
+    // (le œ tombe dans le filtre [^a-z0-9 ] plus bas) et ne matche jamais « SCHOELCHER ».
+    .replace(/œ/g, "oe").replace(/æ/g, "ae")
     .replace(/\bste\b/g, "sainte")
     .replace(/\bst\b/g, "saint")
     .replace(/\bsainte\b/g, "saint") // neutralize gender: saint == sainte
@@ -24,7 +27,8 @@ export function normalizeComm(s: string): string {
     .replace(/\s+/g, " ").trim();
 }
 
-function meaningfulWords(normalized: string): string[] {
+/** Mots porteurs de sens d'un nom **déjà normalisé** : articles et mots d'une lettre retirés. */
+export function meaningfulWords(normalized: string): string[] {
   return normalized.split(" ").filter((w) => w.length > 1 && !COMM_STOP.has(w));
 }
 
@@ -96,7 +100,14 @@ export async function matchCommuneScored(
   const candidates = communeCandidates(extraction);
   if (!candidates.length) return null;
 
-  const { data: allCommunes } = await supabase.from("communes").select("id, nom").eq("org_id", orgId);
+  // Rechargées à chaque extraction, sans cache module : une commune créée à l'instant doit
+  // pouvoir capter la facture suivante. Les archivées sont exclues — les rattacher
+  // ressusciterait silencieusement une commune que l'utilisateur a retirée de ses vues.
+  const { data: allCommunes } = await supabase
+    .from("communes")
+    .select("id, nom")
+    .eq("org_id", orgId)
+    .eq("archived", false);
   if (!allCommunes?.length) return null;
 
   return pickBestCommuneScored(candidates, allCommunes as Array<{ id: string; nom: string }>);

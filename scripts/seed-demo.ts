@@ -20,6 +20,7 @@ import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import ws from "ws";
+import { rapprocherCommune } from "../lib/communes/rapprochement";
 
 // ── Env (.env.local) ────────────────────────────────────────────────────────
 function loadEnv(): Record<string, string> {
@@ -268,16 +269,52 @@ async function main() {
     console.log(`  ${ids.length} factures SIM supprimées.`);
   }
 
-  // 1. Communes (upsert par nom)
-  const { data: existingCommunes } = await supabase.from("communes").select("id, nom");
-  const communeIds = new Map((existingCommunes ?? []).map((c) => [c.nom, c.id]));
-  const newCommunes = COMMUNES.filter((c) => !communeIds.has(c.nom)).map((c) => ({ nom: c.nom, org_id: orgId }));
-  if (newCommunes.length && !DRY) {
-    const { data, error } = await supabase.from("communes").insert(newCommunes).select("id, nom");
-    if (error) throw new Error(error.message);
-    for (const c of data ?? []) communeIds.set(c.nom, c.id);
+  // 1. Communes — rapprochement PAR CODE INSEE (SCRUM-14)
+  //
+  //    Les noms de COMMUNES suivent l'orthographe officielle ("Fonds-Saint-Denis",
+  //    "Grand'Rivière") alors que la base porte l'orthographe historique
+  //    ("Fonds Saint Denis", "Grand Rivière"). Un rapprochement par nom brut créait
+  //    donc un doublon pour 5 des 8 communes du seed — que `UNIQUE (org_id, code_insee)`
+  //    rejette désormais. On passe par le référentiel : code_insee, latitude et longitude
+  //    en sortent. Les communes déjà en base gardent leur nom, on ne les renomme pas.
+  const { data: existingCommunes } = await supabase.from("communes").select("id, nom, code_insee");
+  const idParCode = new Map(
+    (existingCommunes ?? [])
+      .filter((c) => c.code_insee)
+      .map((c) => [c.code_insee as string, c.id as string]),
+  );
+
+  const communeIds = new Map<string, string>();
+  const aCreer: Record<string, unknown>[] = [];
+  const codeParNomSeed = new Map<string, string>();
+
+  for (const c of COMMUNES) {
+    const resolu = rapprocherCommune(c.nom);
+    if (!resolu) {
+      throw new Error(
+        `Commune « ${c.nom} » absente du référentiel Martinique — corriger COMMUNES dans ce script.`,
+      );
+    }
+    const { codeInsee, nom, latitude, longitude } = resolu.entree;
+    codeParNomSeed.set(c.nom, codeInsee);
+
+    const existant = idParCode.get(codeInsee);
+    if (existant) communeIds.set(c.nom, existant);
+    else if (!aCreer.some((x) => x.code_insee === codeInsee)) {
+      aCreer.push({ nom, code_insee: codeInsee, latitude, longitude, org_id: orgId });
+    }
   }
-  console.log(`Communes : ${communeIds.size ?? 0} en base (+${newCommunes.length} créées)`);
+
+  if (aCreer.length && !DRY) {
+    const { data, error } = await supabase.from("communes").insert(aCreer).select("id, code_insee");
+    if (error) throw new Error(error.message);
+    for (const c of data ?? []) idParCode.set(c.code_insee as string, c.id as string);
+    for (const c of COMMUNES) {
+      const id = idParCode.get(codeParNomSeed.get(c.nom)!);
+      if (id) communeIds.set(c.nom, id);
+    }
+  }
+  console.log(`Communes : ${communeIds.size} rattachées (+${aCreer.length} créées)`);
 
   // 2. Clients (1 par commune)
   const { data: existingClients } = await supabase.from("clients").select("id, nom, commune_id");
@@ -298,7 +335,7 @@ async function main() {
   const { data: existingSites } = await supabase.from("sites").select("id, nom, commune_id, categorie, pdl, kva, ampere");
   const siteKey = (communeId: string, nom: string) => `${communeId}::${nom}`;
   const siteMap = new Map((existingSites ?? []).map((s) => [siteKey(s.commune_id, s.nom), s]));
-  let pdlSeq = 610000;
+  const pdlSeq = 610000;
   const newSites: Record<string, unknown>[] = [];
   for (const c of COMMUNES) {
     const cid = communeIds.get(c.nom); if (!cid) continue;

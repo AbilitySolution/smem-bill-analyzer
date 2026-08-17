@@ -15,7 +15,7 @@ export default async function RapportsPage({ searchParams }: { searchParams: Pro
   // org_id explicite en plus de la RLS (défense en profondeur), comme sur /analyses.
   const supabase = await createClient();
   const [communesRes, invoiceSiteIds] = await Promise.all([
-    supabase.from("communes").select("id, nom, travaux_debut, travaux_estimes").eq("org_id", ctx.orgId).order("nom"),
+    supabase.from("communes").select("id, nom, travaux_debut, travaux_estimes").eq("org_id", ctx.orgId).eq("archived", false).order("nom"),
     supabase.from("invoices").select("site_id").eq("org_id", ctx.orgId).not("site_id", "is", null),
   ]);
 
