@@ -21,7 +21,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import ws from "ws";
 import { rapprocherCommune } from "../lib/communes/rapprochement";
-import { normalizeComm } from "../lib/extraction/matching";
 
 // ── Env (.env.local) ────────────────────────────────────────────────────────
 function loadEnv(): Record<string, string> {
@@ -275,9 +274,9 @@ async function main() {
   //    Les noms de COMMUNES suivent l'orthographe officielle ("Fonds-Saint-Denis",
   //    "Grand'Rivière") alors que la base porte l'orthographe historique
   //    ("Fonds Saint Denis", "Grand Rivière"). Un rapprochement par nom brut créait
-  //    donc un doublon pour 5 des 8 communes du seed — que `UNIQUE (org_id, slug)`
-  //    rejetterait désormais. On passe par le référentiel : nom, code_insee, latitude
-  //    et longitude en sortent, jamais du seed.
+  //    donc un doublon pour 5 des 8 communes du seed — que `UNIQUE (org_id, code_insee)`
+  //    rejette désormais. On passe par le référentiel : code_insee, latitude et longitude
+  //    en sortent. Les communes déjà en base gardent leur nom, on ne les renomme pas.
   const { data: existingCommunes } = await supabase.from("communes").select("id, nom, code_insee");
   const idParCode = new Map(
     (existingCommunes ?? [])
@@ -302,7 +301,7 @@ async function main() {
     const existant = idParCode.get(codeInsee);
     if (existant) communeIds.set(c.nom, existant);
     else if (!aCreer.some((x) => x.code_insee === codeInsee)) {
-      aCreer.push({ nom, code_insee: codeInsee, slug: normalizeComm(nom), latitude, longitude, org_id: orgId });
+      aCreer.push({ nom, code_insee: codeInsee, latitude, longitude, org_id: orgId });
     }
   }
 

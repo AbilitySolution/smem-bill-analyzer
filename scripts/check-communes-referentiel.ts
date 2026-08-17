@@ -2,8 +2,12 @@
  * SCRUM-14 (lot 1b) — Rapproche les communes d'une organisation avec le référentiel
  * Martinique, et échoue bruyamment si le rapprochement n'est pas parfait.
  *
- * C'est le préalable au backfill `code_insee` du lot 1c : on ne backfille pas 20 lignes
- * sur un rapprochement qu'on n'a pas relu.
+ * C'est le préalable au backfill du lot 1c : on ne backfille pas 20 lignes sur un
+ * rapprochement qu'on n'a pas relu.
+ *
+ * ⚠️ Ce que le rapprochement apporte, c'est le `code_insee` et les COORDONNÉES. Il ne
+ * cherche pas à aligner l'orthographe : les communes gardent leur nom historique en base,
+ * l'outil n'en a que faire, et les renommer changerait le rattachement des factures.
  *
  * Usage : npx tsx scripts/check-communes-referentiel.ts [--org "SMEM"] [--env .env.local]
  *
@@ -24,10 +28,7 @@ import {
   rapprocherCommune,
   type PasseRapprochement,
 } from "../lib/communes/rapprochement";
-import {
-  NOMS_EN_BASE_2026_08,
-  type CommuneReferentiel,
-} from "../lib/communes/referentiel-martinique";
+import { type CommuneReferentiel } from "../lib/communes/referentiel-martinique";
 
 function loadEnv(fichier: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -167,18 +168,6 @@ async function main() {
       ` (passe stricte : ${lignes.filter((l) => l.passe === "stricte").length},` +
       ` repli sans articles : ${lignes.filter((l) => l.passe === "sans articles").length})`,
   );
-
-  // Écart avec l'instantané documenté : informatif, pas bloquant — une commune a pu être
-  // créée légitimement depuis le 2026-08-16.
-  for (const ligne of lignes) {
-    if (!ligne.entree) continue;
-    const attendu = NOMS_EN_BASE_2026_08[ligne.entree.codeInsee];
-    if (attendu === undefined) {
-      console.log(`ℹ️  ${ligne.nomEnBase} (${ligne.entree.codeInsee}) absente de l'instantané NOMS_EN_BASE_2026_08.`);
-    } else if (attendu !== ligne.nomEnBase) {
-      console.log(`ℹ️  ${ligne.entree.codeInsee} : instantané « ${attendu} », base « ${ligne.nomEnBase} ».`);
-    }
-  }
 
   if (derivees.length) {
     console.log(`\n⚠️  ${derivees.length} commune(s) ont des coordonnées en base à plus de 3 km du centroïde officiel.`);

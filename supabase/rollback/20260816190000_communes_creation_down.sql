@@ -4,9 +4,9 @@
 --
 -- Ce qui est perdu et ne revient pas :
 --   - `archived` : on ne saura plus quelles communes avaient été archivées ;
---   - `code_insee` et `slug` des communes créées APRÈS la migration (lot 2+),
---     qui resteront en base sans identifiant. Les recréer proprement supposera de
---     rejouer scripts/check-communes-referentiel.ts.
+--   - le `code_insee` des communes créées APRÈS la migration (lot 2+), qui resteront
+--     en base sans identifiant. Les recréer proprement supposera de rejouer
+--     scripts/check-communes-referentiel.ts.
 --
 -- Ce qui est restauré : les latitude/longitude des 20 communes historiques.
 --
@@ -33,8 +33,7 @@
 --    corrigeait : restaurer, c'est la réintroduire dans le calcul de longueur de nuit et
 --    la correction météo. Ne rétablir que si le rollback est réellement nécessaire.
 
--- 1. Contraintes et index ajoutés par la migration.
-alter table communes drop constraint if exists communes_org_slug_key;
+-- 1. Contrainte et index ajoutés par la migration.
 alter table communes drop constraint if exists communes_org_code_insee_key;
 drop index if exists communes_org_archived_idx;
 
@@ -42,8 +41,7 @@ drop index if exists communes_org_archived_idx;
 alter table communes alter column code_insee drop not null;
 update communes set code_insee = null;
 
--- 3. Colonnes ajoutées. Les commentaires partent avec elles.
-alter table communes drop column if exists slug;
+-- 3. Colonne ajoutée. Le commentaire part avec elle.
 alter table communes drop column if exists archived;
 
 -- 4. Coordonnées historiques (cf. 20260728000000_communes-latlng.sql).
@@ -68,7 +66,7 @@ update communes set latitude = 14.5533, longitude = -60.9433 where nom = 'Saint 
 update communes set latitude = 14.4333, longitude = -60.8667 where nom = 'Sainte Anne';
 update communes set latitude = 14.7833, longitude = -60.9833 where nom = 'Sainte Marie';
 
--- 5. Contrôle final — doit renvoyer 20 lignes sans code_insee, aucune colonne archived/slug.
+-- 5. Contrôle final — doit renvoyer 20 lignes sans code_insee, aucune colonne archived.
 --    select count(*) from communes where code_insee is null;
 --    select column_name from information_schema.columns
---     where table_name = 'communes' and column_name in ('archived','slug');  -- 0 ligne
+--     where table_name = 'communes' and column_name = 'archived';  -- 0 ligne

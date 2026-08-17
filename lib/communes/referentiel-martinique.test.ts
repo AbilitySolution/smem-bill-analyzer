@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { REFERENTIEL_MARTINIQUE, NOMS_EN_BASE_2026_08 } from "./referentiel-martinique";
+import { REFERENTIEL_MARTINIQUE } from "./referentiel-martinique";
 
 /**
  * Tests de garde sur les données, pas sur du code : le référentiel est figé et vérifié
@@ -61,18 +61,5 @@ describe("REFERENTIEL_MARTINIQUE", () => {
     expect(parCode.get("97234")).toBe("Bellefontaine");
     expect(parCode.get("97204")).toBe("Le Carbet");
     expect(parCode.get("97205")).toBe("Case-Pilote");
-  });
-});
-
-describe("NOMS_EN_BASE_2026_08", () => {
-  it("décrit les 20 communes de l'org SMEM", () => {
-    expect(Object.keys(NOMS_EN_BASE_2026_08)).toHaveLength(20);
-  });
-
-  it("n'indexe que des codeInsee présents dans le référentiel", () => {
-    const codes = new Set<string>(REFERENTIEL_MARTINIQUE.map((c) => c.codeInsee));
-    for (const code of Object.keys(NOMS_EN_BASE_2026_08)) {
-      expect(codes.has(code), `code ${code} absent du référentiel`).toBe(true);
-    }
   });
 });

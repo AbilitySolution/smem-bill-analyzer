@@ -19,6 +19,11 @@
  * d'ajout d'une commune (§3.2bis du PLAN.md). Les communes non créées n'existent pas
  * pour les analyses, la heatmap, les rapports ou le matching de factures.
  *
+ * Il ne fait PAS autorité sur l'orthographe des communes déjà en base. Celles-ci gardent
+ * leur nom historique (« Les Trois Ilets », « Carbet ») : l'outil n'en a que faire, et le
+ * renommer changerait le rattachement des factures. Ce que le référentiel apporte aux
+ * communes existantes, ce sont leurs coordonnées et leur code INSEE, rien d'autre.
+ *
  * Invariant, garanti par referentiel-martinique.test.ts : 34 entrées, codeInsee unique,
  * nom unique, coordonnées non nulles et dans les bornes de la Martinique.
  *
@@ -68,38 +73,3 @@ export const REFERENTIEL_MARTINIQUE = [
   { codeInsee: "97233", nom: "Le Morne-Vert",     latitude: 14.7046,  longitude: -61.1362 },
   { codeInsee: "97234", nom: "Bellefontaine",     latitude: 14.6747,  longitude: -61.146 },
 ] as const satisfies readonly CommuneReferentiel[];
-
-/**
- * Les 20 communes déjà présentes dans l'org SMEM au 2026-08-16, avec leur nom
- * EXACT en base (orthographe historique, sans tirets ni accents pour certaines),
- * indexées par leur code INSEE officiel.
- *
- * Sert uniquement de garde au script de vérification du lot 1b : il compare ce
- * qu'il trouve réellement en base à cet instantané. Ne pas utiliser en runtime —
- * une fois le backfill `code_insee` fait, le rapprochement se fait par code INSEE.
- *
- * ⚠️ Ne PAS renommer ces communes en base : `scoreCommune` matche sur le `nom`,
- *    un renommage changerait le rattachement des factures futures (§3.4 du PLAN.md).
- */
-export const NOMS_EN_BASE_2026_08: Readonly<Record<string, string>> = {
-  "97202": "Les Anses d'Arlet",
-  "97204": "Carbet",
-  "97205": "Case Pilote",
-  "97207": "Ducos",
-  "97208": "Fonds Saint Denis",
-  "97211": "Grand Rivière",
-  "97212": "Gros Morne",
-  "97215": "Macouba",
-  "97216": "Le Marigot",
-  "97218": "Le Morne Rouge",
-  "97219": "Le Prêcheur",
-  "97222": "Le Robert",
-  "97223": "Saint Esprit",
-  "97226": "Sainte Anne",
-  "97228": "Sainte Marie",
-  "97230": "La Trinité",
-  "97231": "Les Trois Ilets",
-  "97232": "Le Vauclin",
-  "97233": "Le Morne Vert",
-  "97234": "Bellefontaine",
-};
