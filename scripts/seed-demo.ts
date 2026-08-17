@@ -336,7 +336,7 @@ async function main() {
   const { data: existingSites } = await supabase.from("sites").select("id, nom, commune_id, categorie, pdl, kva, ampere");
   const siteKey = (communeId: string, nom: string) => `${communeId}::${nom}`;
   const siteMap = new Map((existingSites ?? []).map((s) => [siteKey(s.commune_id, s.nom), s]));
-  let pdlSeq = 610000;
+  const pdlSeq = 610000;
   const newSites: Record<string, unknown>[] = [];
   for (const c of COMMUNES) {
     const cid = communeIds.get(c.nom); if (!cid) continue;
