@@ -1506,6 +1506,18 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
             <button type="button" onClick={() => { setQueueBucketFilter("all"); setQueueSearch(""); }} className="ml-1 cursor-pointer font-semibold text-[#f97316] hover:underline">Réinitialiser</button>
           </div>
         ) : (
+          <>
+          {/* Pas de pagination ici, volontairement : la liste est virtualisée (une
+              dizaine de lignes dans le DOM quel que soit le total), donc découper en
+              pages résoudrait un problème de volume qui ne se pose plus, tout en
+              obligeant l'utilisateur à retenir sa page. Ce dont il a besoin, c'est de
+              se repérer — d'où ce compteur, annoncé aux lecteurs d'écran quand les
+              filtres changent le nombre de résultats. */}
+          <p aria-live="polite" className="mb-2 text-xs text-[var(--kn-text-muted)]">
+            {filteredQueueJobs.length === queueJobs.length
+              ? `${fmt(queueJobs.length)} document${queueJobs.length > 1 ? "s" : ""}`
+              : `${fmt(filteredQueueJobs.length)} sur ${fmt(queueJobs.length)} document${queueJobs.length > 1 ? "s" : ""} affiché${filteredQueueJobs.length > 1 ? "s" : ""}`}
+          </p>
           <div ref={queueListParentRef} className="max-h-[36rem] overflow-y-auto" style={{ contain: "layout paint style" }}>
             <div style={{ height: queueVirtualizer.getTotalSize(), position: "relative", width: "100%" }}>
               {queueVirtualizer.getVirtualItems().map((virtualRow) => {
@@ -1569,6 +1581,7 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
               })}
             </div>
           </div>
+          </>
         )}
       </div>
     </div>

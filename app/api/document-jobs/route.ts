@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getUserContext } from "@/lib/auth";
@@ -239,7 +239,34 @@ export async function POST(request: Request) {
     );
   }
 
+  // Réveil immédiat du worker, après l'envoi de la réponse.
+  //
+  // Les crons pg_cron tournent à la minute : sans ce réveil, une file venait d'être
+  // remplie attendait en moyenne 46 s (mesuré sur 260 documents) que le prochain tick
+  // la remarque — du temps mort, aucun travail en cours. Le cron reste en place et
+  // garde son rôle : reprise des tâches qu'un réveil raté aurait laissées en plan.
+  after(() => wakeWorker(processingMode));
+
   return NextResponse.json({ jobs, errors, processing_mode: processingMode }, { status: 202 });
+}
+
+/**
+ * Invoque la fonction Edge qui traite le mode concerné, sans attendre son issue.
+ *
+ * Volontairement silencieuse en cas d'échec : ce n'est qu'une accélération. Si l'appel
+ * n'aboutit pas, le cron reprendra la file au tick suivant — l'utilisateur attend plus
+ * longtemps, il ne perd rien.
+ */
+async function wakeWorker(mode: "direct" | "batch") {
+  const fn = mode === "direct" ? "process-direct-documents" : "process-document-queue";
+  try {
+    const { error } = await createAdminClient().functions.invoke(fn, { body: {} });
+    if (error) console.warn(`[document-jobs] réveil ${fn} sans effet`, { error: error.message });
+  } catch (err) {
+    console.warn(`[document-jobs] réveil ${fn} impossible`, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export async function GET() {

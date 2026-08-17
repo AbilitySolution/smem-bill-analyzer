@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { AlertTriangle, CheckCircle2, ChevronRight, Loader2 } from "lucide-react";
 import type { CorrectionItem } from "@/lib/data/corrections";
 import { dismissCorrections } from "@/app/(app)/corrections/actions";
+import { Pagination } from "@/components/ui/pagination";
 
 const euro = (value: number | null) =>
   value === null ? "—" : `${value.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
@@ -18,18 +19,34 @@ const euro = (value: number | null) =>
  * troisième chemin — un écran de correction qui propose trop d'options ne se traite
  * jamais.
  */
-export function CorrectionsView({ items }: { items: CorrectionItem[] }) {
+export function CorrectionsView({
+  items,
+  allItemIds,
+  currentPage,
+  totalPages,
+  totalItems,
+}: {
+  /** Factures de la page courante. */
+  items: CorrectionItem[];
+  /** Identifiants de TOUTE la file — « Tout accepter » porte sur l'ensemble, pas sur
+   *  la page affichée : accepter page par page serait un piège, l'utilisateur croirait
+   *  avoir tout traité. */
+  allItemIds: string[];
+  currentPage: number;
+  totalPages: number;
+  totalItems: number;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
   function dismissAll() {
     if (!window.confirm(
-      `Accepter les ${items.length} factures telles qu'elles ont été lues ? Elles sortiront de cette liste et resteront modifiables depuis Mes documents.`,
+      `Accepter les ${totalItems} factures telles qu'elles ont été lues ? Elles sortiront de cette liste et resteront modifiables depuis Mes documents.`,
     )) return;
     setError(null);
     startTransition(async () => {
-      const result = await dismissCorrections(items.map((item) => item.id));
+      const result = await dismissCorrections(allItemIds);
       if (!result.ok) setError(result.error ?? "Action impossible.");
       else router.refresh();
     });
@@ -57,7 +74,7 @@ export function CorrectionsView({ items }: { items: CorrectionItem[] }) {
           <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">
             Contrôle qualité
             <span className="ml-2 text-lg font-normal text-[var(--kn-text-muted)]">
-              {items.length} facture{items.length > 1 ? "s" : ""}
+              {totalItems} facture{totalItems > 1 ? "s" : ""}
             </span>
           </h1>
           <p className="mt-1 max-w-xl text-[13px] text-[var(--kn-text-muted)]">
@@ -118,6 +135,14 @@ export function CorrectionsView({ items }: { items: CorrectionItem[] }) {
           </Link>
         ))}
       </div>
+
+      <Pagination
+        currentPage={currentPage}
+        totalPages={totalPages}
+        totalItems={totalItems}
+        basePath="/corrections"
+        itemLabel="facture"
+      />
     </div>
   );
 }

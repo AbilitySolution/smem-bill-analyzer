@@ -140,3 +140,113 @@ export function diffExtraction(
 
   return out;
 }
+
+/* ------------------------------------------------------------------ *
+ * Corrections post-enregistrement (éditeur `/documents/extraction`)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Colonnes que l'humain peut modifier, par table.
+ *
+ * Le diff ci-dessous compare deux lignes de base : sans cette liste, les colonnes techniques
+ * (`id`, `invoice_id`, `created_at`, `org_id`…) apparaîtraient comme des corrections et
+ * noieraient le signal. Doit rester alignée sur le schéma accepté par
+ * `PATCH /api/invoices/[id]`.
+ */
+const EDITABLE_COLUMNS: Record<string, readonly string[]> = {
+  invoices: [
+    "facture_number", "facture_date", "date_limite_paiement",
+    "total_ht", "tva", "autres_taxes", "total_ttc", "is_duplicata", "categorie",
+  ],
+  clients: ["nom", "reference_client", "reference_compte", "adresse"],
+  contracts: [
+    "contract_number", "pdl", "tarif_type", "espace_livraison", "offre", "service",
+    "puissance_souscrite_kva", "reglage_protection_a", "type_compteur", "numero_compteur",
+  ],
+  consumption_periods: [
+    "poste_tarifaire", "period_start", "period_end", "numero_compteur",
+    "ancien_index", "nouveau_index", "coefficient", "consommation_kwh",
+    "prix_unitaire_ckwh", "montant_eur", "index_estime",
+  ],
+  invoice_charges: [
+    "category", "libelle", "period_start", "period_end",
+    "assiette", "taux", "taux_numeric", "taux_unit", "tarif_kva_an", "montant_eur",
+  ],
+};
+
+type Row = Record<string, unknown>;
+
+function diffColumns(out: CorrectionEntry[], table: string, before: Row, after: Row, lineIndex?: number) {
+  for (const column of EDITABLE_COLUMNS[table] ?? []) {
+    pushIfChanged(out, table, column, before[column], after[column], lineIndex);
+  }
+}
+
+/** Clé d'appariement des périodes de consommation : ce qui identifie une ligne pour un humain. */
+function consumptionKey(row: Row): string {
+  return `${serialize(row.poste_tarifaire) ?? ""}|${serialize(row.period_start) ?? ""}`;
+}
+
+/** Clé d'appariement des charges : le libellé, seul identifiant naturel dont elles disposent. */
+function chargeKey(row: Row): string {
+  return `${serialize(row.category) ?? ""}|${serialize(row.libelle) ?? ""}`;
+}
+
+/**
+ * Apparie deux jeux de lignes enfants par clé métier plutôt que par index.
+ *
+ * L'éditeur supprime puis réinsère les lignes enfants à chaque enregistrement : leur `id` ne
+ * survit pas, et leur ordre de retour n'est pas garanti. Comparer par position produirait de
+ * fausses corrections dès qu'une ligne est ajoutée, retirée ou remontée. Les lignes sans
+ * correspondance des deux côtés sont ignorées — comme dans `diffArray`, un ajout ou une
+ * suppression n'est pas une correction de champ.
+ */
+function diffChildRows(
+  out: CorrectionEntry[],
+  table: string,
+  before: Row[],
+  after: Row[],
+  keyOf: (row: Row) => string,
+) {
+  const byKey = new Map<string, Row>();
+  for (const row of before) {
+    // Première occurrence gardée : sur clé dupliquée, mieux vaut comparer une paire stable
+    // que d'écraser avec une ligne arbitraire.
+    if (!byKey.has(keyOf(row))) byKey.set(keyOf(row), row);
+  }
+  after.forEach((row, index) => {
+    const match = byKey.get(keyOf(row));
+    if (match) diffColumns(out, table, match, row, index);
+  });
+}
+
+/** Facture telle qu'elle existe en base, ou telle que l'éditeur la soumet. */
+export interface InvoiceSnapshot {
+  invoice: Row;
+  client: Row;
+  contract: Row;
+  consumption: Row[];
+  charges: Row[];
+}
+
+/**
+ * Écarts entre la facture enregistrée et la version que l'humain vient de soumettre.
+ *
+ * Pendant qu'il compare l'extraction brute à la version validée avant enregistrement,
+ * `diffExtraction` ne couvre que la revue initiale. Or l'enregistrement automatique écrit
+ * directement la sortie du modèle en base : une facture jamais rouverte contient donc
+ * exactement ce que l'IA a lu, et le premier passage dans l'éditeur mesure sa précision
+ * réelle. Les deux côtés sont ici déjà en noms de colonnes, aucune traduction n'est requise.
+ */
+export function diffInvoiceSnapshot(before: InvoiceSnapshot, after: InvoiceSnapshot): CorrectionEntry[] {
+  const out: CorrectionEntry[] = [];
+
+  diffColumns(out, "invoices", before.invoice, after.invoice);
+  diffColumns(out, "clients", before.client, after.client);
+  diffColumns(out, "contracts", before.contract, after.contract);
+
+  diffChildRows(out, "consumption_periods", before.consumption, after.consumption, consumptionKey);
+  diffChildRows(out, "invoice_charges", before.charges, after.charges, chargeKey);
+
+  return out;
+}

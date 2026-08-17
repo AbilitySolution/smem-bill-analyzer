@@ -24,6 +24,10 @@ export interface ExtractionQuality {
   fields: FieldQuality[];
   /** Corrections journalisées mais dont le champ n'est pas dans la liste suivie. */
   otherCorrections: number;
+  /** Factures relues nécessaires pour qu'un champ reçoive un taux. Transporté avec les
+   *  données plutôt qu'importé : la vue est un composant client, et ce module dépend du
+   *  client Supabase serveur. */
+  minSample: number;
   isDemo?: boolean;
 }
 
@@ -73,8 +77,12 @@ interface CorrectionRow {
  * Précision réelle de l'extraction IA, mesurée sur les corrections humaines effectivement
  * effectuées (corrections_log) — pas une estimation du modèle sur lui-même.
  *
- * Ne compte que les factures **validées** : tant que personne n'a relu une facture, on ne
- * sait pas si l'extraction était juste, l'inclure fausserait le taux à la hausse.
+ * Ne compte que les factures **relues par un humain** (`auto_saved = false`) : tant que
+ * personne n'a ouvert une facture champ par champ, on ne sait pas si l'extraction était
+ * juste. Le statut `reviewed` ne suffit pas à l'établir — l'enregistrement automatique et
+ * l'acceptation en bloc depuis le contrôle qualité l'écrivent tous deux sans qu'aucun œil
+ * humain ne se soit posé sur les données. Les inclure ferait afficher une précision proche
+ * de 100 %, entièrement auto-décernée.
  */
 export async function getExtractionQuality(orgId: string): Promise<ExtractionQuality | null> {
   const supabase = await createClient();
@@ -87,7 +95,8 @@ export async function getExtractionQuality(orgId: string): Promise<ExtractionQua
       .from("invoices")
       .select("id, raw_ocr_json")
       .eq("org_id", orgId)
-      .in("status", ["reviewed", "anomaly_flagged"]),
+      .in("status", ["reviewed", "anomaly_flagged"])
+      .eq("auto_saved", false),
     supabase
       .from("corrections_log")
       .select("invoice_id, table_name, field_name"),
@@ -148,12 +157,14 @@ export async function getExtractionQuality(orgId: string): Promise<ExtractionQua
     overallPrecision: totalExtracted >= MIN_SAMPLE ? 1 - totalCorrected / totalExtracted : null,
     fields,
     otherCorrections,
+    minSample: MIN_SAMPLE,
   };
 }
 
 /** Repli pour le preview hors connexion (RLS renverrait un ensemble vide). */
 export const DEMO_EXTRACTION_QUALITY: ExtractionQuality = {
   isDemo: true,
+  minSample: MIN_SAMPLE,
   invoiceCount: 214,
   untouchedCount: 158,
   overallPrecision: 0.947,
