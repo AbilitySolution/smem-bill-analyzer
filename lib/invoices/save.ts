@@ -71,6 +71,16 @@ export interface SaveInvoiceOptions {
   correctionSource?: string;
   /** Facture créée sans relecture humaine par la file de traitement. */
   autoSaved?: boolean;
+  /**
+   * Motif d'incertitude à signaler APRÈS enregistrement (commune ou extraction sous le
+   * seuil de confiance de l'enregistrement automatique) — au lieu de bloquer la facture
+   * hors base tant que personne ne l'a relue à la main. Se traduit par une anomalie de
+   * sévérité `medium` + le tag "Anomalie", visibles comme n'importe quelle autre
+   * facture à contrôler. Le seuil lui-même reste décidé par l'appelant
+   * (`app/api/document-jobs/auto-save/route.ts`) — cette fonction ne fait qu'exécuter
+   * le signalement demandé.
+   */
+  lowConfidenceReason?: string;
 }
 
 export type SaveInvoiceResult =
@@ -483,7 +493,20 @@ export async function saveInvoice(
     }
   }
 
-  // 5c. Override validation — créer anomalie manuelle si l'utilisateur a choisi de détecter.
+  // 5c. Confiance basse à l'enregistrement automatique — signalée après coup plutôt que
+  // bloquée : la facture reste enregistrée, juste marquée à vérifier en priorité.
+  if (opts.lowConfidenceReason) {
+    await supabase.from("anomalies").insert({
+      invoice_id: invoiceId,
+      contract_id: contractId,
+      type: "low_confidence_auto_save",
+      severity: "medium",
+      description: opts.lowConfidenceReason,
+    });
+    await tagInvoice(supabase, ctx.orgId, invoiceId, "Anomalie");
+  }
+
+  // 5d. Override validation — créer anomalie manuelle si l'utilisateur a choisi de détecter.
   if (isOverride && override_flag_anomaly) {
     await supabase.from("anomalies").insert({
       invoice_id: invoiceId,

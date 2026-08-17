@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getUserContext } from "@/lib/auth";
+import { diffInvoiceSnapshot, type InvoiceSnapshot } from "@/lib/extraction/diff";
 import { z } from "zod";
 
 const n = z.number().nullable();
@@ -107,8 +108,19 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // État avant modification : indispensable pour journaliser les corrections humaines, et à
+  // lire ici puisque les lignes enfants sont supprimées puis réinsérées plus bas. Sans cette
+  // mesure, la précision réelle de l'extraction resterait invisible — seul subsisterait le
+  // score que le modèle s'attribue lui-même.
+  const beforeSnapshot = await readInvoiceSnapshot(supabase, id, client_id, contract_id);
+
   const [invUpd, cliUpd, conUpd] = await Promise.all([
-    supabase.from("invoices").update({ ...invoice, commune_id, categorie, status: "reviewed" }).eq("id", id),
+    // `auto_saved: false` marque le passage d'un humain sur cette facture. C'est le
+    // dénominateur des métriques de précision : une facture enregistrée automatiquement,
+    // ou simplement acceptée en bloc depuis le contrôle qualité, n'a été relue par
+    // personne — l'inclure ferait afficher une précision proche de 100 % sans qu'aucun
+    // œil humain n'ait confirmé quoi que ce soit.
+    supabase.from("invoices").update({ ...invoice, commune_id, categorie, status: "reviewed", auto_saved: false }).eq("id", id),
     supabase.from("clients").update(client).eq("id", client_id),
     supabase.from("contracts").update(contract).eq("id", contract_id),
   ]);
@@ -201,5 +213,75 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
   }
 
+  await logCorrections(supabase, id, ctx.userId, beforeSnapshot, {
+    invoice: { ...invoice, categorie },
+    client,
+    contract,
+    consumption: consumption_lines,
+    charges,
+  });
+
   return NextResponse.json({ success: true });
+}
+
+/** Lit la facture et ses lignes telles qu'elles sont enregistrées, au format attendu par le diff. */
+async function readInvoiceSnapshot(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  invoiceId: string,
+  clientId: string,
+  contractId: string,
+): Promise<InvoiceSnapshot | null> {
+  const [inv, cli, con, cons, chg] = await Promise.all([
+    supabase.from("invoices").select("*").eq("id", invoiceId).maybeSingle(),
+    supabase.from("clients").select("*").eq("id", clientId).maybeSingle(),
+    supabase.from("contracts").select("*").eq("id", contractId).maybeSingle(),
+    supabase.from("consumption_periods").select("*").eq("invoice_id", invoiceId),
+    supabase.from("invoice_charges").select("*").eq("invoice_id", invoiceId),
+  ]);
+
+  if (!inv.data || !cli.data || !con.data) return null;
+  return {
+    invoice: inv.data,
+    client: cli.data,
+    contract: con.data,
+    consumption: cons.data ?? [],
+    charges: chg.data ?? [],
+  };
+}
+
+/**
+ * Journalise les champs que l'humain a dû reprendre.
+ *
+ * Volontairement non bloquant : un échec d'écriture ici ne doit jamais faire échouer un
+ * enregistrement déjà effectué. La mesure de qualité est précieuse, la facture l'est plus.
+ */
+async function logCorrections(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  invoiceId: string,
+  userId: string,
+  before: InvoiceSnapshot | null,
+  after: InvoiceSnapshot,
+) {
+  if (!before) return;
+
+  const corrections = diffInvoiceSnapshot(before, after);
+  if (corrections.length === 0) return;
+
+  const { error } = await supabase.from("corrections_log").insert(
+    corrections.map((c) => ({
+      invoice_id: invoiceId,
+      table_name: c.table_name,
+      field_name: c.field_name,
+      old_value: c.old_value,
+      new_value: c.new_value,
+      corrected_by: userId,
+      source: "post_save",
+    })),
+  );
+
+  if (error) {
+    console.error("[invoices] journalisation des corrections échouée", {
+      invoiceId, count: corrections.length, error: error.message,
+    });
+  }
 }

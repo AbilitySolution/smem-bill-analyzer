@@ -8,12 +8,13 @@ import { DocumentQueue } from "@/components/upload/document-queue";
  * Le mode de traitement est déduit du volume déposé (voir `processingModeFor`) et non
  * choisi par l'utilisateur : petit lot = extraction rapide, gros lot = tarif réduit.
  *
- * L'`org_id` est résolu ici pour que le composant client puisse s'abonner au flux
- * Realtime de son organisation.
+ * `org_id` et `user_id` sont résolus ici : le premier pour l'abonnement Realtime, les
+ * deux pour construire le chemin de dépôt direct navigateur → Supabase Storage
+ * (`{org_id}/{user_id}/…`, imposé par la policy RLS `org_upload_invoice_files`).
  */
 export default async function UploadPage() {
   const ctx = await getUserContext();
   if (!ctx) redirect("/login");
 
-  return <DocumentQueue orgId={ctx.orgId} />;
+  return <DocumentQueue orgId={ctx.orgId} userId={ctx.userId} />;
 }

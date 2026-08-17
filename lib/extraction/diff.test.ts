@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { diffExtraction } from "./diff";
+import { diffExtraction, diffInvoiceSnapshot, type InvoiceSnapshot } from "./diff";
 import type { InvoiceExtraction } from "@/lib/anthropic/invoice-schema";
 
 function base(): InvoiceExtraction {
@@ -93,5 +93,75 @@ describe("diffExtraction", () => {
       table_name: "invoices", field_name: "categorie",
       old_value: "batiment", new_value: "eclairage_public",
     });
+  });
+});
+
+function snapshot(): InvoiceSnapshot {
+  return {
+    // Colonnes techniques incluses volontairement : le diff doit les ignorer.
+    invoice: {
+      id: "inv-1", org_id: "org-1", created_at: "2026-01-01T00:00:00Z",
+      facture_number: "F-1", facture_date: "2026-01-10", date_limite_paiement: null,
+      total_ht: 100, tva: 20, autres_taxes: 0, total_ttc: 120,
+      is_duplicata: false, categorie: "batiment",
+    },
+    client: { id: "cli-1", nom: "Mairie", reference_client: "C1", reference_compte: "A1", adresse: "1 rue X" },
+    contract: { id: "con-1", contract_number: "CT-1", pdl: "PDL1", tarif_type: "HPHC", puissance_souscrite_kva: 36 },
+    consumption: [{
+      id: "cp-1", invoice_id: "inv-1",
+      poste_tarifaire: "HP", period_start: "2026-01-01", period_end: "2026-01-31",
+      consommation_kwh: 100, prix_unitaire_ckwh: 12, montant_eur: 12,
+    }],
+    charges: [{ id: "ch-1", invoice_id: "inv-1", category: "fixed", libelle: "Abonnement", montant_eur: 10 }],
+  };
+}
+
+describe("diffInvoiceSnapshot", () => {
+  it("ne renvoie rien quand rien n'a changé", () => {
+    expect(diffInvoiceSnapshot(snapshot(), snapshot())).toEqual([]);
+  });
+
+  it("ignore les colonnes techniques", () => {
+    const after = snapshot();
+    after.invoice.id = "autre";
+    after.invoice.created_at = "2026-06-01T00:00:00Z";
+    expect(diffInvoiceSnapshot(snapshot(), after)).toEqual([]);
+  });
+
+  it("détecte une correction de montant", () => {
+    const after = snapshot();
+    after.invoice.total_ttc = 130;
+    expect(diffInvoiceSnapshot(snapshot(), after)).toEqual([
+      { table_name: "invoices", field_name: "total_ttc", old_value: "120", new_value: "130" },
+    ]);
+  });
+
+  it("apparie les lignes enfants par clé métier, pas par position", () => {
+    const before = snapshot();
+    before.consumption = [
+      { poste_tarifaire: "HP", period_start: "2026-01-01", consommation_kwh: 100 },
+      { poste_tarifaire: "HC", period_start: "2026-01-01", consommation_kwh: 50 },
+    ];
+    const after = snapshot();
+    // Ordre inversé + une correction sur HC : seule la correction doit ressortir.
+    after.consumption = [
+      { poste_tarifaire: "HC", period_start: "2026-01-01", consommation_kwh: 55 },
+      { poste_tarifaire: "HP", period_start: "2026-01-01", consommation_kwh: 100 },
+    ];
+    expect(diffInvoiceSnapshot(before, after)).toEqual([
+      { table_name: "consumption_periods", field_name: "consommation_kwh", old_value: "50", new_value: "55", line_index: 0 },
+    ]);
+  });
+
+  it("ne compte pas une ligne ajoutée comme une correction de champ", () => {
+    const after = snapshot();
+    after.consumption = [...after.consumption, { poste_tarifaire: "HC", period_start: "2026-02-01", consommation_kwh: 40 }];
+    expect(diffInvoiceSnapshot(snapshot(), after)).toEqual([]);
+  });
+
+  it("traite null, undefined et chaîne vide comme équivalents", () => {
+    const after = snapshot();
+    after.invoice.date_limite_paiement = "";
+    expect(diffInvoiceSnapshot(snapshot(), after)).toEqual([]);
   });
 });

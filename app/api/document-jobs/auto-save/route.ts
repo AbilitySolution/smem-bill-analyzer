@@ -8,6 +8,7 @@ import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice } from "@/lib/anthropic/invoice-validation";
 import { matchCommuneScored, matchSiteByContract } from "@/lib/extraction/matching";
 import { saveInvoice, escalateHighAnomalies } from "@/lib/invoices/save";
+import { CORRECTION_CONFIDENCE_THRESHOLD as REVIEW_CONFIDENCE_THRESHOLD } from "@/lib/data/corrections";
 import { recomputeAndPersistAnomalies } from "@/lib/anomalies/persist";
 
 export const runtime = "nodejs";
@@ -17,15 +18,22 @@ export const maxDuration = 300;
 /**
  * Enregistrement automatique des documents extraits.
  *
- * Le seuil s'applique **conjointement** à la confiance d'extraction et au score de
- * rapprochement de commune : les deux doivent être au-dessus. Rattacher une facture à
- * la mauvaise commune est bien plus coûteux à corriger qu'une relecture de plus.
+ * Seul un blocage dur empêche l'enregistrement : aucune commune identifiable (même à
+ * faible confiance) pour rattacher client/contrat/site. Dans tous les autres cas, la
+ * facture est enregistrée — la confiance basse (commune incertaine ou extraction
+ * incertaine, sous `AUTO_THRESHOLD`) devient un **signalement après coup**
+ * (anomalie + tag "Anomalie", `lib/invoices/save.ts`) plutôt qu'un blocage avant coup.
+ * Avant, sous le seuil, le document restait indéfiniment hors base tant que personne
+ * ne le relisait à la main — un dépôt de 200 factures pouvait en laisser des dizaines
+ * bloquées, invisibles ailleurs que dans la file de traitement.
  *
  * Trois issues par job :
- *   - autoSaved  : facture créée en `pending_review` avec `auto_saved = true` ;
+ *   - autoSaved  : facture créée avec `auto_saved = true`. Son statut porte le verdict
+ *                  de lecture — `reviewed` si les seuils sont tenus, `pending_review`
+ *                  sinon, auquel cas elle remonte dans l'écran « À vérifier » ;
  *   - duplicates : facture déjà en base, le job est clos en pointant l'existante ;
- *   - toReview   : révision manuelle, avec la meilleure commune pré-remplie même
- *                  sous le seuil (l'utilisateur n'a plus qu'à confirmer).
+ *   - toReview   : blocage dur uniquement (pas de commune détectée, extraction
+ *                  invalide, ou échec d'enregistrement) — révision manuelle requise.
  *
  * ── Deux appelants ───────────────────────────────────────────────────────────────
  *
@@ -61,7 +69,7 @@ const CRON_MAX_JOBS_PER_ORG = 15;
  */
 const TIME_BUDGET_MS = 240_000;
 
-interface AutoSavedEntry { jobId: string; invoiceId: string; factureNumber: string }
+interface AutoSavedEntry { jobId: string; invoiceId: string; factureNumber: string; lowConfidence: boolean }
 interface DuplicateEntry { jobId: string; existingInvoiceId: string; factureNumber: string }
 interface ToReviewEntry { jobId: string; factureNumber: string; reason: string }
 
@@ -128,12 +136,31 @@ async function autoSaveOrgJobs(
         .eq("id", job.id);
     }
 
-    const eligible = !!commune && commune.score >= AUTO_THRESHOLD && validation.confidence >= AUTO_THRESHOLD;
-    if (!eligible) {
-      const reason = !commune || commune.score < AUTO_THRESHOLD ? "commune incertaine" : "extraction incertaine";
-      toReview.push({ jobId: job.id, factureNumber, reason });
+    // Seul blocage dur : aucune commune à laquelle rattacher client/contrat/site.
+    // `saveInvoice` refuserait de toute façon (`site_id`/`commune_id` requis) — le
+    // vérifier ici évite un aller-retour pour rien et donne un motif plus parlant que
+    // l'erreur générique de `saveInvoice`.
+    if (!commune) {
+      toReview.push({ jobId: job.id, factureNumber, reason: "commune non détectée" });
       continue;
     }
+
+    // En dessous du seuil, on enregistre quand même — la meilleure commune trouvée,
+    // même incertaine — mais on le signale après coup plutôt que de laisser le document
+    // hors base indéfiniment. `lowConfidenceReason` fait poser l'anomalie + le tag
+    // "Anomalie" par `saveInvoice`, qui centralise déjà ce genre de signalement.
+    //
+    // Deux seuils distincts, parce que les deux risques ne se valent pas :
+    //   - la COMMUNE reste jugée à `AUTO_THRESHOLD` (96 %). Un mauvais rattachement
+    //     fausse les analyses de deux sites à la fois et se corrige mal une fois la
+    //     facture noyée dans le portefeuille : on veut le savoir dès 4 % de doute.
+    //   - l'EXTRACTION est jugée à `REVIEW_CONFIDENCE_THRESHOLD` (85 %). Entre 85 et
+    //     96 % elle est presque toujours juste ; signaler à 96 % remonterait 12 % du
+    //     volume au lieu de 5 %, et une liste qu'on n'ouvre plus ne protège de rien.
+    const lowConfidenceReasons: string[] = [];
+    if (commune.score < AUTO_THRESHOLD) lowConfidenceReasons.push(`commune associée à ${Math.round(commune.score * 100)} % de confiance`);
+    if (validation.confidence < REVIEW_CONFIDENCE_THRESHOLD) lowConfidenceReasons.push(`extraction évaluée à ${Math.round(validation.confidence * 100)} % de confiance`);
+    const lowConfidence = lowConfidenceReasons.length > 0;
 
     // Appel direct plutôt qu'un aller-retour HTTP interne vers /api/invoices : même
     // logique d'enregistrement, sans dépendre de l'origine de la requête ni payer un
@@ -148,15 +175,30 @@ async function autoSaveOrgJobs(
         ...(site ? { site_id: site.id } : {}),
         custom_fields: [],
       },
-      // Personne n'a relu ces factures : elles arrivent « à contrôler ». Le recalcul
-      // portefeuille balaie toute l'organisation, il est fait une seule fois à la fin.
-      { status: "pending_review", autoSaved: true, skipPortfolioRecompute: true },
+      // Le statut porte le VERDICT DE LECTURE, pas le mode d'enregistrement.
+      //
+      // Auparavant, toute facture enregistrée automatiquement arrivait en
+      // `pending_review` — ce qui revenait à marquer « à contrôler » 193 factures sur
+      // 248 pour 3 réellement contrôlées. Un statut porté par 78 % du portefeuille
+      // n'attire plus l'attention de personne, et l'écran de vérification bâti dessus
+      // devenait inutilisable.
+      //
+      // Désormais : une lecture au-dessus des seuils est acceptée telle quelle
+      // (`reviewed`), et `pending_review` ne désigne QUE ce qui mérite un œil humain —
+      // environ 5 % du volume. `auto_saved` reste vrai dans les deux cas et garde la
+      // trace du mode d'enregistrement, qui est une information distincte.
+      {
+        status: lowConfidence ? "pending_review" : "reviewed",
+        autoSaved: true,
+        skipPortfolioRecompute: true,
+        ...(lowConfidence ? { lowConfidenceReason: `Enregistrement automatique à confiance réduite : ${lowConfidenceReasons.join(" · ")}.` } : {}),
+      },
     );
 
     if (saved.ok) {
       await markCompleted(job.id, saved.invoiceId);
       createdInvoiceIds.push(saved.invoiceId);
-      autoSaved.push({ jobId: job.id, invoiceId: saved.invoiceId, factureNumber });
+      autoSaved.push({ jobId: job.id, invoiceId: saved.invoiceId, factureNumber, lowConfidence });
       continue;
     }
 
