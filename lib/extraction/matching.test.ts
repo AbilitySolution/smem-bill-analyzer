@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { normalizeComm, scoreCommune, pickBestCommune, COMMUNE_MATCH_THRESHOLD } from "./matching";
+import { normalizeComm, scoreCommune, pickBestCommune, pickBestCommuneScored, COMMUNE_MATCH_THRESHOLD } from "./matching";
+import { REFERENTIEL_MARTINIQUE } from "@/lib/communes/referentiel-martinique";
 
 const COMMUNES = [
   { id: "1", nom: "Fonds Saint Denis" },
@@ -87,5 +88,52 @@ describe("pickBestCommune", () => {
     // Comportement délibéré : il fait matcher une adresse qui contient la commune.
     // Contrepartie assumée : un fragment court et ambigu matche aussi.
     expect(scoreCommune("Denis", "Fonds Saint Denis")).toBe(100);
+  });
+});
+
+/**
+ * SCRUM-14 (lot 4) — Non-régression du matching avec les 34 communes en base.
+ *
+ * `scoreCommune` renvoie 100 sur simple inclusion de sous-chaîne. Ajouter les 14 communes
+ * manquantes crée des ambiguïtés réelles que les 20 seules ne produisaient pas :
+ * « Le Marin » face à « Le Marigot », « Rivière-Pilote » et « Rivière-Salée » face à
+ * « Grand'Rivière » et « Case-Pilote », et les Saint* avec la neutralisation de genre.
+ *
+ * Si l'un de ces cas casse, c'est une décision de conception — pas un seuil à bricoler.
+ */
+describe("pickBestCommuneScored avec les 34 communes de Martinique", () => {
+  const TOUTES = REFERENTIEL_MARTINIQUE.map((c, i) => ({ id: String(i), nom: c.nom }));
+
+  const CAS: ReadonlyArray<readonly [string, string]> = [
+    ["CASE PILOTE", "Case-Pilote"],
+    ["RIVIERE PILOTE", "Rivière-Pilote"],
+    ["RIVIERE SALEE", "Rivière-Salée"],
+    ["LE MARIN", "Le Marin"],
+    ["MARIGOT", "Le Marigot"],
+    ["ST PIERRE", "Saint-Pierre"],
+    ["ST ESPRIT", "Saint-Esprit"],
+    ["STE MARIE", "Sainte-Marie"],
+    ["STE ANNE", "Sainte-Anne"],
+  ];
+
+  it.each(CAS)("rattache « %s » à %s", (etiquette, attendu) => {
+    const best = pickBestCommuneScored([etiquette], TOUTES);
+    expect(best, `« ${etiquette} » n'a été rattachée à aucune commune`).not.toBeNull();
+    expect(best!.nom).toBe(attendu);
+  });
+
+  it("ne laisse aucune ambiguïté : une seule commune atteint le score maximal", () => {
+    for (const [etiquette, attendu] of CAS) {
+      const scores = TOUTES.map((c) => ({ nom: c.nom, score: scoreCommune(etiquette, c.nom) }));
+      const max = Math.max(...scores.map((s) => s.score));
+      const exAequo = scores.filter((s) => s.score === max);
+      expect(exAequo.map((s) => s.nom), `« ${etiquette} » est ambiguë`).toEqual([attendu]);
+    }
+  });
+
+  it("rattache Schœlcher malgré la ligature, quelle que soit la graphie de la facture", () => {
+    for (const etiquette of ["SCHOELCHER", "Schœlcher", "schoelcher"]) {
+      expect(pickBestCommuneScored([etiquette], TOUTES)?.nom, etiquette).toBe("Schœlcher");
+    }
   });
 });

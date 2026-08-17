@@ -100,7 +100,14 @@ export async function matchCommuneScored(
   const candidates = communeCandidates(extraction);
   if (!candidates.length) return null;
 
-  const { data: allCommunes } = await supabase.from("communes").select("id, nom").eq("org_id", orgId);
+  // Rechargées à chaque extraction, sans cache module : une commune créée à l'instant doit
+  // pouvoir capter la facture suivante. Les archivées sont exclues — les rattacher
+  // ressusciterait silencieusement une commune que l'utilisateur a retirée de ses vues.
+  const { data: allCommunes } = await supabase
+    .from("communes")
+    .select("id, nom")
+    .eq("org_id", orgId)
+    .eq("archived", false);
   if (!allCommunes?.length) return null;
 
   return pickBestCommuneScored(candidates, allCommunes as Array<{ id: string; nom: string }>);

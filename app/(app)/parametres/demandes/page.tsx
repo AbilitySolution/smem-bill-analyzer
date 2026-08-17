@@ -14,7 +14,7 @@ export default async function DemandesPage() {
   if (!ctx) redirect("/login");
 
   const supabase = await createClient();
-  const { data: communes } = await supabase.from("communes").select("id, nom").order("nom");
+  const { data: communes } = await supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).eq("archived", false).order("nom");
 
   const { data: links } = await supabase
     .from("file_request_links")

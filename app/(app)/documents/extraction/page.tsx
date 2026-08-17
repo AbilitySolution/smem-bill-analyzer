@@ -76,10 +76,12 @@ function EmptyState() {
 
 async function Detail({ id }: { id: string }) {
   const supabase = await createClient();
+  const ctx = await getUserContext();
+  if (!ctx) redirect("/login");
 
   const [{ data: invoice }, { data: communes }] = await Promise.all([
     supabase.from("invoices").select("*, clients(*), contracts(*), sites(*), invoice_tags(tags(id, label, color))").eq("id", id).single(),
-    supabase.from("communes").select("id, nom").order("nom"),
+    supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).eq("archived", false).order("nom"),
   ]);
 
   if (!invoice) {
