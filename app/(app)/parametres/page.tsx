@@ -1,12 +1,22 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getUserContext } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { getCommunesDisponibles } from "@/lib/communes/disponibles";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RoleRow } from "@/components/parametres/role-row";
-import { Building2, Lightbulb } from "lucide-react";
+import { CommuneForm } from "@/components/parametres/commune-form";
+import { CommuneCard, type CommuneAffichee } from "@/components/parametres/commune-card";
 
-export default async function ParametresPage() {
+export default async function ParametresPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ archivees?: string }>;
+}) {
+  const sp = await searchParams;
+  const afficherArchivees = sp.archivees === "1";
+
   const ctx = await getUserContext();
   if (!ctx) redirect("/login");
   if (ctx.role !== "org_admin") {
@@ -14,8 +24,37 @@ export default async function ParametresPage() {
   }
 
   const supabase = await createClient();
-  const { data: communes } = await supabase.from("communes").select("id, nom").order("nom");
-  const { data: sites } = await supabase.from("sites").select("commune_id, categorie");
+  // org_id explicite en plus de la RLS : le reste du code le fait déjà, cette page était
+  // la seule à s'appuyer sur la RLS seule (§1 du PLAN).
+  const [{ data: communes }, { data: sites }, disponibles] = await Promise.all([
+    supabase
+      .from("communes")
+      .select("id, nom, code_insee, archived, points_lumineux, armoires, travaux_debut, travaux_fin")
+      .eq("org_id", ctx.orgId)
+      .order("nom"),
+    supabase.from("sites").select("commune_id, categorie").eq("org_id", ctx.orgId),
+    getCommunesDisponibles(ctx.orgId),
+  ]);
+
+  const toutes = communes ?? [];
+  const nbArchivees = toutes.filter((c) => c.archived).length;
+  const visibles: CommuneAffichee[] = toutes
+    .filter((c) => afficherArchivees || !c.archived)
+    .map((c) => {
+      const ofCommune = (sites ?? []).filter((s) => s.commune_id === c.id);
+      return {
+        id: c.id,
+        nom: c.nom,
+        codeInsee: c.code_insee,
+        archived: c.archived,
+        pointsLumineux: c.points_lumineux,
+        armoires: c.armoires,
+        travauxDebut: c.travaux_debut,
+        travauxFin: c.travaux_fin,
+        batiments: ofCommune.filter((s) => s.categorie === "batiment").length,
+        eclairage: ofCommune.filter((s) => s.categorie === "eclairage_public").length,
+      };
+    });
 
   const admin = createAdminClient();
   const { data: roles } = await admin.from("user_roles").select("*").eq("org_id", ctx.orgId);
@@ -26,6 +65,9 @@ export default async function ParametresPage() {
     (roles ?? []).map((r) => admin.auth.admin.getUserById(r.user_id).then((res) => res.data.user)),
   );
 
+  // Le sélecteur de commune des rôles ne doit proposer que des communes actives.
+  const communesActives = toutes.filter((c) => !c.archived).map((c) => ({ id: c.id, nom: c.nom }));
+
   return (
     <div className="space-y-6">
       <div>
@@ -34,28 +76,31 @@ export default async function ParametresPage() {
       </div>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium text-slate-700">Communes</CardTitle>
+        <CardHeader className="flex flex-row items-center justify-between gap-4">
+          <CardTitle className="text-sm font-medium text-slate-700">
+            Communes
+            <span className="ml-2 font-normal text-slate-400">
+              {communesActives.length} active{communesActives.length > 1 ? "s" : ""}
+            </span>
+          </CardTitle>
+          <div className="flex items-center gap-3">
+            {nbArchivees > 0 && (
+              <Link
+                href={afficherArchivees ? "/parametres" : "/parametres?archivees=1"}
+                className="text-xs text-slate-500 underline-offset-2 hover:underline"
+              >
+                {afficherArchivees
+                  ? "Masquer les archivées"
+                  : `Afficher les ${nbArchivees} archivée${nbArchivees > 1 ? "s" : ""}`}
+              </Link>
+            )}
+            <CommuneForm creables={disponibles.creables} archivees={disponibles.archivees} />
+          </div>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2">
-          {(communes ?? []).map((c) => {
-            const ofCommune = (sites ?? []).filter((s) => s.commune_id === c.id);
-            return (
-              <div key={c.id} className="rounded-md border border-slate-200 p-3">
-                <p className="font-medium text-slate-900">{c.nom}</p>
-                <div className="mt-1 flex gap-4 text-xs text-slate-500">
-                  <span className="flex items-center gap-1">
-                    <Building2 className="size-3.5" />
-                    {ofCommune.filter((s) => s.categorie === "batiment").length} bâtiments
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <Lightbulb className="size-3.5" />
-                    {ofCommune.filter((s) => s.categorie === "eclairage_public").length} éclairage
-                  </span>
-                </div>
-              </div>
-            );
-          })}
+          {visibles.map((c) => (
+            <CommuneCard key={c.id} commune={c} estAdmin />
+          ))}
         </CardContent>
       </Card>
 
@@ -82,7 +127,7 @@ export default async function ParametresPage() {
                     email={u.email ?? u.id}
                     role={(r?.role as "org_admin" | "org_member") ?? "org_member"}
                     communeId={r?.commune_id ?? null}
-                    communes={communes ?? []}
+                    communes={communesActives}
                   />
                 );
               })}
