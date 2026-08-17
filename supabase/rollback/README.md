@@ -7,6 +7,7 @@ studio) en cas de retour arrière.
 
 | Ordre | Fichier | Effet | Destructif ? |
 |---|---|---|---|
+| −3 | `20260817044616_postgrest_table_grants_down.sql` | Retire uniquement les privilèges par défaut : les tables futures n'héritent plus des droits PostgREST | 🔴 **Ne pas jouer sur la prod.** Le retrait des droits sur les tables existantes est commenté à dessein — il couperait l'application (403 sur toute l'API) |
 | −2 | `20260817042337_communes_creation_down.sql` | Retire `archived`, remet `code_insee` à NULL et facultatif, restaure les coordonnées d'avant SCRUM-14 | 🟠 Partiel — perd l'état d'archivage et le `code_insee` des communes créées depuis, et **réintroduit des coordonnées fausses de plus de 10 km** sur Case Pilote, Ducos et Le Marigot |
 | −1b | `20260817032642_collect_batches_sub_minute_down.sql` | Repasse la collecte des lots Claude de 20 secondes à une fois par minute | Non — les factures remontent juste jusqu'à 40 s plus tard |
 | −1 | `20260806000006_invoice_analytics_total_anomaly_count_down.sql` | Retire `anomaly_count` de la vue (DROP + recréation) | Non — mais l'Historique de /anomalies reperd les factures entièrement résolues |
