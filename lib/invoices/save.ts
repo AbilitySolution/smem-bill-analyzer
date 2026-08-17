@@ -190,7 +190,7 @@ export async function saveInvoice(
       site = matched;
     } else {
       const { data: newSite, error: siteErr } = await supabase.from("sites")
-        .insert({ org_id: ctx.orgId, commune_id: commune_id!, categorie, nom, pdl: null })
+        .insert({ org_id: ctx.orgId, commune_id: commune_id!, categorie, nom })
         .select("id, commune_id, categorie").single();
       if (siteErr || !newSite) return { ok: false, status: 500, error: `Création site: ${siteErr?.message}` };
       site = newSite;
@@ -238,7 +238,6 @@ export async function saveInvoice(
       .insert({
         ...extraction.contract,
         org_id: ctx.orgId,
-        pdl: null,
         tarif_type: extraction.contract.tarif_type ?? null,
         client_id: clientId,
         site_id: site.id,

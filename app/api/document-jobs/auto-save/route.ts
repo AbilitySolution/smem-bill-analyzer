@@ -157,9 +157,22 @@ async function autoSaveOrgJobs(
     //   - l'EXTRACTION est jugée à `REVIEW_CONFIDENCE_THRESHOLD` (85 %). Entre 85 et
     //     96 % elle est presque toujours juste ; signaler à 96 % remonterait 12 % du
     //     volume au lieu de 5 %, et une liste qu'on n'ouvre plus ne protège de rien.
+    //   - une ANOMALIE STRUCTURELLE (gravité `error`) route la facture quelle que soit la
+    //     confiance. Ces contrôles ne portent pas un jugement mais un constat : deux
+    //     valeurs du document se contredisent. La moyenne pondérée ne peut pas les
+    //     rattraper — un champ faux parmi neuf justes laisse le score au-dessus du seuil,
+    //     et c'est précisément ce qui s'est produit : des factures dont l'index recule
+    //     alors que la consommation est positive étaient enregistrées comme validées à
+    //     96 % de confiance. L'anomalie était détectée, écrite en base, puis ignorée ici.
     const lowConfidenceReasons: string[] = [];
     if (commune.score < AUTO_THRESHOLD) lowConfidenceReasons.push(`commune associée à ${Math.round(commune.score * 100)} % de confiance`);
     if (validation.confidence < REVIEW_CONFIDENCE_THRESHOLD) lowConfidenceReasons.push(`extraction évaluée à ${Math.round(validation.confidence * 100)} % de confiance`);
+    const blockingIssues = validation.issues.filter((issue) => issue.severity === "error");
+    if (blockingIssues.length > 0) {
+      lowConfidenceReasons.push(
+        `${blockingIssues.length} anomalie${blockingIssues.length > 1 ? "s" : ""} structurelle${blockingIssues.length > 1 ? "s" : ""} (${[...new Set(blockingIssues.map((i) => i.code))].join(", ")})`,
+      );
+    }
     const lowConfidence = lowConfidenceReasons.length > 0;
 
     // Appel direct plutôt qu'un aller-retour HTTP interne vers /api/invoices : même

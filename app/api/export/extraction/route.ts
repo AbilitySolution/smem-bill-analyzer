@@ -12,7 +12,7 @@ export async function GET() {
   const { data: invoices } = await supabase
     .from("invoices")
     .select(
-      "id, facture_number, facture_date, categorie, communes(nom), sites(nom, pdl), contracts(contract_number)",
+      "id, facture_number, facture_date, categorie, communes(nom), sites(nom), contracts(contract_number)",
     );
 
   const invoiceMap = new Map(
@@ -23,7 +23,7 @@ export async function GET() {
         facture_date: string;
         categorie: string | null;
         communes: { nom: string } | null;
-        sites: { nom: string; pdl: string | null } | null;
+        sites: { nom: string } | null;
         contracts: { contract_number: string } | null;
       };
       return [i.id, i];
@@ -45,7 +45,6 @@ export async function GET() {
   const header = [
     "commune",
     "site",
-    "pdl",
     "contrat",
     "facture_number",
     "facture_date",
@@ -75,7 +74,6 @@ export async function GET() {
     rows.push([
       inv.communes?.nom ?? "",
       inv.sites?.nom ?? "",
-      inv.sites?.pdl ?? "",
       inv.contracts?.contract_number ?? "",
       inv.facture_number,
       inv.facture_date,
@@ -104,7 +102,6 @@ export async function GET() {
     rows.push([
       inv.communes?.nom ?? "",
       inv.sites?.nom ?? "",
-      inv.sites?.pdl ?? "",
       inv.contracts?.contract_number ?? "",
       inv.facture_number,
       inv.facture_date,
