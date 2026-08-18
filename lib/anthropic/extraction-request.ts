@@ -34,7 +34,7 @@ Règles générales :
 - Si une valeur est absente ou illisible : null — ne jamais inventer.
 - Codes poste_tarifaire canoniques : HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN, EJPP.
   Même si la facture écrit "Heure P", "Heures Pleines", "H.P." → utiliser "HP". Idem pour HC et les variantes TEMPO.
-- Sur contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu lis le même prix pour HP et HC dans la même période, relis attentivement la facture.
+- Relever le prix unitaire imprimé sur chaque ligne, sans le déduire d'une autre ligne. Sur les contrats EDF Collectivités, HP et HC portent couramment le même prix : le compteur sépare les index, le tarif négocié reste unique. Deux lignes au même prix ne sont pas une erreur.
 - precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).
 
 Classification (document_type) — à déterminer AVANT d'extraire :
@@ -69,6 +69,24 @@ Autres :
 const MAX_TOKENS = 8192;
 
 /**
+ * Pas de `temperature` ici, et ce n'est pas un oubli.
+ *
+ * L'API la refuse sur les modèles récents — « `temperature` is deprecated for this model »,
+ * erreur 400 sur Sonnet 5 et Opus 5, qui pilotent leur échantillonnage eux-mêmes. Ne pas
+ * la réintroduire sans vérifier le modèle en vigueur dans `OCR_MODEL`.
+ *
+ * Le sujet mérite d'être documenté parce que le réglage compte. Sur Sonnet 4.6, où le
+ * paramètre existait encore, 20 extractions du même scan de 2016 ont donné :
+ *   - température 1,0 (défaut implicite) : 6 dates fausses sur 20 (« 14 mars 2010 »)
+ *   - température 0                      : 2 sur 20
+ *
+ * Le défaut implicite de l'API était donc le pire réglage possible pour une extraction
+ * structurée. Et même à 0, une lecture sur dix restait fausse : la variance d'échantillonnage
+ * se réduit, elle ne disparaît pas. C'est pourquoi les contrôles de cohérence de
+ * `invoice-validation.ts` restent la vraie protection, pas le réglage du modèle.
+ */
+
+/**
  * Paramètres de l'appel d'extraction pour un document encodé en base64.
  * Le bloc document précède le texte : c'est l'ordre recommandé pour les PDF.
  */
@@ -84,7 +102,20 @@ export function buildExtractionParams(
   return {
     model: OCR_MODEL,
     max_tokens: MAX_TOKENS,
-    system: SYSTEM_PROMPT,
+    // Le préfixe outils + system (~3000 tokens : le schéma d'outil pèse l'essentiel) est
+    // identique à chaque facture. Sans point de cache, il est retraité et refacturé à
+    // chaque appel. L'ordre de rendu étant tools → system → messages, le marqueur posé
+    // sur le bloc system couvre aussi les outils.
+    //
+    // Placement explicite, et non `cache_control` en racine : celui-ci viserait le
+    // dernier bloc cacheable, donc APRÈS le document — une écriture de cache jetée à
+    // chaque facture, puisque le PDF change à chaque fois.
+    //
+    // Rentable dès deux appels dans le TTL de 5 min (1,25× d'écriture + 0,1× de lecture
+    // contre 2× sans cache). Le cache est indexé sur les octets du préfixe pour la clé
+    // API, pas par utilisateur : n'importe quelle extraction réchauffe les suivantes.
+    // Vérifiable via `usage.cache_read_input_tokens`, qui doit être non nul dès le 2e appel.
+    system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
     tools: [invoiceExtractionToolSchema],
     tool_choice: { type: "tool", name: "extract_edf_invoice" },
     messages: [

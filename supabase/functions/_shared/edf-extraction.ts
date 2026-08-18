@@ -12,7 +12,7 @@
 // schéma zod à la lecture (`/api/document-jobs/[id]`), qui refusera un objet non
 // conforme plutôt que de l'enregistrer.
 
-export const AI_MODEL_OCR = "claude-sonnet-4-6";
+export const AI_MODEL_OCR = "claude-sonnet-5";
 
 // Règles générales en system prompt : plus stables, moins sensibles aux variations de mise en page.
 export const SYSTEM_PROMPT = `Tu es un assistant spécialisé dans l'extraction de données de factures EDF (électricité) pour des bâtiments publics et points d'éclairage public en France.
@@ -24,7 +24,7 @@ Règles générales :
 - Si une valeur est absente ou illisible : null — ne jamais inventer.
 - Codes poste_tarifaire canoniques : HP, HC, BASE, HPB, HCB, HPW, HCW, HPR, HCR, EJPN, EJPP.
   Même si la facture écrit "Heure P", "Heures Pleines", "H.P." → utiliser "HP". Idem pour HC et les variantes TEMPO.
-- Sur contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu lis le même prix pour HP et HC dans la même période, relis attentivement la facture.
+- Relever le prix unitaire imprimé sur chaque ligne, sans le déduire d'une autre ligne. Sur les contrats EDF Collectivités, HP et HC portent couramment le même prix : le compteur sépare les index, le tarif négocié reste unique. Deux lignes au même prix ne sont pas une erreur.
 - precision : donner un score 0-1 pour chaque champ clé (1 = parfaitement lisible ; plus bas si flou, ambigu, déduit ou absent).
 
 Classification (document_type) — à déterminer AVANT d'extraire :
@@ -33,6 +33,30 @@ Classification (document_type) — à déterminer AVANT d'extraire :
 - "autre" : courrier, justificatif, ou tout document qui n'est ni une facture ni un bordereau.
 - En cas de doute, choisis "facture".
 - Si document_type n'est pas "facture" : renseigne document_type puis remplis les autres champs avec des valeurs vides (chaînes vides, 0, false, null, tableaux vides) — ils seront ignorés.`;
+
+/**
+ * Le system prompt sous forme de bloc, avec point de cache.
+ *
+ * L'ordre de rendu d'une requête est tools → system → messages : le marqueur posé ici
+ * met donc en cache le préfixe outils + system (~3000 tokens, le schéma d'outil pesant
+ * l'essentiel), identique d'un document à l'autre. Sans lui, ce préfixe est retraité et
+ * refacturé à chaque document.
+ *
+ * Le marqueur reste sur le system et non en racine de la requête : en racine il viserait
+ * le dernier bloc cacheable, donc après le document, dont le contenu change à chaque fois.
+ *
+ * Rentable dès deux lectures (1,25× d'écriture + 0,1× de lecture contre 2× sans cache).
+ * Sur un lot de 100 documents partageant ce préfixe, l'écart va dans le bon sens même si
+ * une partie des requêtes manque le cache — elles sont traitées en parallèle, donc le
+ * taux de réussite n'est pas garanti. Se lit sur `usage.cache_read_input_tokens` de
+ * chaque résultat, remonté à la collecte.
+ *
+ * Miroir de `buildExtractionParams` côté application ; les caches sont cloisonnés par
+ * modèle, donc les deux chemins ne partagent de toute façon aucune entrée.
+ */
+export const SYSTEM_BLOCKS = [
+  { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+];
 
 // Instructions structurelles EDF dans le message user (contexte spécifique au document).
 export const EXTRACTION_PROMPT = `Extrait toutes les données structurées de cette facture EDF en utilisant l'outil extract_edf_invoice.
@@ -170,7 +194,7 @@ RÈGLES poste_tarifaire — codes canoniques à utiliser :
 - EJP : "EJPN" (jours normaux), "EJPP" (jours de pointe)
 - Si la consommation BASE est découpée par barème tarifaire (ex. 'barème du 01/07 au 31/07' et 'barème du 01/08 au ...') → créer UNE ligne par sous-période, poste_tarifaire='BASE', avec les dates et prix du barème.
 
-IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu trouves le même prix pour HP et HC dans la même période, relis attentivement la facture — chaque poste a son propre prix.`,
+Relever le prix imprimé sur chaque ligne, sans le déduire d'une autre ligne. Sur les contrats EDF Collectivités, HP et HC portent couramment le même prix unitaire : le compteur sépare les index, le tarif négocié reste unique. Deux lignes au même prix ne sont donc pas une erreur de lecture.`,
         items: {
           type: "object",
           properties: {
@@ -187,7 +211,7 @@ IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus che
             consommation_kwh: { type: "number" },
             prix_unitaire_ckwh: {
               type: ["number", "null"],
-              description: "Prix en centimes d'euro par kWh. Sur contrat HPHC, HP et HC ont des prix DIFFÉRENTS (HP > HC). Si tu lis le même prix pour HP et HC dans la même période, relis — chaque ligne a son propre tarif sur la facture.",
+              description: "Prix en centimes d'euro par kWh, relevé tel qu'imprimé sur la ligne. HP et HC peuvent porter le même prix — c'est courant sur les contrats EDF Collectivités et ce n'est pas une erreur de lecture.",
             },
             montant_eur: { type: "number" },
             index_estime: { type: "boolean" },
@@ -273,3 +297,29 @@ IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus che
     ],
   },
 };
+
+/**
+ * Empreinte de la configuration d'extraction, estampillée sur chaque résultat.
+ *
+ * Miroir de `lib/anthropic/extractor-version.ts`. Calculée sur les prompts et le schéma
+ * de CE fichier : quand la copie Deno diverge de celle de l'application, les deux
+ * empreintes diffèrent — c'est voulu, elles décrivent bien deux extracteurs différents.
+ *
+ * Calculée plutôt que saisie : une constante à incrémenter serait oubliée le jour où elle
+ * compte, celui d'un correctif urgent. Tout ce qui change la sortie du modèle — modèle,
+ * prompts, schéma d'outil — change l'empreinte.
+ */
+function fingerprint(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+const EXTRACTOR_EPOCH = "2026-08-17";
+
+export const EXTRACTOR_VERSION = `${EXTRACTOR_EPOCH}.${fingerprint(
+  [AI_MODEL_OCR, SYSTEM_PROMPT, EXTRACTION_PROMPT, JSON.stringify(extractionTool)].join(" "),
+)}`;

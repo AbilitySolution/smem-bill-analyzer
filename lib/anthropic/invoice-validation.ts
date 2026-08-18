@@ -12,12 +12,29 @@ export interface ValidationIssue {
   delta?: number;
 }
 
+/**
+ * Niveau de relecture.
+ *
+ * `needsReview` seul confondait deux situations très différentes : une facture avec un
+ * total incohérent et une facture avec un simple avertissement partaient toutes deux en
+ * relecture manuelle intégrale. Le taux de factures passant sans intervention humaine est
+ * la métrique que le client lit — la mesurer suppose de distinguer les trois cas.
+ *
+ * - `auto`     : aucune anomalie, confiance haute → enregistrable sans relecture.
+ * - `targeted` : anomalies non bloquantes → ne montrer que `suspectFields`.
+ * - `full`     : au moins une erreur, ou confiance globale basse → relecture intégrale.
+ */
+export type ReviewLevel = "auto" | "targeted" | "full";
+
 export interface ValidationResult {
   isValid: boolean;
   issues: ValidationIssue[];
   confidence: number;
   fieldConfidence: Record<string, number>;
   needsReview: boolean;
+  reviewLevel: ReviewLevel;
+  /** Chemins des champs mis en cause, pour une relecture ciblée. Vide si `reviewLevel` = `auto`. */
+  suspectFields: string[];
 }
 
 function approxEqual(a: number, b: number, tol: number): boolean {
@@ -306,6 +323,37 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
       }
     }
 
+    // Identité exacte du comptage : (nouveau − ancien) × coefficient = consommation.
+    // Elle n'est pas heuristique — c'est la définition même de la mesure — et c'est le
+    // seul contrôle qui attrape un chiffre transposé ou une virgule décalée DANS un index
+    // lorsque l'ordre ancien < nouveau reste respecté : 55 392 → 55 932 se lit sans rien
+    // déclencher ailleurs, alors que la consommation affichée le dément.
+    //
+    // Écarté quand l'index recule : ce cas relève des lignes d'avoir, déjà traitées
+    // au-dessus, où la consommation négative est cohérente avec le recul.
+    if (
+      line.ancien_index != null &&
+      line.nouveau_index != null &&
+      line.nouveau_index >= line.ancien_index &&
+      line.coefficient > 0
+    ) {
+      const expectedKwh = (line.nouveau_index - line.ancien_index) * line.coefficient;
+      // Une unité d'index de battement (× coefficient, qui peut valoir 200 sur un poste
+      // équipé d'un transformateur), ou 0,5 % de la consommation pour les gros volumes.
+      const indexTol = Math.max(line.coefficient, line.consommation_kwh * 0.005);
+      if (!approxEqual(expectedKwh, line.consommation_kwh, indexTol)) {
+        issues.push({
+          code: "INDEX_DELTA_MISMATCH",
+          severity: "error",
+          message: `${tag} (${line.nouveau_index} − ${line.ancien_index}) × ${line.coefficient} = ${expectedKwh} kWh ≠ consommation déclarée (${line.consommation_kwh} kWh)`,
+          field: `consumption_lines[${i}].consommation_kwh`,
+          expected: expectedKwh,
+          actual: line.consommation_kwh,
+          delta: expectedKwh - line.consommation_kwh,
+        });
+      }
+    }
+
     if (line.date_debut && line.date_fin && line.date_debut > line.date_fin) {
       issues.push({
         code: "DATE_INVERSION",
@@ -390,35 +438,20 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
     }
   }
 
-  // 3. HP/HC même prix unitaire dans une même période.
-  // Sur contrat HPHC EDF, HP est toujours plus cher que HC.
-  // Même tarif pour les deux postes = l'OCR a probablement extrait le même prix pour HP et HC.
-  {
-    const pairMap = new Map<string, { hp?: number; hc?: number }>();
-    for (const line of consumption_lines) {
-      if (line.prix_unitaire_ckwh == null) continue;
-      // Normaliser avant comparaison : "Heure P", "H.P.", etc. → "HP"
-      const poste = normalizePosteTarifaire(line.poste_tarifaire);
-      if (poste !== "HP" && poste !== "HC") continue;
-      const key = `${line.date_debut ?? ""}|${line.date_fin ?? ""}`;
-      const pair = pairMap.get(key) ?? {};
-      if (poste === "HP") pair.hp = line.prix_unitaire_ckwh;
-      else pair.hc = line.prix_unitaire_ckwh;
-      pairMap.set(key, pair);
-    }
-    for (const [, pair] of pairMap) {
-      if (pair.hp != null && pair.hc != null && Math.abs(pair.hp - pair.hc) < 0.001) {
-        issues.push({
-          code: "HPHC_SAME_PRICE",
-          severity: "warning",
-          message: `HP et HC ont le même prix unitaire (${pair.hp} c€/kWh) — l'OCR a peut-être extrait le même tarif pour les deux postes`,
-        });
-        break; // un seul avertissement par facture suffit
-      }
-    }
-  }
+  // Pas de contrôle « HP et HC doivent avoir des prix différents ».
+  //
+  // L'intuition vient du Tarif Bleu résidentiel, où l'écart HP/HC est la raison d'être
+  // de l'option. Elle ne tient pas sur le parc traité ici : sur les contrats EDF
+  // Collectivités (bâtiments publics, éclairage public), le prix du kWh est négocié au
+  // marché et s'applique uniformément. Le compteur reste configuré en HPHC et sépare les
+  // index, donc la facture affiche deux lignes — au même prix unitaire.
+  //
+  // L'ancien code émettait `HPHC_SAME_PRICE` dans ce cas : un avertissement déclenché par
+  // une facture parfaitement lue, sur une bonne partie du parc. Le rétablir demanderait
+  // de savoir d'abord distinguer un contrat à tarif unique d'un vrai HPHC différencié —
+  // `contract.tarif_type` ne le dit pas, il vaut "HPHC" dans les deux cas.
 
-  // 4. Low composite-confidence flags (use fieldConfidence, not raw precision)
+  // 3. Low composite-confidence flags (use fieldConfidence, not raw precision)
   const criticalFields = ["total_ttc", "total_ht", "facture_number", "contract_number"] as const;
   for (const field of criticalFields) {
     const score = fieldConfidence[field];
@@ -432,13 +465,44 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
     }
   }
 
+  return summarize(issues, confidence, fieldConfidence);
+}
+
+/**
+ * Assemble le verdict à partir des anomalies et de la confiance.
+ *
+ * Extrait de `validateInvoice` pour que les contrôles qui ont besoin de la base — la
+ * continuité des index d'une facture à l'autre, l'ancrage sur l'historique du contrat —
+ * puissent produire le même verdict après avoir ajouté leurs propres anomalies, au lieu
+ * de reproduire ces seuils ailleurs. Voir `lib/invoices/contextual-validation.ts`.
+ */
+export function summarize(
+  issues: ValidationIssue[],
+  confidence: number,
+  fieldConfidence: Record<string, number>,
+): ValidationResult {
   const hasErrors = issues.some((i) => i.severity === "error");
+
+  // Champs à montrer en relecture ciblée. `precision.x` désigne le champ `x` lui-même :
+  // le préfixe est un artefact de la provenance du signal, pas un chemin à afficher.
+  const suspectFields = [
+    ...new Set(
+      issues
+        .map((i) => i.field)
+        .filter((f): f is string => f != null)
+        .map((f) => (f.startsWith("precision.") ? f.slice("precision.".length) : f)),
+    ),
+  ];
 
   return {
     isValid: !hasErrors,
     issues,
     confidence,
     fieldConfidence,
+    // Conservé tel quel : plusieurs appelants s'y adossent déjà et le seuil de 0,75 a été
+    // calibré sur le corpus. `reviewLevel` affine sans déplacer cette porte.
     needsReview: issues.length > 0 || confidence < 0.75,
+    reviewLevel: hasErrors || confidence < 0.6 ? "full" : issues.length > 0 || confidence < 0.75 ? "targeted" : "auto",
+    suspectFields,
   };
 }

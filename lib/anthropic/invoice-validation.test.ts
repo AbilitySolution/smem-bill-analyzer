@@ -160,15 +160,61 @@ describe("validateInvoice", () => {
     expect(result.issues.some((i) => i.code === "TARIF_TYPE_MISMATCH")).toBe(true);
   });
 
-  it("HP et HC même prix sur la même période -> avertissement (probable erreur OCR)", () => {
+  // Sur les contrats EDF Collectivités le kWh est négocié à prix unique : le compteur
+  // sépare les index HP/HC, le tarif appliqué aux deux lignes est le même. Une facture
+  // correctement lue ne doit donc produire aucun avertissement de ce chef.
+  it("HP et HC au même prix unitaire -> aucun avertissement", () => {
     const result = validateInvoice(baseExtraction({
       contract: { ...baseExtraction().contract, tarif_type: "HPHC" },
       consumption_lines: [
-        { poste_tarifaire: "HP", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 12, montant_eur: 12, index_estime: false },
-        { poste_tarifaire: "HC", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 12, montant_eur: 12, index_estime: false },
+        { poste_tarifaire: "HP", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 15.2544, montant_eur: 15.25, index_estime: false },
+        { poste_tarifaire: "HC", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 15.2544, montant_eur: 15.25, index_estime: false },
       ],
     }));
-    expect(result.issues.some((i) => i.code === "HPHC_SAME_PRICE")).toBe(true);
+    expect(result.issues.some((i) => i.code === "HPHC_SAME_PRICE")).toBe(false);
+    expect(result.issues.some((i) => i.code === "LINE_AMOUNT_MISMATCH")).toBe(false);
+  });
+
+  // (nouveau − ancien) × coefficient = consommation. C'est la définition de la mesure,
+  // pas une heuristique — et le seul contrôle qui voie un chiffre transposé DANS un index
+  // quand l'ordre ancien < nouveau reste respecté.
+  it("consommation incohérente avec le delta d'index -> erreur", () => {
+    const result = validateInvoice(baseExtraction({
+      consumption_lines: [
+        { poste_tarifaire: "BASE", date_debut: null, date_fin: null, numero_compteur: null, ancien_index: 55392, nouveau_index: 55932, coefficient: 1, consommation_kwh: 6589, prix_unitaire_ckwh: 15, montant_eur: 988.35, index_estime: false },
+      ],
+    }));
+    const issue = result.issues.find((i) => i.code === "INDEX_DELTA_MISMATCH");
+    expect(issue?.severity).toBe("error");
+    expect(issue?.expected).toBe(540);
+    expect(result.reviewLevel).toBe("full");
+  });
+
+  it("delta d'index cohérent -> silence", () => {
+    const result = validateInvoice(baseExtraction({
+      consumption_lines: [
+        { poste_tarifaire: "BASE", date_debut: null, date_fin: null, numero_compteur: null, ancien_index: 1000, nouveau_index: 1200, coefficient: 1, consommation_kwh: 200, prix_unitaire_ckwh: 15, montant_eur: 30, index_estime: false },
+      ],
+    }));
+    expect(result.issues.some((i) => i.code === "INDEX_DELTA_MISMATCH")).toBe(false);
+  });
+
+  // Une unité d'index vaut `coefficient` kWh : la tolérance doit se lire à cette échelle,
+  // sinon tout poste équipé d'un transformateur déclencherait à chaque relevé.
+  it("coefficient élevé : la tolérance suit l'échelle de l'index", () => {
+    const result = validateInvoice(baseExtraction({
+      consumption_lines: [
+        { poste_tarifaire: "BASE", date_debut: null, date_fin: null, numero_compteur: null, ancien_index: 100, nouveau_index: 110, coefficient: 200, consommation_kwh: 2100, prix_unitaire_ckwh: 15, montant_eur: 315, index_estime: false },
+      ],
+    }));
+    expect(result.issues.some((i) => i.code === "INDEX_DELTA_MISMATCH")).toBe(false);
+  });
+
+  it("facture propre -> reviewLevel auto et aucun champ suspect", () => {
+    const result = validateInvoice(baseExtraction());
+    expect(result.reviewLevel).toBe("auto");
+    expect(result.suspectFields).toHaveLength(0);
+    expect(result.needsReview).toBe(false);
   });
 
   it("faible confiance sur un champ critique -> issue LOW_CONFIDENCE", () => {

@@ -151,6 +151,8 @@ export function buildSplitDetectionParams(
     // `document` en dépend, d'où l'en-tête porté par la requête elle-même.
     betas: ["files-api-2025-04-14"],
     max_tokens: 4096,
+    // Pas de `temperature` : l'API la refuse sur les modèles récents (400,
+    // « deprecated for this model »). Voir la note dans `extraction-request.ts`.
     system: SPLIT_SYSTEM_PROMPT,
     tools: [invoiceSplitTool],
     tool_choice: { type: "tool", name: "detect_invoice_boundaries" },

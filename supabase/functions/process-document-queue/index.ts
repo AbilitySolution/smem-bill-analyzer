@@ -17,7 +17,7 @@ import { aiRequest, isRetryableProcessingError, releaseRemoteFile, uploadDocumen
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
-import { AI_MODEL_OCR, EXTRACTION_PROMPT, SYSTEM_PROMPT, extractionTool } from "../_shared/edf-extraction.ts";
+import { AI_MODEL_OCR, EXTRACTION_PROMPT, SYSTEM_BLOCKS, extractionTool } from "../_shared/edf-extraction.ts";
 
 /**
  * Au-delà, un job resté en `uploading_to_claude` est considéré abandonné et repris.
@@ -65,7 +65,9 @@ async function createAiBatch(
       params: {
         model: AI_MODEL_OCR,
         max_tokens: 8192,
-        system: SYSTEM_PROMPT,
+        // Point de cache sur le préfixe outils + system, partagé par les 100 requêtes
+        // du lot — voir `SYSTEM_BLOCKS`.
+        system: SYSTEM_BLOCKS,
         tools: [extractionTool],
         tool_choice: { type: "tool", name: "extract_edf_invoice" },
         messages: [{

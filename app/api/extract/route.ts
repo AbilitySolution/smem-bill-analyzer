@@ -8,7 +8,8 @@ import {
   isExtractionMediaType,
 } from "@/lib/anthropic/extraction-request";
 import { matchCommune, matchSiteByContract } from "@/lib/extraction/matching";
-import { validateInvoice } from "@/lib/anthropic/invoice-validation";
+import { validateInvoiceInContext } from "@/lib/invoices/contextual-validation";
+import { EXTRACTOR_VERSION } from "@/lib/anthropic/extractor-version";
 import { buildInvoiceStoragePath } from "@/lib/extraction/storage-path";
 
 export async function POST(request: Request) {
@@ -63,10 +64,15 @@ export async function POST(request: Request) {
       ? await matchSiteByContract(supabase, ctx.orgId, commune.id, parsed.data.contract.contract_number)
       : null;
 
-    const validation = validateInvoice(parsed.data);
+    // Validation replacée dans l'historique du contrat : la continuité des index d'une
+    // facture à l'autre ne se voit pas sur un document isolé.
+    const validation = await validateInvoiceInContext(supabase, parsed.data, { orgId: ctx.orgId });
 
     return NextResponse.json({
       extraction: parsed.data,
+      // Provenance à reporter dans la requête d'enregistrement, pour que la facture
+      // garde trace de l'extracteur qui l'a produite.
+      extractor_version: EXTRACTOR_VERSION,
       file_path: storagePath,
       suggested_commune_id: commune?.id ?? null,
       suggested_commune_nom: commune?.nom ?? null,

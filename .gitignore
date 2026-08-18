@@ -43,3 +43,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .env*
+
+# Jeu de référence et rapports du banc de mesure : données client, hors dépôt.
+.extraction-eval/
