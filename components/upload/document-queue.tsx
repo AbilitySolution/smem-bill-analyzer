@@ -885,7 +885,13 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
   const pendingReviewJobs = jobs
     .filter((job) => job.status === "needs_review")
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-  const rejectedQueueCount = queueJobs.filter((job) => job.status === "rejected_non_invoice").length;
+  /**
+   * Compté sur `jobs` et non sur `queueJobs` : ce dernier masque les rejetés tant que leur
+   * puce n'est pas sélectionnée, si bien que le compteur tombait à 0 et faisait disparaître
+   * le bouton « Tout traiter quand même » — le seul qui permette de les récupérer. Il fallait
+   * donc déjà les avoir trouvés pour accéder au bouton censé les traiter.
+   */
+  const rejectedQueueCount = jobs.filter((job) => job.status === "rejected_non_invoice").length;
 
   // Comptes par catégorie pour les puces de filtre — sur `queueJobs` en entier, pas sur
   // le résultat déjà filtré : sinon les puces des autres catégories retomberaient à zéro
@@ -1309,7 +1315,26 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
               )}
 
               {failedCount > 0 && <p className="mt-2 text-xs font-medium text-red-600">{failedCount} document{failedCount > 1 ? "s" : ""} en échec — vous pouvez les relancer individuellement.</p>}
-              {rejectedCount > 0 && <p className="mt-2 text-xs font-medium text-amber-700">{rejectedCount} document{rejectedCount > 1 ? "s" : ""} ignoré{rejectedCount > 1 ? "s" : ""} (pas reconnu{rejectedCount > 1 ? "s" : ""} comme facture) — vérifiez et forcez le traitement si besoin.</p>}
+              {/* Le message portait une consigne (« vérifiez et forcez ») sans le moyen de
+                  l'exécuter : aucun lien, et le seul bouton voisin appartenait au bloc des
+                  factures lues avec un doute, qui mène à /corrections. D'où des utilisateurs
+                  renvoyés vers un écran vide, sans rapport avec leurs documents ignorés. */}
+              {rejectedCount > 0 && (
+                <p className="mt-2 text-xs font-medium text-amber-700">
+                  {rejectedCount} document{rejectedCount > 1 ? "s" : ""} ignoré{rejectedCount > 1 ? "s" : ""} (pas reconnu{rejectedCount > 1 ? "s" : ""} comme facture).
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setQueueBucketFilter("rejected");
+                      setQueueSearch("");
+                      queueListParentRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }}
+                    className="ml-1 cursor-pointer font-semibold underline hover:no-underline"
+                  >
+                    Les afficher
+                  </button>
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -1421,7 +1446,7 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
                 Tout sélectionner ({fmt(visibleReviewIds.length)})
               </button>
             )}
-            {rejectedQueueCount > 1 && (
+            {rejectedQueueCount > 0 && (
               <button
                 type="button"
                 disabled={retryingRejected || submitting}
@@ -1462,7 +1487,14 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
           </div>
         </div>
 
-        {queueJobs.length > LARGE_LIST_THRESHOLD && (
+        {/* Les puces servent à deux choses distinctes : trier une longue liste, et atteindre
+            les documents ignorés — que `queueJobs` masque tant que leur puce n'est pas
+            sélectionnée. Ne les afficher qu'au-delà du seuil de volume créait un verrou :
+            une file entièrement relue ne laissant que des rejetés tombait à
+            `queueJobs.length === 0`, donc pas de puces, donc aucun moyen de poser le filtre
+            qui les révèle. Ils devenaient inatteignables, exactement ce que le commentaire
+            de `queueBucketCounts` cherchait à empêcher. */}
+        {(queueJobs.length > LARGE_LIST_THRESHOLD || (queueBucketCounts.get("rejected") ?? 0) > 0) && (
           <div className="mb-3 space-y-2">
             <div className="flex flex-wrap gap-1.5">
               <button
@@ -1498,7 +1530,26 @@ export function DocumentQueue({ orgId, userId }: { orgId: string; userId: string
 
         {!queueJobs.length ? (
           <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">
-            Aucun document dans la file.
+            {/* « Aucun document dans la file » est faux quand il ne reste que des ignorés :
+                ils sont bien là, simplement masqués par défaut. Le dire, et donner l'accès. */}
+            {(queueBucketCounts.get("rejected") ?? 0) > 0 ? (
+              <>
+                Aucun document en attente de traitement.{" "}
+                {fmt(queueBucketCounts.get("rejected") ?? 0)} document
+                {(queueBucketCounts.get("rejected") ?? 0) > 1 ? "s" : ""} ignoré
+                {(queueBucketCounts.get("rejected") ?? 0) > 1 ? "s" : ""} (pas reconnu
+                {(queueBucketCounts.get("rejected") ?? 0) > 1 ? "s" : ""} comme facture).
+                <button
+                  type="button"
+                  onClick={() => setQueueBucketFilter("rejected")}
+                  className="ml-1 cursor-pointer font-semibold text-[#f97316] hover:underline"
+                >
+                  Les afficher
+                </button>
+              </>
+            ) : (
+              "Aucun document dans la file."
+            )}
           </div>
         ) : !filteredQueueJobs.length ? (
           <div className="rounded-xl border border-dashed border-[var(--kn-border)] px-4 py-8 text-center text-sm text-[var(--kn-text-muted)]">
