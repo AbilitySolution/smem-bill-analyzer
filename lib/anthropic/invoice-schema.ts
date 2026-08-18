@@ -243,7 +243,7 @@ RÈGLES poste_tarifaire — codes canoniques à utiliser :
 - EJP : "EJPN" (jours normaux), "EJPP" (jours de pointe)
 - Si la consommation BASE est découpée par barème tarifaire (ex. 'barème du 01/07 au 31/07' et 'barème du 01/08 au ...') → créer UNE ligne par sous-période, poste_tarifaire='BASE', avec les dates et prix du barème.
 
-IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus cher que HC (heures creuses). Si tu trouves le même prix pour HP et HC dans la même période, relis attentivement la facture — chaque poste a son propre prix.`,
+Relever le prix imprimé sur chaque ligne, sans le déduire d'une autre ligne. Sur les contrats EDF Collectivités, HP et HC portent couramment le même prix unitaire : le compteur sépare les index, le tarif négocié reste unique. Deux lignes au même prix ne sont donc pas une erreur de lecture.`,
         items: {
           type: "object",
           properties: {
@@ -260,7 +260,7 @@ IMPORTANT HP/HC : sur un contrat HPHC, HP (heures pleines) est TOUJOURS plus che
             consommation_kwh: { type: "number" },
             prix_unitaire_ckwh: {
               type: ["number", "null"],
-              description: "Prix en centimes d'euro par kWh. Sur contrat HPHC, HP et HC ont des prix DIFFÉRENTS (HP > HC). Si tu lis le même prix pour HP et HC dans la même période, relis — chaque ligne a son propre tarif sur la facture.",
+              description: "Prix en centimes d'euro par kWh, relevé tel qu'imprimé sur la ligne. HP et HC peuvent porter le même prix — c'est courant sur les contrats EDF Collectivités et ce n'est pas une erreur de lecture.",
             },
             montant_eur: { type: "number" },
             index_estime: { type: "boolean" },

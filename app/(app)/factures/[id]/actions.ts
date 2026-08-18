@@ -11,10 +11,10 @@ const TABLE_FIELDS: Record<string, Set<string>> = {
   ]),
   clients: new Set(["nom", "reference_client", "reference_compte", "adresse"]),
   contracts: new Set([
-    "contract_number", "pdl", "tarif_type", "espace_livraison", "offre", "service",
+    "contract_number", "tarif_type", "espace_livraison", "offre", "service",
     "puissance_souscrite_kva", "reglage_protection_a", "type_compteur", "numero_compteur",
   ]),
-  sites: new Set(["nom", "pdl", "kva", "ampere", "categorie"]),
+  sites: new Set(["nom", "kva", "ampere", "categorie"]),
   consumption_periods: new Set([
     "poste_tarifaire", "period_start", "period_end", "numero_compteur",
     "ancien_index", "nouveau_index", "coefficient", "consommation_kwh",

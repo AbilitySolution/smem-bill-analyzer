@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getUserContext } from "@/lib/auth";
 import { invoiceExtractionSchema } from "@/lib/anthropic/invoice-schema";
-import { validateInvoice } from "@/lib/anthropic/invoice-validation";
+import { validateInvoiceInContext } from "@/lib/invoices/contextual-validation";
 import { matchCommuneScored, matchSiteByContract } from "@/lib/extraction/matching";
 import { saveInvoice, escalateHighAnomalies } from "@/lib/invoices/save";
 import { CORRECTION_CONFIDENCE_THRESHOLD as REVIEW_CONFIDENCE_THRESHOLD } from "@/lib/data/corrections";
@@ -78,6 +78,7 @@ interface PendingJob {
   file_path: string;
   created_by: string;
   extraction_json: unknown;
+  extractor_version: string | null;
 }
 
 interface OrgOutcome {
@@ -124,7 +125,7 @@ async function autoSaveOrgJobs(
     const extraction = parsed.data;
     const factureNumber = extraction.invoice.facture_number ?? "—";
 
-    const validation = validateInvoice(extraction);
+    const validation = await validateInvoiceInContext(supabase, extraction, { orgId });
     const commune = await matchCommuneScored(supabase, orgId, extraction);
     const site = commune
       ? await matchSiteByContract(supabase, orgId, commune.id, extraction.contract.contract_number)
@@ -157,9 +158,22 @@ async function autoSaveOrgJobs(
     //   - l'EXTRACTION est jugée à `REVIEW_CONFIDENCE_THRESHOLD` (85 %). Entre 85 et
     //     96 % elle est presque toujours juste ; signaler à 96 % remonterait 12 % du
     //     volume au lieu de 5 %, et une liste qu'on n'ouvre plus ne protège de rien.
+    //   - une ANOMALIE STRUCTURELLE (gravité `error`) route la facture quelle que soit la
+    //     confiance. Ces contrôles ne portent pas un jugement mais un constat : deux
+    //     valeurs du document se contredisent. La moyenne pondérée ne peut pas les
+    //     rattraper — un champ faux parmi neuf justes laisse le score au-dessus du seuil,
+    //     et c'est précisément ce qui s'est produit : des factures dont l'index recule
+    //     alors que la consommation est positive étaient enregistrées comme validées à
+    //     96 % de confiance. L'anomalie était détectée, écrite en base, puis ignorée ici.
     const lowConfidenceReasons: string[] = [];
     if (commune.score < AUTO_THRESHOLD) lowConfidenceReasons.push(`commune associée à ${Math.round(commune.score * 100)} % de confiance`);
     if (validation.confidence < REVIEW_CONFIDENCE_THRESHOLD) lowConfidenceReasons.push(`extraction évaluée à ${Math.round(validation.confidence * 100)} % de confiance`);
+    const blockingIssues = validation.issues.filter((issue) => issue.severity === "error");
+    if (blockingIssues.length > 0) {
+      lowConfidenceReasons.push(
+        `${blockingIssues.length} anomalie${blockingIssues.length > 1 ? "s" : ""} structurelle${blockingIssues.length > 1 ? "s" : ""} (${[...new Set(blockingIssues.map((i) => i.code))].join(", ")})`,
+      );
+    }
     const lowConfidence = lowConfidenceReasons.length > 0;
 
     // Appel direct plutôt qu'un aller-retour HTTP interne vers /api/invoices : même
@@ -170,6 +184,9 @@ async function autoSaveOrgJobs(
       { orgId, userId: job.created_by },
       {
         extraction,
+        // Provenance réelle de l'extraction : celle du job, pas la version courante de
+        // l'application — le job a pu être extrait par une version antérieure.
+        ...(job.extractor_version ? { extractor_version: job.extractor_version } : {}),
         file_path: job.file_path,
         commune_id: commune.id,
         ...(site ? { site_id: site.id } : {}),
@@ -246,7 +263,7 @@ async function runCronSweep(deadline: number) {
     if (Date.now() > deadline) break;
     const { data: jobs } = await admin
       .from("document_jobs")
-      .select("id, file_path, created_by, extraction_json")
+      .select("id, file_path, created_by, extraction_json, extractor_version")
       .eq("org_id", org.org_id)
       .eq("status", "needs_review")
       .is("auto_save_attempted_at", null)
@@ -320,7 +337,7 @@ export async function POST(request: Request) {
 
   let query = supabase
     .from("document_jobs")
-    .select("id, file_path, created_by, extraction_json")
+    .select("id, file_path, created_by, extraction_json, extractor_version")
     .eq("org_id", ctx.orgId)
     .eq("created_by", ctx.userId)
     .eq("status", "needs_review")

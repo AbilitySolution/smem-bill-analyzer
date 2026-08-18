@@ -42,7 +42,6 @@ const updateSchema = z.object({
   }),
   contract: z.object({
     contract_number: z.string(),
-    pdl: z.string().nullable(),
     tarif_type: z.enum(["BASE", "HPHC", "TEMPO", "EJP"]).nullable(),
     espace_livraison: z.string().nullable(),
     offre: z.string().nullable(),
