@@ -438,20 +438,16 @@ export function validateInvoice(data: InvoiceExtraction): ValidationResult {
     }
   }
 
-  // Pas de contrôle « HP et HC doivent avoir des prix différents ».
+  // 3. (retiré) HP/HC au même prix unitaire.
   //
-  // L'intuition vient du Tarif Bleu résidentiel, où l'écart HP/HC est la raison d'être
-  // de l'option. Elle ne tient pas sur le parc traité ici : sur les contrats EDF
-  // Collectivités (bâtiments publics, éclairage public), le prix du kWh est négocié au
-  // marché et s'applique uniformément. Le compteur reste configuré en HPHC et sépare les
-  // index, donc la facture affiche deux lignes — au même prix unitaire.
-  //
-  // L'ancien code émettait `HPHC_SAME_PRICE` dans ce cas : un avertissement déclenché par
-  // une facture parfaitement lue, sur une bonne partie du parc. Le rétablir demanderait
-  // de savoir d'abord distinguer un contrat à tarif unique d'un vrai HPHC différencié —
-  // `contract.tarif_type` ne le dit pas, il vaut "HPHC" dans les deux cas.
+  // La règle signalait un contrat HPHC dont les deux postes portent le même tarif, en
+  // supposant une erreur d'OCR. Elle produisait 95 des 330 anomalies du portefeuille —
+  // 29 % à elle seule — dont aucune n'a jamais été traitée par un utilisateur. Beaucoup
+  // d'offres récentes, et les factures à tarif unique typées HPHC par erreur, ont
+  // légitimement le même prix sur les deux postes : le taux de faux positifs ne
+  // justifiait pas la place occupée. Supprimée le 2026-08-17.
 
-  // 3. Low composite-confidence flags (use fieldConfidence, not raw precision)
+  // 4. Low composite-confidence flags (use fieldConfidence, not raw precision)
   const criticalFields = ["total_ttc", "total_ht", "facture_number", "contract_number"] as const;
   for (const field of criticalFields) {
     const score = fieldConfidence[field];

@@ -3,47 +3,55 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
-  BarChart, Bar, Cell, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from "recharts";
-import { AlertTriangle, ShieldAlert, MapPin, CheckCircle2, Info, ExternalLink, RotateCcw, History, Euro } from "lucide-react";
-import type { InvoiceDoc, PortfolioPoint } from "@/lib/data/invoices";
-import { SEVERITY_LABEL, SEVERITY_COLOR, type Severity } from "@/lib/data/anomalies";
+  AlertTriangle, ShieldAlert, MapPin, CheckCircle2, Info, ExternalLink, RotateCcw, History, Euro,
+  ChevronDown, Gauge, Receipt, Tag, HelpCircle,
+} from "lucide-react";
+import type { InvoiceDoc } from "@/lib/data/invoices";
+import type { AnomalyContext } from "@/lib/data/anomaly-context";
+import {
+  SEVERITY_LABEL, SEVERITY_COLOR, SECTION_META, SECTION_ORDER, sectionOf, typeLabel,
+  type AnomalySection, type Severity,
+} from "@/lib/data/anomalies";
 import { setAnomalyResolved } from "@/app/(app)/anomalies/actions";
+import { Sparkline } from "./sparkline";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 const eur = (n: number) => n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }) + " €";
-const kwhFmt = (n: number) => n.toLocaleString("fr-FR") + " kWh";
-const SEV_ORDER: Severity[] = ["high", "medium", "low"];
+const SEV_RANK: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
+
+const SECTION_ICON: Record<AnomalySection, typeof Gauge> = {
+  consommation: Gauge,
+  tarif: Tag,
+  facturation: Receipt,
+  autres: HelpCircle,
+};
 
 interface FeedItem {
-  id: string; invoiceId: string; number: string; site: string; commune: string;
-  severity: Severity; message: string; type: string; valueEur?: number; resolved: boolean;
+  id: string;
+  invoiceId: string;
+  number: string;
+  site: string;
+  commune: string;
+  section: AnomalySection;
+  severity: Severity;
+  message: string;
+  type: string;
+  valueEur?: number;
+  resolved: boolean;
 }
 
-// Extracteurs tolérants pour les survols recharts (payload selon la version).
-const pointId = (d: unknown): string | null => {
-  const o = d as { id?: string; payload?: { id?: string } } | null;
-  return o?.id ?? o?.payload?.id ?? null;
-};
-const barSeverity = (d: unknown): Severity | null => {
-  const o = d as { severity?: Severity; payload?: { severity?: Severity } } | null;
-  return o?.severity ?? o?.payload?.severity ?? null;
-};
-
-const SEV_RANK_ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
-
-export function AnomaliesView({ docs, portfolio, focus }: {
+export function AnomaliesView({ docs, context, focus }: {
   docs: InvoiceDoc[];
-  /** Portefeuille complet (non archivé) : le nuage de fond du scatter. Null = repli sur `docs`. */
-  portfolio?: PortfolioPoint[] | null;
+  /** Historique de consommation par site : sparklines et taux d'anomalie. Null si indisponible. */
+  context?: AnomalyContext | null;
   focus?: string;
 }) {
-  // Surcharge optimiste locale (id -> resolved) le temps que la server action
-  // écrive en DB et que la page se revalide — la vérité reste toujours la DB.
+  // Surcharge optimiste locale (id -> resolved) le temps que la server action écrive en
+  // DB et que la page se revalide — la vérité reste toujours la DB.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
-  const [filter, setFilter] = useState<Severity | "all">("all");
-  const [hoverInvoice, setHoverInvoice] = useState<string | null>(null);
-  const [hoverSeverity, setHoverSeverity] = useState<Severity | null>(null);
+  const [commune, setCommune] = useState("");
+  const [site, setSite] = useState("");
+  const [collapsed, setCollapsed] = useState<Set<AnomalySection>>(new Set());
 
   const allItems: FeedItem[] = useMemo(() => {
     const items: FeedItem[] = [];
@@ -51,41 +59,81 @@ export function AnomaliesView({ docs, portfolio, focus }: {
       for (const a of d.anomalies ?? []) {
         items.push({
           id: a.id, invoiceId: d.id, number: d.number, site: d.site, commune: d.commune,
-          severity: a.severity, message: a.message, type: a.type, valueEur: a.valueEur,
-          resolved: overrides.get(a.id) ?? a.resolved,
+          section: sectionOf(a.type), severity: a.severity, message: a.message, type: a.type,
+          valueEur: a.valueEur, resolved: overrides.get(a.id) ?? a.resolved,
         });
       }
     }
     return items;
   }, [docs, overrides]);
 
-  const open = useMemo(() => {
-    return allItems.filter((i) => !i.resolved)
-      .sort((a, b) => (a.invoiceId === focus ? -1 : b.invoiceId === focus ? 1 : SEV_RANK_ORDER[a.severity] - SEV_RANK_ORDER[b.severity]));
-  }, [allItems, focus]);
+  const open = useMemo(
+    () => allItems.filter((i) => !i.resolved).sort((a, b) => {
+      const aFocus = a.invoiceId === focus;
+      const bFocus = b.invoiceId === focus;
+      if (aFocus !== bFocus) return aFocus ? -1 : 1;
+      return SEV_RANK[a.severity] - SEV_RANK[b.severity];
+    }),
+    [allItems, focus],
+  );
+
+  // Les options de filtre sont calculées sur l'ensemble ouvert, AVANT filtrage : une liste
+  // d'options qui se vide au fur et à mesure qu'on filtre interdit de revenir en arrière
+  // sans tout réinitialiser. Seuls les sites se restreignent à la commune choisie.
+  const communeOptions = useMemo(
+    () => [...new Set(open.map((i) => i.commune))].sort((a, b) => a.localeCompare(b, "fr")),
+    [open],
+  );
+  const siteOptions = useMemo(
+    () => [...new Set(open.filter((i) => !commune || i.commune === commune).map((i) => i.site))]
+      .sort((a, b) => a.localeCompare(b, "fr")),
+    [open, commune],
+  );
+
+  const filtered = useMemo(
+    () => open.filter((i) => (!commune || i.commune === commune) && (!site || i.site === site)),
+    [open, commune, site],
+  );
+
   const history = useMemo(() => allItems.filter((i) => i.resolved), [allItems]);
 
-  const shown = filter === "all" ? open : open.filter((i) => i.severity === filter);
+  const bySection = useMemo(() => {
+    const map = new Map<AnomalySection, FeedItem[]>();
+    for (const it of filtered) {
+      const arr = map.get(it.section) ?? [];
+      arr.push(it);
+      map.set(it.section, arr);
+    }
+    return map;
+  }, [filtered]);
 
-  const sites = new Set(open.map((i) => i.site)).size;
-  const highCount = open.filter((i) => i.severity === "high").length;
-  const valueFound = open.reduce((s, i) => s + Math.abs(i.valueEur ?? 0), 0);
+  // Classement par TAUX et non par nombre : en valeur absolue, le site qui porte la moitié
+  // du portefeuille arrive toujours premier et l'attention se porte toujours au même
+  // endroit. Le taux fait remonter un petit site réellement en difficulté.
+  const siteRanking = useMemo(() => {
+    if (!context) return [];
+    const counts = new Map<string, { site: string; commune: string; anomalies: number; invoices: number }>();
+    for (const it of filtered) {
+      const siteId = context.siteByInvoice[it.invoiceId];
+      if (!siteId) continue;
+      const row = counts.get(siteId) ?? {
+        site: it.site, commune: it.commune, anomalies: 0,
+        invoices: context.invoiceCountBySite[siteId] ?? 0,
+      };
+      row.anomalies += 1;
+      counts.set(siteId, row);
+    }
+    return [...counts.values()]
+      .filter((r) => r.invoices > 0)
+      .map((r) => ({ ...r, rate: r.anomalies / r.invoices }))
+      .sort((a, b) => b.rate - a.rate)
+      .slice(0, 8);
+  }, [context, filtered]);
 
-  const distribution = SEV_ORDER.map((s) => ({ label: SEVERITY_LABEL[s], severity: s, value: open.filter((i) => i.severity === s).length }))
-    .filter((d) => d.value > 0);
-
-  // Nuage de fond = portefeuille COMPLET, pas seulement les factures anormales : sans
-  // les factures saines, « repérer un point qui sort du nuage » n'avait pas de nuage.
-  const scatter = useMemo(() => {
-    const flaggedIds = new Set(open.map((i) => i.invoiceId));
-    const severityByInvoice = new Map(docs.map((d) => [d.id, d.anomalySeverity ?? null]));
-    const points = portfolio ?? docs.filter((d) => d.kwh > 0).map((d) => ({ id: d.id, kwh: d.kwh, totalTtc: d.totalTtc }));
-    return points.map((p) => ({
-      id: p.id, kwh: p.kwh, amount: p.totalTtc,
-      flagged: flaggedIds.has(p.id),
-      severity: flaggedIds.has(p.id) ? (severityByInvoice.get(p.id) ?? null) : null,
-    }));
-  }, [docs, portfolio, open]);
+  const sitesTouched = new Set(filtered.map((i) => i.site)).size;
+  const highCount = filtered.filter((i) => i.severity === "high").length;
+  const valueFound = filtered.reduce((s, i) => s + Math.abs(i.valueEur ?? 0), 0);
+  const hasFilter = Boolean(commune || site);
 
   function resolve(id: string) {
     setOverrides((prev) => new Map(prev).set(id, true));
@@ -95,9 +143,15 @@ export function AnomaliesView({ docs, portfolio, focus }: {
     setOverrides((prev) => new Map(prev).set(id, false));
     void setAnomalyResolved(id, false);
   }
+  function toggleSection(s: AnomalySection) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(s)) next.delete(s); else next.add(s);
+      return next;
+    });
+  }
 
-  const isHot = (it: FeedItem) => it.invoiceId === focus || it.invoiceId === hoverInvoice || it.severity === hoverSeverity;
-  const tooltipStyle = { fontSize: 12, borderRadius: 8, background: "var(--kn-card)", border: "1px solid var(--kn-border)", color: "var(--kn-text)" } as const;
+  const visibleSections = SECTION_ORDER.filter((s) => (bySection.get(s)?.length ?? 0) > 0);
 
   return (
     <div className="mx-auto max-w-5xl px-8 py-6">
@@ -107,12 +161,13 @@ export function AnomaliesView({ docs, portfolio, focus }: {
         <span className="rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#9a3412]">Version bêta</span>
       </div>
 
-      {/* Disclaimer version bêta */}
       <div className="mb-5 mt-3 flex items-start gap-2.5 rounded-xl border border-[#fed7aa] bg-[var(--kn-yellow-soft)] px-4 py-3">
         <Info className="mt-0.5 size-4 shrink-0 text-[#ea580c]" />
         <p className="text-[13px] text-[var(--kn-text)]">
-          Module en <strong>version bêta</strong> — détection automatique par règles (cohérence des totaux, coût unitaire vs médiane par catégorie, pic de consommation saisonnier vs historique du site).
-          Suivi partagé en base entre les membres de l&apos;organisation ; règles configurables à venir.
+          Les alertes sont classées par <strong>action à mener</strong> plutôt que par nature technique.
+          L&apos;écart de consommation se mesure en nombre de variations habituelles du site, et non en pourcentage fixe :
+          un site régulier et un site erratique ne sont pas jugés à la même aune.
+          Suivi partagé entre les membres de l&apos;organisation.
         </p>
       </div>
 
@@ -122,106 +177,91 @@ export function AnomaliesView({ docs, portfolio, focus }: {
         <>
           {open.length > 0 && (
             <>
-              {/* Valeur détectée — métrique phare du portefeuille */}
+              <div className="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-panel)] p-3">
+                <FilterSelect label="Commune" value={commune}
+                  onChange={(v) => { setCommune(v); setSite(""); }}
+                  options={[{ value: "", label: "Toutes les communes" }, ...communeOptions.map((c) => ({ value: c, label: c }))]} />
+                <FilterSelect label="Site" value={site} onChange={setSite}
+                  options={[{ value: "", label: "Tous les sites" }, ...siteOptions.map((s) => ({ value: s, label: s }))]} />
+                {hasFilter && (
+                  <button onClick={() => { setCommune(""); setSite(""); }}
+                    className="h-9 rounded-lg border border-[var(--kn-border)] px-3 text-[12px] font-medium text-[var(--kn-text-muted)] transition-colors hover:bg-[var(--kn-active)]">
+                    Réinitialiser
+                  </button>
+                )}
+                <span className="ml-auto self-center text-[12px] text-[var(--kn-text-muted)]">
+                  {filtered.length} alerte{filtered.length > 1 ? "s" : ""} ouverte{filtered.length > 1 ? "s" : ""}
+                  {hasFilter && ` sur ${open.length}`}
+                </span>
+              </div>
+
               {valueFound > 0 && (
                 <div className="mb-5 flex items-center gap-4 rounded-xl border border-[#fed7aa] bg-gradient-to-br from-[var(--kn-yellow-soft)] to-transparent px-5 py-4">
                   <span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-[#f97316] text-white">
                     <Euro className="size-6" />
                   </span>
                   <div>
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-[#9a3412]">Valeur détectée sur le portefeuille</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-[#9a3412]">Valeur détectée</p>
                     <p className="font-heading text-2xl font-bold tabular-nums text-[var(--kn-text)]">{eur(valueFound)}</p>
-                    <p className="text-[12px] text-[var(--kn-text-muted)]">Écarts de totaux et surcoûts au kWh vs médiane, cumulés sur les alertes ouvertes.</p>
+                    <p className="text-[12px] text-[var(--kn-text-muted)]">Écarts de totaux et surcoûts au kWh, cumulés sur les alertes affichées.</p>
                   </div>
                 </div>
               )}
 
-              {/* KPIs */}
               <div className="mb-5 grid grid-cols-3 gap-3">
-                <Kpi icon={<AlertTriangle className="size-4" />} label="Alertes ouvertes" value={String(open.length)} />
-                <Kpi icon={<MapPin className="size-4" />} label="Sites touchés" value={String(sites)} />
+                <Kpi icon={<AlertTriangle className="size-4" />} label="Alertes ouvertes" value={String(filtered.length)} />
+                <Kpi icon={<MapPin className="size-4" />} label="Sites touchés" value={String(sitesTouched)} />
                 <Kpi icon={<ShieldAlert className="size-4" />} label="Élevées" value={String(highCount)} />
               </div>
 
-              {/* Graphiques (survol → la carte correspondante « pop ») */}
-              <div className="mb-5 grid gap-4 lg:grid-cols-2">
-                <Panel title="Distribution par gravité" subtitle="Survolez une barre pour mettre en évidence les alertes">
-                  <ResponsiveContainer width="100%" height={240}>
-                    <BarChart data={distribution} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--kn-border)" vertical={false} />
-                      <XAxis dataKey="label" tick={{ fontSize: 12, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 12, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
-                      <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "var(--kn-active)" }} formatter={(v) => [`${v} alerte(s)`, "Alertes"]} />
-                      <Bar dataKey="value" radius={[6, 6, 0, 0]}
-                        onMouseEnter={(d) => setHoverSeverity(barSeverity(d))} onMouseLeave={() => setHoverSeverity(null)}>
-                        {distribution.map((d) => <Cell key={d.severity} fill={SEVERITY_COLOR[d.severity]} />)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </Panel>
+              {siteRanking.length > 1 && <SiteRanking rows={siteRanking} />}
 
-                <Panel title="Montant vs consommation" subtitle="Tout le portefeuille — les points colorés portent une alerte ouverte">
-                  <ResponsiveContainer width="100%" height={240}>
-                    <ScatterChart margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--kn-border)" />
-                      <XAxis type="number" dataKey="kwh" name="Consommation" unit=" kWh" tick={{ fontSize: 11, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
-                      <YAxis type="number" dataKey="amount" name="Montant" unit=" €" tick={{ fontSize: 11, fill: "var(--kn-text-muted)" }} stroke="var(--kn-border)" />
-                      <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }}
-                        formatter={(value, name) => (String(name) === "Consommation" ? [kwhFmt(Number(value)), name] : [eur(Number(value)), name])} />
-                      <Scatter data={scatter} onMouseEnter={(d) => setHoverInvoice(pointId(d))} onMouseLeave={() => setHoverInvoice(null)}>
-                        {scatter.map((p) => (
-                          <Cell key={p.id} fill={p.flagged && p.severity ? SEVERITY_COLOR[p.severity] : "#cbd5e1"} r={p.id === hoverInvoice ? 9 : 6} />
-                        ))}
-                      </Scatter>
-                    </ScatterChart>
-                  </ResponsiveContainer>
-                </Panel>
-              </div>
+              <div className="space-y-4">
+                {visibleSections.map((s) => {
+                  const items = bySection.get(s) ?? [];
+                  const isOpen = !collapsed.has(s);
+                  const Icon = SECTION_ICON[s];
+                  const high = items.filter((i) => i.severity === "high").length;
+                  return (
+                    <section key={s} className="rounded-xl border border-[var(--kn-border)] bg-[var(--kn-panel)]">
+                      <button onClick={() => toggleSection(s)} aria-expanded={isOpen}
+                        className="flex w-full items-center gap-3 px-4 py-3 text-left">
+                        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[var(--kn-yellow-soft)] text-[#ea580c]">
+                          <Icon className="size-4" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="text-[14px] font-semibold text-[var(--kn-text)]">{SECTION_META[s].label}</span>
+                            <span className="rounded-full bg-[var(--kn-value-box)] px-2 py-0.5 text-[11px] font-medium tabular-nums text-[var(--kn-text-muted)]">{items.length}</span>
+                            {high > 0 && (
+                              <span className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+                                style={{ color: SEVERITY_COLOR.high, background: `${SEVERITY_COLOR.high}1f` }}>
+                                {high} élevée{high > 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </span>
+                          <span className="mt-0.5 block text-[12px] text-[var(--kn-text-muted)]">{SECTION_META[s].hint}</span>
+                        </span>
+                        <ChevronDown className={cx("size-4 shrink-0 text-[var(--kn-text-muted)] transition-transform", !isOpen && "-rotate-90")} />
+                      </button>
 
-              {/* Filtre gravité */}
-              <div className="mb-3 flex flex-wrap items-center gap-1.5">
-                {(["all", ...SEV_ORDER] as const).map((s) => (
-                  <button key={s} onClick={() => setFilter(s)}
-                    className={cx("rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors",
-                      filter === s ? "border-[#f97316] bg-[#f97316] text-white" : "border-[var(--kn-border)] text-[var(--kn-text-muted)] hover:border-[#fb923c]")}>
-                    {s === "all" ? "Toutes" : SEVERITY_LABEL[s]}
-                  </button>
-                ))}
-              </div>
-
-              {/* Liste d'actions */}
-              <div className="space-y-2">
-                {shown.map((it) => (
-                  <div key={it.id}
-                    onMouseEnter={() => setHoverInvoice(it.invoiceId)} onMouseLeave={() => setHoverInvoice(null)}
-                    className={cx("relative flex items-center justify-between gap-3 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-3 transition-all",
-                      isHot(it) && "z-10 scale-[1.02] shadow-lg")}>
-                    <div className="flex min-w-0 items-start gap-3">
-                      <SeverityBadge severity={it.severity} />
-                      <div className="min-w-0">
-                        <p className="text-[13px] text-[var(--kn-text)]">
-                          {it.message}
-                          {it.valueEur != null && Math.abs(it.valueEur) >= 1 && (
-                            <span className="ml-1.5 font-semibold text-[#ea580c]">({eur(Math.abs(it.valueEur))})</span>
-                          )}
-                        </p>
-                        <Link href={`/documents/extraction?id=${it.invoiceId}`} className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-[var(--kn-text-muted)] hover:text-[#ea580c]">
-                          {it.number} · {it.site} · {it.commune} <ExternalLink className="size-3" />
-                        </Link>
-                      </div>
-                    </div>
-                    <button onClick={() => resolve(it.id)}
-                      className="shrink-0 rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]">
-                      Marquer résolue
-                    </button>
-                  </div>
-                ))}
-                {shown.length === 0 && <p className="py-6 text-center text-[12px] text-[var(--kn-text-muted)]">Aucune alerte ouverte pour ce filtre.</p>}
+                      {isOpen && (
+                        <div className="space-y-2 px-3 pb-3">
+                          {items.map((it) => (
+                            <AlertCard key={it.id} item={it} context={context} focus={focus} onResolve={resolve} />
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+                {visibleSections.length === 0 && (
+                  <p className="py-8 text-center text-[13px] text-[var(--kn-text-muted)]">Aucune alerte ouverte pour ces filtres.</p>
+                )}
               </div>
             </>
           )}
 
-          {/* Historique des résolutions */}
           {history.length > 0 && (
             <div className="mt-8">
               <h2 className="mb-2 flex items-center gap-2 text-[14px] font-semibold text-[var(--kn-text)]">
@@ -255,12 +295,106 @@ export function AnomaliesView({ docs, portfolio, focus }: {
   );
 }
 
+function AlertCard({ item, context, focus, onResolve }: {
+  item: FeedItem;
+  context?: AnomalyContext | null;
+  focus?: string;
+  onResolve: (id: string) => void;
+}) {
+  const siteId = context?.siteByInvoice[item.invoiceId];
+  const series = siteId ? context?.seriesBySite[siteId] : undefined;
+  // La sparkline n'a de sens que là où l'alerte porte sur la consommation : sur un total
+  // TTC incohérent, l'historique kWh du site n'explique rien et n'ajoute que du bruit.
+  const showSpark = item.section === "consommation" && series && series.points.length >= 2;
+
+  return (
+    <div className={cx(
+      "flex items-center justify-between gap-3 rounded-xl border bg-[var(--kn-card)] p-3 transition-all",
+      item.invoiceId === focus ? "border-[#f97316] shadow-md" : "border-[var(--kn-border)]",
+    )}>
+      <div className="flex min-w-0 items-start gap-3">
+        <SeverityBadge severity={item.severity} />
+        <div className="min-w-0">
+          <p className="text-[13px] text-[var(--kn-text)]">
+            <span className="mr-1.5 rounded bg-[var(--kn-value-box)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--kn-text-muted)]">
+              {typeLabel(item.type)}
+            </span>
+            {item.message}
+            {item.valueEur != null && Math.abs(item.valueEur) >= 1 && (
+              <span className="ml-1.5 font-semibold text-[#ea580c]">({eur(Math.abs(item.valueEur))})</span>
+            )}
+          </p>
+          <Link href={`/documents/extraction?id=${item.invoiceId}`}
+            className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-[var(--kn-text-muted)] hover:text-[#ea580c]">
+            {item.number} · {item.site} · {item.commune} <ExternalLink className="size-3" />
+          </Link>
+        </div>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-3">
+        {showSpark && series && (
+          <span className="hidden sm:block"
+            title={`Historique du site : ${series.points.length} factures. Bande = variation habituelle, point coloré = cette facture.`}>
+            <Sparkline points={series.points} highlightInvoiceId={item.invoiceId}
+              baseline={series.baseline} band={series.band} severity={item.severity} />
+          </span>
+        )}
+        <button onClick={() => onResolve(item.id)}
+          className="rounded-lg border border-[var(--kn-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--kn-text)] transition-colors hover:bg-[var(--kn-active)]">
+          Marquer résolue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SiteRanking({ rows }: {
+  rows: { site: string; commune: string; anomalies: number; invoices: number; rate: number }[];
+}) {
+  const max = Math.max(...rows.map((r) => r.rate), 0.0001);
+  return (
+    <div className="mb-5 rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
+      <h3 className="text-[14px] font-semibold text-[var(--kn-text)]">Sites les plus touchés</h3>
+      <p className="mb-3 text-[12px] text-[var(--kn-text-muted)]">
+        Part des factures du site portant une alerte — et non nombre brut, qui ferait toujours ressortir les sites les plus documentés.
+      </p>
+      <div className="space-y-1.5">
+        {rows.map((r) => (
+          <div key={`${r.commune}/${r.site}`} className="flex items-center gap-3">
+            <span className="w-40 shrink-0 truncate text-[12px] text-[var(--kn-text)]" title={`${r.site} · ${r.commune}`}>{r.site}</span>
+            <span className="h-2.5 flex-1 overflow-hidden rounded-full bg-[var(--kn-value-box)]">
+              <span className="block h-full rounded-full bg-[#f97316]" style={{ width: `${Math.max(3, (r.rate / max) * 100)}%` }} />
+            </span>
+            <span className="w-24 shrink-0 text-right text-[12px] tabular-nums text-[var(--kn-text-muted)]">
+              {Math.round(r.rate * 100)}% · {r.anomalies}/{r.invoices}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SeverityBadge({ severity }: { severity: Severity }) {
   return (
     <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
       style={{ color: SEVERITY_COLOR[severity], background: `${SEVERITY_COLOR[severity]}1f` }}>
       <AlertTriangle className="size-3" /> {SEVERITY_LABEL[severity]}
     </span>
+  );
+}
+
+function FilterSelect({ label, value, onChange, options }: {
+  label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[];
+}) {
+  return (
+    <div>
+      <label className="mb-1 block text-[11px] font-medium text-[var(--kn-text-muted)]">{label}</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        className="h-9 max-w-56 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2.5 text-[13px] text-[var(--kn-text)] focus:border-[var(--kn-text)] focus:outline-none">
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
   );
 }
 
@@ -282,16 +416,6 @@ function Kpi({ icon, label, value }: { icon: React.ReactNode; label: string; val
         <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--kn-text-muted)]">{label}</p>
         <p className="truncate text-[16px] font-bold tabular-nums text-[var(--kn-text)]">{value}</p>
       </div>
-    </div>
-  );
-}
-
-function Panel({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
-      <h3 className="text-[14px] font-semibold text-[var(--kn-text)]">{title}</h3>
-      <p className="mb-3 text-[12px] text-[var(--kn-text-muted)]">{subtitle}</p>
-      {children}
     </div>
   );
 }

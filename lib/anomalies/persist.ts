@@ -6,6 +6,15 @@ import { computePortfolioAnomalies, type AnomalyInvoiceInput, type AnomalyLineIn
 // aussi bien depuis une route API que depuis un script standalone (service-role).
 type AnySupabaseClient = SupabaseClient;
 
+/**
+ * Types effacés puis réécrits à chaque recalcul.
+ *
+ * `cout_kwh_bas` et `conso_manquante` n'y figurent plus comme types produits — leurs
+ * règles ont été retirées — mais restent dans cette liste de purge : tant qu'un
+ * environnement peut encore en héberger, chaque recalcul les balaie. Sans ça, des
+ * lignes orphelines survivraient indéfiniment, puisque rien ne les régénère ni ne
+ * les supprime.
+ */
 const RECOMPUTED_TYPES = ["cout_kwh", "cout_kwh_bas", "consumption_spike", "conso_manquante"];
 
 /** SELECT paginé (PostgREST limite à 1000 lignes par requête). */
@@ -26,15 +35,15 @@ async function selectAll<T>(
 }
 
 /**
- * Recalcule les anomalies "portefeuille" (coût kWh, pic de consommation,
- * conso manquante) pour toute une organisation et remplace les lignes
- * existantes de ces types dans `anomalies` — en conservant le statut
- * `resolved` des anomalies qui réapparaissent à l'identique (même
- * invoice_id + type) pour ne pas rouvrir ce qu'un utilisateur a déjà traité.
+ * Recalcule les anomalies "portefeuille" (coût kWh, consommation anormale) pour
+ * toute une organisation et remplace les lignes existantes de ces types dans
+ * `anomalies` — en conservant le statut `resolved` des anomalies qui réapparaissent
+ * à l'identique (même invoice_id + type) pour ne pas rouvrir ce qu'un utilisateur a
+ * déjà traité.
  *
  * Les checks structurels à l'extraction (ttc_mismatch, index_inversion,
- * date_inversion, tarif_type_mismatch, hphc_same_price…) ne sont PAS touchés
- * ici — ils restent gérés à l'insertion dans app/api/invoices/route.ts.
+ * date_inversion, tarif_type_mismatch…) ne sont PAS touchés ici — ils restent
+ * gérés à l'insertion dans app/api/invoices/route.ts.
  */
 export async function recomputeAndPersistAnomalies(
   supabase: AnySupabaseClient,
