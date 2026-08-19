@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { getUserContext } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -75,6 +76,57 @@ export async function assignUserRole(userId: string, role: UserRole, communeId: 
 
   revalidatePath("/parametres");
   return { success: true };
+}
+
+/**
+ * Invitation d'un utilisateur dans l'organisation courante.
+ *
+ * C'était le chaînon manquant du « rôle par défaut » : sans flux de création dans
+ * l'application, les comptes naissaient dans le dashboard Supabase et le DEFAULT
+ * 'org_member' de la colonne n'était jamais déclenché. L'insertion ci-dessous omet donc
+ * volontairement `role` — c'est la base qui décide, et elle décide au plus restreint.
+ *
+ * L'URL de retour est déduite des en-têtes de la requête (NEXT_PUBLIC_SITE_URL prime si
+ * elle est définie) : cette variable n'existe dans aucun des .env du projet, s'y fier
+ * seule produirait des liens « undefined/login ».
+ */
+export async function inviteUser(email: string) {
+  const ctx = await getUserContext();
+  if (!ctx || ctx.role !== "org_admin") return { error: "Non autorisé." };
+
+  const adresse = email.trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adresse)) return { error: "Adresse e-mail invalide." };
+
+  const entetes = await headers();
+  const hote = entetes.get("x-forwarded-host") ?? entetes.get("host");
+  const protocole = entetes.get("x-forwarded-proto") ?? "https";
+  const base = process.env.NEXT_PUBLIC_SITE_URL ?? (hote ? `${protocole}://${hote}` : null);
+  if (!base) return { error: "Impossible de déterminer l'adresse de l'application." };
+
+  const admin = createAdminClient();
+  const { data, error } = await admin.auth.admin.inviteUserByEmail(adresse, {
+    redirectTo: `${base}/login`,
+  });
+  if (error || !data.user) {
+    // Cas courant : l'adresse existe déjà côté Auth. On le dit sans exposer le détail.
+    console.error(`[authz] Invitation refusée org=${ctx.orgId} : ${error?.message ?? "aucun utilisateur renvoyé"}`);
+    return { error: "L'invitation a échoué. Cette adresse est peut-être déjà utilisée." };
+  }
+
+  const { error: erreurRole } = await admin
+    .from("user_roles")
+    .insert({ user_id: data.user.id, org_id: ctx.orgId });
+  if (erreurRole) {
+    // Le compte Auth existe désormais sans habilitation : getUserContext() le refusera
+    // (échec fermé). On le signale pour que l'administrateur reprenne la main.
+    console.error(`[authz] Compte invité sans ligne user_roles org=${ctx.orgId} user=${data.user.id} : ${erreurRole.message}`);
+    return {
+      error: "Le compte a été créé mais son rattachement a échoué. Attribuez-lui un rôle manuellement.",
+    };
+  }
+
+  revalidatePath("/parametres");
+  return { success: true as const };
 }
 
 /* ── Communes (SCRUM-14) ──────────────────────────────────────────────────────

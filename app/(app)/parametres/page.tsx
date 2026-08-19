@@ -8,6 +8,7 @@ import { getCommunesDisponibles } from "@/lib/communes/disponibles";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RoleRow } from "@/components/parametres/role-row";
 import { CommuneForm } from "@/components/parametres/commune-form";
+import { InviteForm } from "@/components/parametres/invite-form";
 import { CommuneCard, type CommuneAffichee } from "@/components/parametres/commune-card";
 
 export default async function ParametresPage({
@@ -105,8 +106,9 @@ export default async function ParametresPage({
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
           <CardTitle className="text-sm font-medium text-slate-700">Utilisateurs &amp; rôles</CardTitle>
+          <InviteForm />
         </CardHeader>
         <CardContent>
           <table className="w-full text-left">
