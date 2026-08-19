@@ -4,6 +4,8 @@ import { revalidatePath } from "next/cache";
 import { getUserContext } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { isUserRole } from "@/lib/authz";
+import type { UserRole } from "@/lib/types/database";
 import { REFERENTIEL_MARTINIQUE } from "@/lib/communes/referentiel-martinique";
 import { scoreCommune } from "@/lib/extraction/matching";
 import {
@@ -14,22 +16,62 @@ import {
   type ModifierCommuneInput,
 } from "@/lib/communes/validation";
 
-export async function assignUserRole(userId: string, role: "org_admin" | "org_member", communeId: string | null) {
+/**
+ * Attribution d'un rôle. Réservée à l'administrateur : un superviseur pilote la donnée,
+ * pas les habilitations.
+ *
+ * Passe par le client service-role, donc hors RLS — d'où la double vérification
+ * explicite : appartenance à la même organisation, puis verrou « dernier administrateur ».
+ * Ce dernier existe aussi en base (trigger trg_prevent_last_admin_removal) ; on le double
+ * ici uniquement pour rendre un message lisible plutôt qu'une erreur Postgres brute.
+ */
+export async function assignUserRole(userId: string, role: UserRole, communeId: string | null) {
   const ctx = await getUserContext();
   if (!ctx || ctx.role !== "org_admin") return { error: "Non autorisé." };
+  if (!isUserRole(role)) return { error: "Rôle inconnu." };
 
   const admin = createAdminClient();
-  const { data: existing } = await admin.from("user_roles").select("org_id").eq("user_id", userId).maybeSingle();
+  const { data: existing } = await admin
+    .from("user_roles")
+    .select("org_id, role")
+    .eq("user_id", userId)
+    .maybeSingle();
   if (existing && existing.org_id !== ctx.orgId) {
     return { error: "Cet utilisateur appartient déjà à une autre organisation." };
   }
 
-  await admin.from("user_roles").upsert({
+  // Une organisation sans administrateur n'est plus gérable depuis l'application : plus
+  // personne ne peut réattribuer de rôle, la remise en état passe par la base. Le cas le
+  // plus courant est l'administrateur unique qui se rétrograde lui-même.
+  if (existing?.role === "org_admin" && role !== "org_admin") {
+    const { count } = await admin
+      .from("user_roles")
+      .select("user_id", { count: "exact", head: true })
+      .eq("org_id", ctx.orgId)
+      .eq("role", "org_admin");
+    if ((count ?? 0) <= 1) {
+      return {
+        error:
+          "Impossible de retirer le dernier administrateur de l'organisation. Nommez d'abord un autre administrateur.",
+      };
+    }
+  }
+
+  // La commune n'est qu'un préremplissage d'écran pour l'agent qui dépose des factures.
+  // Elle n'a pas de sens au-dessus du membre : superviseur comme administrateur
+  // travaillent au périmètre de l'organisation entière.
+  const { error } = await admin.from("user_roles").upsert({
     user_id: userId,
     role,
     org_id: ctx.orgId,
-    commune_id: role === "org_admin" ? null : communeId,
+    commune_id: role === "org_member" ? communeId : null,
   });
+  if (error) {
+    // Le trigger parle français et s'adresse déjà à l'utilisateur : on le laisse passer.
+    if (error.message.includes("dernier administrateur")) return { error: error.message };
+    console.error(`[authz] Échec d'attribution de rôle org=${ctx.orgId} user=${userId} : ${error.message}`);
+    return { error: "L'attribution du rôle a échoué. Réessayez ou signalez-le à votre administrateur." };
+  }
 
   revalidatePath("/parametres");
   return { success: true };

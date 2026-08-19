@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { requireRole } from "@/lib/auth-guard";
+import { isUserRole } from "@/lib/authz";
+import type { UserRole } from "@/lib/types/database";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { getCommunesDisponibles } from "@/lib/communes/disponibles";
@@ -118,12 +120,16 @@ export default async function ParametresPage({
             <tbody>
               {users.filter((u) => u != null).map((u) => {
                 const r = roleMap.get(u.id);
+                // Une valeur inconnue (rôle d'avant le multi-tenant, ligne bricolée en base)
+                // retombe sur le rôle le plus restreint plutôt que d'être affichée telle quelle.
+                const roleBrut = r?.role;
+                const roleAffiche: UserRole = isUserRole(roleBrut) ? roleBrut : "org_member";
                 return (
                   <RoleRow
                     key={u.id}
                     userId={u.id}
                     email={u.email ?? u.id}
-                    role={(r?.role as "org_admin" | "org_member") ?? "org_member"}
+                    role={roleAffiche}
                     communeId={r?.commune_id ?? null}
                     communes={communesActives}
                   />
