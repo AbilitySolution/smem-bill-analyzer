@@ -59,7 +59,7 @@ const GUIDES: Guide[] = [
   },
   {
     icon: AlertTriangle, title: "Anomalies", href: "/anomalies", hrefLabel: "Ouvrir Anomalies", role:
-      "Repérer les factures atypiques (version bêta) : un contrôle automatique de démonstration.",
+      "Repérer les factures atypiques : un contrôle automatique de démonstration.",
     steps: [
       "Les alertes sont classées par gravité (élevée / moyenne / faible).",
       "Survolez un point du graphique « Montant vs consommation » : l'alerte correspondante ressort dans la liste.",

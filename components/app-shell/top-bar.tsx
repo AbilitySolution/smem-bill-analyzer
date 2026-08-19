@@ -14,7 +14,7 @@ const DESTINATIONS: Dest[] = [
   { label: "Extraction", href: "/documents/extraction", hint: "Éditer une facture", icon: ScanText },
   { label: "Rapports", href: "/rapport-excel", hint: "Rapports prédéfinis + export personnalisé", icon: FileSpreadsheet },
   { label: "Analyse de consommation", href: "/analyses", hint: "Graphiques kWh / € / c€", icon: Gauge },
-  { label: "Anomalies", href: "/anomalies", hint: "Contrôles & alertes (version bêta)", icon: AlertTriangle },
+  { label: "Anomalies", href: "/anomalies", hint: "Contrôles & alertes", icon: AlertTriangle },
   { label: "Connecteurs", href: "/connecteurs", hint: "Sources de données externes (version bêta)", icon: Plug },
   { label: "Importer une facture", href: "/upload", hint: "OCR d'un nouveau document", icon: UploadCloud },
   { label: "Documentation", href: "/documentation", hint: "Guide d'utilisation des pages", icon: BookOpen },

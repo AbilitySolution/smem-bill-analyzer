@@ -104,14 +104,13 @@ export function AnomaliesView({ docs, portfolio, focus }: {
       <div className="mb-1 flex items-center gap-2.5">
         <AlertTriangle className="size-6 text-[#f59e0b]" strokeWidth={1.9} />
         <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Anomalies</h1>
-        <span className="rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#9a3412]">Version bêta</span>
       </div>
 
-      {/* Disclaimer version bêta */}
+      {/* Ce que la détection couvre, et ce qu'elle ne couvre pas encore. */}
       <div className="mb-5 mt-3 flex items-start gap-2.5 rounded-xl border border-[#fed7aa] bg-[var(--kn-yellow-soft)] px-4 py-3">
         <Info className="mt-0.5 size-4 shrink-0 text-[#ea580c]" />
         <p className="text-[13px] text-[var(--kn-text)]">
-          Module en <strong>version bêta</strong> — détection automatique par règles (cohérence des totaux, coût unitaire vs médiane par catégorie, pic de consommation saisonnier vs historique du site).
+          Détection automatique par règles : cohérence des totaux, coût unitaire vs médiane par catégorie, pic de consommation saisonnier vs historique du site.
           Suivi partagé en base entre les membres de l&apos;organisation ; règles configurables à venir.
         </p>
       </div>

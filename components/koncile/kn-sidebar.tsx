@@ -63,7 +63,7 @@ const mainNav: NavItem[] = [
       { href: "/analyses/couverture", label: "Couverture", match: (p) => p === "/analyses/couverture" },
     ],
   },
-  { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
+  { href: "/anomalies", label: "Anomalies", icon: AlertTriangle },
   { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true, minRole: "org_admin" },
 ];
 
