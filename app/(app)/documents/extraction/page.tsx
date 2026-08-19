@@ -1,6 +1,5 @@
-import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { getUserContext } from "@/lib/auth";
+import { requireRole } from "@/lib/auth-guard";
 import { PdfViewer } from "@/components/factures/pdf-viewer";
 import { SplitPane } from "@/components/factures/split-pane";
 import { InvoiceEditPanel, type InvoiceEditData } from "@/components/factures/invoice-edit-panel";
@@ -35,8 +34,7 @@ async function selectAllInvoices(
 
 export default async function ExtractionPage({ searchParams }: { searchParams: Promise<{ id?: string; review?: string }> }) {
   const { id, review } = await searchParams;
-  const ctx = await getUserContext();
-  if (!ctx) redirect("/login");
+  const ctx = await requireRole("org_supervisor");
   const supabase = await createClient();
 
   /**
@@ -100,8 +98,7 @@ function EmptyState() {
 
 async function Detail({ id }: { id: string }) {
   const supabase = await createClient();
-  const ctx = await getUserContext();
-  if (!ctx) redirect("/login");
+  const ctx = await requireRole("org_supervisor");
 
   const [{ data: invoice }, { data: communes }] = await Promise.all([
     supabase.from("invoices").select("*, clients(*), contracts(*), sites(*), invoice_tags(tags(id, label, color))").eq("id", id).single(),

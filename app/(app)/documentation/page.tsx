@@ -1,3 +1,4 @@
+import { requireRole } from "@/lib/auth-guard";
 import Link from "next/link";
 import {
   FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, Plug, UploadCloud, SlidersHorizontal,
@@ -93,7 +94,11 @@ const GUIDES: Guide[] = [
   },
 ];
 
-export default function GuidePage() {
+export default async function GuidePage() {
+  // La documentation décrit le paramétrage de l'extraction : elle s'adresse aux profils
+  // qui pilotent la donnée, pas à l'opérateur qui dépose des factures.
+  await requireRole("org_supervisor");
+
   return (
     <div className="mx-auto max-w-4xl px-8 py-6">
       <p className="mb-5 text-[13px] text-[var(--kn-text-muted)]">

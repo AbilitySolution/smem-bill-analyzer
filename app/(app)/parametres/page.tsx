@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-import { getUserContext } from "@/lib/auth";
+import { requireRole } from "@/lib/auth-guard";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { getCommunesDisponibles } from "@/lib/communes/disponibles";
@@ -17,11 +16,10 @@ export default async function ParametresPage({
   const sp = await searchParams;
   const afficherArchivees = sp.archivees === "1";
 
-  const ctx = await getUserContext();
-  if (!ctx) redirect("/login");
-  if (ctx.role !== "org_admin") {
-    return <p className="text-sm text-slate-500">Réservé aux administrateurs.</p>;
-  }
+  // Renvoi vers /documents plutôt qu'un message « Réservé aux administrateurs » : la page
+  // interrogeait la base avant de refuser, et le message confirmait au passage l'existence
+  // du contenu à qui tentait l'URL.
+  const ctx = await requireRole("org_admin");
 
   const supabase = await createClient();
   // org_id explicite en plus de la RLS : le reste du code le fait déjà, cette page était

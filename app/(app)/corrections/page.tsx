@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-import { getUserContext } from "@/lib/auth";
+import { requireRole } from "@/lib/auth-guard";
 import { getCorrectionItems } from "@/lib/data/corrections";
 import { CorrectionsView } from "@/components/corrections/corrections-view";
 
@@ -21,8 +20,9 @@ export default async function CorrectionsPage({
 }: {
   searchParams: Promise<{ page?: string }>;
 }) {
-  const ctx = await getUserContext();
-  if (!ctx) redirect("/login");
+  // Contrôle qualité : le Membre importe et consulte, il ne corrige pas ce qui est
+  // déjà en base et déjà compté dans les analyses.
+  const ctx = await requireRole("org_supervisor");
 
   const { page } = await searchParams;
   const allItems = await getCorrectionItems();

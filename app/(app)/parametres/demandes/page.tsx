@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-import { getUserContext } from "@/lib/auth";
+import { requireRole } from "@/lib/auth-guard";
 import { createClient } from "@/lib/supabase/server";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CreateLinkForm } from "@/components/parametres/create-link-form";
@@ -10,8 +9,9 @@ import { formatDate } from "@/lib/format";
 import { FileText } from "lucide-react";
 
 export default async function DemandesPage() {
-  const ctx = await getUserContext();
-  if (!ctx) redirect("/login");
+  // Les liens de dépôt donnent un accès non authentifié au dépôt de factures :
+  // leur création reste une prérogative d'administrateur.
+  const ctx = await requireRole("org_admin");
 
   const supabase = await createClient();
   const { data: communes } = await supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).eq("archived", false).order("nom");

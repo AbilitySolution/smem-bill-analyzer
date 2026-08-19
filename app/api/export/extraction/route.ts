@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { getUserContextWithRole } from "@/lib/auth";
 import { toCsv } from "@/lib/csv";
 
 export async function GET() {
-  const supabase = await createClient();
-  const { data: authData } = await supabase.auth.getUser();
-  if (!authData.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Revérification côté handler : le middleware n'est qu'un filet, il ne protège pas
+  // d'un appel qui l'aurait contourné (rewrite, appel serveur à serveur).
+  if (!(await getUserContextWithRole("org_supervisor"))) {
+    return NextResponse.json({ error: "Non autorisé." }, { status: 403 });
   }
+
+  const supabase = await createClient();
 
   const { data: invoices } = await supabase
     .from("invoices")
