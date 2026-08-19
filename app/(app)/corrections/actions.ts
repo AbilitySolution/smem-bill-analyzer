@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { getUserContext } from "@/lib/auth";
+import { getUserContextWithRole } from "@/lib/auth";
 
 /**
  * « Corriger plus tard » : les factures listées sont acceptées telles quelles.
@@ -13,10 +13,16 @@ import { getUserContext } from "@/lib/auth";
  *
  * Aucune colonne « ignoré » n'est ajoutée : le statut existant porte déjà exactement
  * ce sens, et une seconde notion de « vu » se serait désynchronisée de la première.
+ *
+ * Réservée au Superviseur, comme la page /corrections qui l'appelle. La garde est ici et
+ * pas seulement sur la page : un Server Action est un point d'entrée HTTP à part entière,
+ * il ne traverse pas le proxy et son identifiant est lisible dans un chunk `_next/static`
+ * — que le matcher exclut. Sans cette ligne, un Membre pouvait basculer en masse des
+ * factures de `pending_review` à `reviewed` sans jamais ouvrir l'écran.
  */
 export async function dismissCorrections(invoiceIds: string[]): Promise<{ ok: boolean; count: number; error?: string }> {
-  const ctx = await getUserContext();
-  if (!ctx) return { ok: false, count: 0, error: "Session expirée." };
+  const ctx = await getUserContextWithRole("org_supervisor");
+  if (!ctx) return { ok: false, count: 0, error: "Non autorisé." };
   if (!invoiceIds.length) return { ok: true, count: 0 };
 
   const supabase = await createClient();

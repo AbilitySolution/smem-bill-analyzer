@@ -76,6 +76,21 @@ export const ROUTE_RULES: readonly RouteRule[] = [
  */
 export const API_LECTURE_OUVERTE: readonly string[] = ["/api/custom-fields"] as const;
 
+/**
+ * Routes délibérément ABSENTES de la matrice, parce qu'un préfixe ne sait pas les
+ * découper, et gardées dans leur handler :
+ *
+ * - `PATCH /api/invoices/[id]` — correction d'une facture, réservée au superviseur.
+ *   Un préfixe `/api/invoices` capturerait aussi le `POST` de collection, qui est
+ *   l'enregistrement d'une facture depuis /upload/review : l'usage principal du membre.
+ * - `dismissCorrections()` (app/(app)/corrections/actions.ts) — un Server Action ne
+ *   traverse pas le proxy, aucune règle de chemin ne peut l'atteindre.
+ *
+ * Ajouter une règle ici pour l'une des deux ne les protégerait pas mieux et casserait
+ * l'import de documents. Cette liste est documentaire : elle existe pour que la prochaine
+ * lecture de la matrice ne conclue pas à un oubli.
+ */
+
 /** Correspondance sur segment complet : `/champs` ne doit pas capturer `/champs-perso`. */
 function matchesPrefix(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(prefix + "/");

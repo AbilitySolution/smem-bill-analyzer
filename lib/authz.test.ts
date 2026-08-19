@@ -79,7 +79,6 @@ describe("requiredRoleFor — chaque ligne de la matrice", () => {
     ["/analyses/couverture", null],
     ["/rapport-excel", null],
     ["/anomalies", null],
-    ["/api/invoices", null],
     ["/api/export/invoices", null],
   ];
 
@@ -123,6 +122,23 @@ describe("requiredRoleFor — ordre et correspondance sur segment complet", () =
   it("la barre oblique finale ne change pas la décision", () => {
     expect(requiredRoleFor("/parametres/")).toBe("org_admin");
     expect(requiredRoleFor("/")).toBeNull();
+  });
+});
+
+describe("routes gardées hors matrice", () => {
+  // Ces deux-là sont protégées dans leur handler, pas par un préfixe. Le test fige la
+  // décision : voir un `null` ici doit se lire « choix », pas « oubli ».
+  it("/api/invoices reste hors matrice — le POST de collection est l'import du membre", () => {
+    expect(requiredRoleFor("/api/invoices")).toBeNull();
+    // Le PATCH de correction est réservé au superviseur, mais dans le handler : une
+    // règle de préfixe ne sait pas distinguer la collection de l'élément.
+    expect(requiredRoleFor("/api/invoices/8f1d-…")).toBeNull();
+  });
+
+  it("/corrections garde la page, pas le Server Action qu'elle appelle", () => {
+    // Rappel de la limite du proxy : dismissCorrections() est un point d'entrée HTTP
+    // distinct, gardé par getUserContextWithRole("org_supervisor") dans actions.ts.
+    expect(requiredRoleFor("/corrections")).toBe("org_supervisor");
   });
 });
 

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getUserContext } from "@/lib/auth";
+import { getUserContextWithRole } from "@/lib/auth";
 import { diffInvoiceSnapshot, type InvoiceSnapshot } from "@/lib/extraction/diff";
 import { z } from "zod";
 
@@ -80,13 +80,27 @@ const updateSchema = z.object({
   custom_fields: z.array(customFieldEntrySchema).optional().default([]),
 });
 
+/**
+ * Correction d'une facture déjà en base — réservée au Superviseur.
+ *
+ * Cette route est le seul point d'écriture derrière `InvoiceEditPanel`, qui n'existe que
+ * sur /documents/extraction (page superviseur). Sans la garde ci-dessous, un Membre
+ * pouvait réécrire n'importe quelle facture de son organisation en appelant l'API
+ * directement : les trois couches posées sur la page ne protègent que la page.
+ *
+ * Volontairement absente de la matrice de lib/authz.ts : celle-ci raisonne par préfixe,
+ * et `/api/invoices` couvrirait aussi le POST de collection — l'enregistrement d'une
+ * facture depuis /upload/review, c'est-à-dire l'usage principal du Membre. Même piège
+ * que /api/custom-fields, résolu ici au niveau du handler plutôt que par une exemption
+ * de plus dans la matrice.
+ */
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = await createClient();
-  // getUserContext plutôt que getUser seul : la création d'une définition de champ
+  // getUserContextWithRole plutôt que getUser seul : la création d'une définition de champ
   // personnalisé a besoin de l'org (colonne NOT NULL, et exigée par la policy RLS).
-  const ctx = await getUserContext();
-  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const ctx = await getUserContextWithRole("org_supervisor");
+  if (!ctx) return NextResponse.json({ error: "Non autorisé." }, { status: 403 });
 
   const body = await request.json();
   const parsed = updateSchema.safeParse(body);

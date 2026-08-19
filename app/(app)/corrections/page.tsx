@@ -22,7 +22,7 @@ export default async function CorrectionsPage({
 }) {
   // Contrôle qualité : le Membre importe et consulte, il ne corrige pas ce qui est
   // déjà en base et déjà compté dans les analyses.
-  const ctx = await requireRole("org_supervisor");
+  await requireRole("org_supervisor");
 
   const { page } = await searchParams;
   const allItems = await getCorrectionItems();
