@@ -7,6 +7,7 @@ studio) en cas de retour arrière.
 
 | Ordre | Fichier | Effet | Destructif ? |
 |---|---|---|---|
+| −4 | `20260819000000_user_roles_three_tiers_down.sql` | Rétrograde les superviseurs en membres, restaure le `CHECK` à deux valeurs, retire le défaut `org_member`, `is_org_supervisor()` et le verrou « dernier administrateur » | 🟠 Partiel — la distinction Superviseur/Membre est perdue et non reconstituable ; **relever la liste des `org_supervisor` avant d'exécuter** |
 | −3 | `20260817044616_postgrest_table_grants_down.sql` | Retire uniquement les privilèges par défaut : les tables futures n'héritent plus des droits PostgREST | 🔴 **Ne pas jouer sur la prod.** Le retrait des droits sur les tables existantes est commenté à dessein — il couperait l'application (403 sur toute l'API) |
 | −2 | `20260817042337_communes_creation_down.sql` | Retire `archived`, remet `code_insee` à NULL et facultatif, restaure les coordonnées d'avant SCRUM-14 | 🟠 Partiel — perd l'état d'archivage et le `code_insee` des communes créées depuis, et **réintroduit des coordonnées fausses de plus de 10 km** sur Case Pilote, Ducos et Le Marigot |
 | −1b | `20260817032642_collect_batches_sub_minute_down.sql` | Repasse la collecte des lots Claude de 20 s à une fois par minute. **Ne retire pas** le bail sur `list_batches_to_collect`, conservé à dessein | Non — les factures remontent jusqu'à 40 s plus tard, aucun lot perdu |
