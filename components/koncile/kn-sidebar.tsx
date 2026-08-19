@@ -178,8 +178,10 @@ export function AbilitySidebar({
 
         {navAdmin.length > 0 && (
           <>
+            {/* Le superviseur n'y voit que la Documentation : lui annoncer « Administration »
+                lui promettrait des droits qu'il n'a pas. */}
             <p className="px-2.5 pb-1 pt-4 text-[10px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">
-              Administration
+              {hasAtLeast(role, "org_admin") ? "Administration" : "Pilotage"}
             </p>
             {navAdmin.map((item) => {
               const active = isActive(item.href);
