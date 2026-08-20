@@ -35,7 +35,7 @@ export function InviteForm() {
     <div className="flex flex-col items-end gap-1">
       <div className="flex items-end gap-2">
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500" htmlFor="invite-email">
+          <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]" htmlFor="invite-email">
             Inviter un utilisateur
           </label>
           <Input
@@ -54,7 +54,7 @@ export function InviteForm() {
         </Button>
       </div>
       {message && (
-        <p className={message.ton === "ok" ? "text-xs text-emerald-700" : "text-xs text-red-600"}>
+        <p className={message.ton === "ok" ? "text-xs text-emerald-700 dark:text-emerald-400" : "text-xs text-red-600 dark:text-red-400"}>
           {message.texte}
         </p>
       )}

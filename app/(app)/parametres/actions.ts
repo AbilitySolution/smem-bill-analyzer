@@ -79,6 +79,45 @@ export async function assignUserRole(userId: string, role: UserRole, communeId: 
 }
 
 /**
+ * Informations de présentation du compte courant. Ces métadonnées ne participent jamais
+ * aux décisions d'autorisation : les rôles restent dans `user_roles`.
+ */
+export async function updateOwnProfile(input: { fullName: string; avatarUrl: string }) {
+  const ctx = await getUserContext();
+  if (!ctx) return { error: "Non autorisé." };
+
+  const fullName = input.fullName.trim();
+  const avatarUrl = input.avatarUrl.trim();
+  if (fullName.length > 80) return { error: "Le nom ne peut pas dépasser 80 caractères." };
+
+  if (avatarUrl) {
+    try {
+      const url = new URL(avatarUrl);
+      if (url.protocol !== "https:" && url.protocol !== "http:") {
+        return { error: "L’adresse de la photo doit commencer par http:// ou https://." };
+      }
+    } catch {
+      return { error: "L’adresse de la photo n’est pas valide." };
+    }
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase.auth.updateUser({
+    data: {
+      full_name: fullName || null,
+      avatar_url: avatarUrl || null,
+    },
+  });
+  if (error) {
+    console.error(`[profil] Mise à jour impossible user=${ctx.userId}: ${error.message}`);
+    return { error: "Le profil n’a pas pu être enregistré. Réessayez." };
+  }
+
+  revalidatePath("/parametres/profil");
+  return { success: true as const };
+}
+
+/**
  * Invitation d'un utilisateur dans l'organisation courante.
  *
  * C'était le chaînon manquant du « rôle par défaut » : sans flux de création dans
@@ -266,7 +305,9 @@ async function basculerArchivage(id: string, archived: boolean) {
 /** Une commune touche presque toutes les vues — on les revalide toutes. */
 function revalidateVuesCommunes() {
   for (const chemin of [
-    "/parametres",
+    "/parametres/communes",
+    "/parametres/sites",
+    "/parametres/utilisateurs",
     "/analyses/consommation",
     "/rapport-excel",
     "/documents",

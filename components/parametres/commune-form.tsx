@@ -108,7 +108,7 @@ export function CommuneForm({
 
   if (toutesCreees) {
     return (
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-[var(--kn-text-muted)]">
         Toutes les communes de Martinique sont déjà enregistrées.
       </p>
     );
@@ -142,7 +142,7 @@ export function CommuneForm({
 
         <div className="space-y-4">
           <div>
-            <label className="mb-1 block text-xs font-medium text-slate-500">Commune</label>
+            <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">Commune</label>
             <Select value={choix} onValueChange={(v) => setChoix(v ?? "")}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Choisir une commune">{libelle}</SelectValue>
@@ -162,10 +162,10 @@ export function CommuneForm({
             </Select>
 
             {communeChoisie && (
-              <p className="mt-1 text-xs text-slate-500">Code INSEE {communeChoisie.codeInsee}</p>
+              <p className="mt-1 text-xs text-[var(--kn-text-muted)]">Code INSEE {communeChoisie.codeInsee}</p>
             )}
             {archiveeChoisie && (
-              <p className="mt-1 text-xs text-amber-700">
+              <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
                 Cette commune existe déjà mais elle est archivée. Elle sera réactivée avec ses
                 sites et ses factures, telle quelle.
               </p>
@@ -178,7 +178,7 @@ export function CommuneForm({
             <>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-500">
+                  <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">
                     Points lumineux
                   </label>
                   <Input
@@ -190,7 +190,7 @@ export function CommuneForm({
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-500">Armoires</label>
+                  <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">Armoires</label>
                   <Input
                     type="number"
                     min={0}
@@ -203,7 +203,7 @@ export function CommuneForm({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-500">
+                  <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">
                     Début des travaux
                   </label>
                   <Input
@@ -213,7 +213,7 @@ export function CommuneForm({
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-500">
+                  <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">
                     Fin des travaux
                   </label>
                   <Input
@@ -226,7 +226,7 @@ export function CommuneForm({
             </>
           )}
 
-          {erreur && <p className="text-sm text-red-600">{erreur}</p>}
+          {erreur && <p className="text-sm text-red-600 dark:text-red-400">{erreur}</p>}
         </div>
 
         <DialogFooter>
