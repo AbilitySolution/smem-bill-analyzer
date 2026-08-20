@@ -73,19 +73,23 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
 
   return (
     <div
-      className={`rounded-md border p-3 ${
-        commune.archived ? "border-dashed border-slate-300 bg-slate-50" : "border-slate-200"
+      className={`rounded-xl border p-4 transition-colors ${
+        commune.archived
+          ? "border-dashed border-[var(--kn-border)] bg-[var(--kn-panel)] opacity-80"
+          : "border-[var(--kn-border)] bg-[var(--kn-card)] hover:border-[#fb923c]/50"
       }`}
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <p className={`font-medium ${commune.archived ? "text-slate-500" : "text-slate-900"}`}>
+          <p className={`font-medium ${commune.archived ? "text-[var(--kn-text-muted)]" : "text-[var(--kn-text)]"}`}>
             {commune.nom}
             {commune.archived && (
-              <span className="ml-2 text-xs font-normal text-slate-400">archivée</span>
+              <span className="ml-2 rounded-full bg-[var(--kn-active)] px-2 py-0.5 text-[10px] font-medium text-[var(--kn-text-muted)]">
+                archivée
+              </span>
             )}
           </p>
-          <div className="mt-1 flex gap-4 text-xs text-slate-500">
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--kn-text-muted)]">
             <span className="flex items-center gap-1">
               <Building2 className="size-3.5" />
               {commune.batiments} bâtiments
@@ -127,7 +131,7 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
         )}
       </div>
 
-      {erreur && <p className="mt-2 text-xs text-red-600">{erreur}</p>}
+      {erreur && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{erreur}</p>}
 
       <Dialog open={editionOuverte} onOpenChange={setEditionOuverte}>
         <DialogContent className="sm:max-w-md">
@@ -142,7 +146,7 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
+                <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">
                   Points lumineux
                 </label>
                 <Input
@@ -154,7 +158,7 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">Armoires</label>
+                <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">Armoires</label>
                 <Input
                   type="number"
                   min={0}
@@ -167,7 +171,7 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
+                <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">
                   Début des travaux
                 </label>
                 <Input
@@ -177,7 +181,7 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
+                <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">
                   Fin des travaux
                 </label>
                 <Input
@@ -188,7 +192,7 @@ export function CommuneCard({ commune, estAdmin }: { commune: CommuneAffichee; e
               </div>
             </div>
 
-            {erreur && <p className="text-sm text-red-600">{erreur}</p>}
+            {erreur && <p className="text-sm text-red-600 dark:text-red-400">{erreur}</p>}
           </div>
 
           <DialogFooter>
