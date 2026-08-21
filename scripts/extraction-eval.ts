@@ -31,18 +31,9 @@ import { EXTRACTOR_VERSION } from "../lib/anthropic/extractor-version";
 import { invoiceExtractionSchema } from "../lib/anthropic/invoice-schema";
 import { aggregate, compareReports, scoreCase, type CaseResult, type EvalReport, type GoldenCase } from "../lib/extraction/eval";
 
+import { loadEnv } from "./_env";
 const OUT_DIR = join(process.cwd(), ".extraction-eval");
 const GOLDEN_PATH = join(OUT_DIR, "golden.json");
-
-function loadEnv(): Record<string, string> {
-  const out: Record<string, string> = {};
-  const raw = readFileSync(join(process.cwd(), ".env.local"), "utf8");
-  for (const line of raw.split("\n")) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, "");
-  }
-  return out;
-}
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);

@@ -1,6 +1,6 @@
 /**
  * Provisionne une nouvelle organisation cliente + son premier utilisateur org_admin.
- * Usage : npx tsx scripts/provision-org.ts --org "Acme Corp" --email admin@acme.com
+ * Usage : npx tsx scripts/provision-org.ts --org "Acme Corp" --email admin@acme.com [--env <fichier>]
  *
  * Seed le socle des 20 communes de Martinique (SCRUM-14) : un nouveau client démarre
  * avec la même base que le SMEM, puis complète lui-même parmi les 14 restantes depuis
@@ -9,20 +9,9 @@
  */
 import { createClient } from "@supabase/supabase-js";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { communesDuSocle } from "../lib/communes/socle";
 
-function loadEnv(): Record<string, string> {
-  const out: Record<string, string> = {};
-  const raw = readFileSync(join(process.cwd(), ".env.local"), "utf8");
-  for (const line of raw.split("\n")) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, "");
-  }
-  return out;
-}
-
+import { loadEnv } from "./_env";
 const DEFAULT_TAGS = [
   { label: "À vérifier", color: "amber" },
   { label: "Validée", color: "green" },

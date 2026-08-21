@@ -11,20 +11,9 @@
  * Usage : npx tsx scripts/migrate-storage-paths.ts [--dry]
  */
 import { createClient } from "@supabase/supabase-js";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import ws from "ws";
 
-function loadEnv(): Record<string, string> {
-  const out: Record<string, string> = {};
-  const raw = readFileSync(join(process.cwd(), ".env.local"), "utf8");
-  for (const line of raw.split("\n")) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, "");
-  }
-  return out;
-}
-
+import { loadEnv } from "./_env";
 const DRY = process.argv.includes("--dry");
 
 async function main() {
