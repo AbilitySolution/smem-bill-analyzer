@@ -60,20 +60,7 @@ jobs:
       - name: Rejouer toutes les migrations sur une base vierge
         run: supabase db reset
 
+      # Même script qu'en local (`npm run check:rest`) : le contrôle que la CI applique est
+      # exactement celui qu'on peut rejouer sur sa machine pour comprendre l'échec.
       - name: PostgREST atteint les tables avec la clé anon
-        run: |
-          set -euo pipefail
-          ANON=$(supabase status -o json | jq -r .ANON_KEY)
-          echec=0
-          for t in communes sites invoices contracts anomalies document_jobs \
-                   consumption_periods organizations pending_uploads invoice_analytics; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
-              -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
-              "http://127.0.0.1:54321/rest/v1/$t?limit=1")
-            echo "$t -> $code"
-            if [ "$code" != "200" ]; then
-              echo "::error::$t inatteignable depuis PostgREST (HTTP $code)"
-              echec=1
-            fi
-          done
-          exit $echec
+        run: node scripts/check-rest.mjs

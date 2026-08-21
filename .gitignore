@@ -47,5 +47,7 @@ next-env.d.ts
 # Jeu de référence et rapports du banc de mesure : données client, hors dépôt.
 .extraction-eval/
 
-# fixtures locales (factures client réelles) — jamais versionnées
-/.agents/
+# Factures client réelles servant de jeu d'essai : le dossier et son README sont
+# versionnés, les documents eux-mêmes ne le sont pas.
+/docs/factures/*.zip
+/docs/factures/*.pdf
