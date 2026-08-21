@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Search, Sun, Moon, FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, Plug, BookOpen, SlidersHorizontal, UploadCloud, CornerDownLeft,
+  Search, Sun, Moon, FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, BookOpen, SlidersHorizontal, Target, UploadCloud, CornerDownLeft,
 } from "lucide-react";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
@@ -14,11 +14,11 @@ const DESTINATIONS: Dest[] = [
   { label: "Extraction", href: "/documents/extraction", hint: "Éditer une facture", icon: ScanText },
   { label: "Rapports", href: "/rapport-excel", hint: "Rapports prédéfinis + export personnalisé", icon: FileSpreadsheet },
   { label: "Analyse de consommation", href: "/analyses", hint: "Graphiques kWh / € / c€", icon: Gauge },
-  { label: "Anomalies", href: "/anomalies", hint: "Contrôles & alertes (version bêta)", icon: AlertTriangle },
-  { label: "Connecteurs", href: "/connecteurs", hint: "Sources de données externes (version bêta)", icon: Plug },
+  { label: "Anomalies", href: "/anomalies", hint: "Contrôles & alertes", icon: AlertTriangle },
   { label: "Importer une facture", href: "/upload", hint: "OCR d'un nouveau document", icon: UploadCloud },
   { label: "Documentation", href: "/documentation", hint: "Guide d'utilisation des pages", icon: BookOpen },
   { label: "Champs d'extraction", href: "/documentation/champs", hint: "Modèle d'extraction", icon: SlidersHorizontal },
+  { label: "Qualité d'extraction", href: "/documentation/qualite", hint: "Précision mesurée sur les corrections", icon: Target },
 ];
 
 export function TopBar() {

@@ -1,9 +1,12 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { getUserContext } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { isUserRole } from "@/lib/authz";
+import type { UserRole } from "@/lib/types/database";
 import { REFERENTIEL_MARTINIQUE } from "@/lib/communes/referentiel-martinique";
 import { scoreCommune } from "@/lib/extraction/matching";
 import {
@@ -14,25 +17,155 @@ import {
   type ModifierCommuneInput,
 } from "@/lib/communes/validation";
 
-export async function assignUserRole(userId: string, role: "org_admin" | "org_member", communeId: string | null) {
+/**
+ * Attribution d'un rôle. Réservée à l'administrateur : un superviseur pilote la donnée,
+ * pas les habilitations.
+ *
+ * Passe par le client service-role, donc hors RLS — d'où la double vérification
+ * explicite : appartenance à la même organisation, puis verrou « dernier administrateur ».
+ * Ce dernier existe aussi en base (trigger trg_prevent_last_admin_removal) ; on le double
+ * ici uniquement pour rendre un message lisible plutôt qu'une erreur Postgres brute.
+ */
+export async function assignUserRole(userId: string, role: UserRole, communeId: string | null) {
   const ctx = await getUserContext();
   if (!ctx || ctx.role !== "org_admin") return { error: "Non autorisé." };
+  if (!isUserRole(role)) return { error: "Rôle inconnu." };
 
   const admin = createAdminClient();
-  const { data: existing } = await admin.from("user_roles").select("org_id").eq("user_id", userId).maybeSingle();
+  const { data: existing } = await admin
+    .from("user_roles")
+    .select("org_id, role")
+    .eq("user_id", userId)
+    .maybeSingle();
   if (existing && existing.org_id !== ctx.orgId) {
     return { error: "Cet utilisateur appartient déjà à une autre organisation." };
   }
 
-  await admin.from("user_roles").upsert({
+  // Une organisation sans administrateur n'est plus gérable depuis l'application : plus
+  // personne ne peut réattribuer de rôle, la remise en état passe par la base. Le cas le
+  // plus courant est l'administrateur unique qui se rétrograde lui-même.
+  if (existing?.role === "org_admin" && role !== "org_admin") {
+    const { count } = await admin
+      .from("user_roles")
+      .select("user_id", { count: "exact", head: true })
+      .eq("org_id", ctx.orgId)
+      .eq("role", "org_admin");
+    if ((count ?? 0) <= 1) {
+      return {
+        error:
+          "Impossible de retirer le dernier administrateur de l'organisation. Nommez d'abord un autre administrateur.",
+      };
+    }
+  }
+
+  // La commune n'est qu'un préremplissage d'écran pour l'agent qui dépose des factures.
+  // Elle n'a pas de sens au-dessus du membre : superviseur comme administrateur
+  // travaillent au périmètre de l'organisation entière.
+  const { error } = await admin.from("user_roles").upsert({
     user_id: userId,
     role,
     org_id: ctx.orgId,
-    commune_id: role === "org_admin" ? null : communeId,
+    commune_id: role === "org_member" ? communeId : null,
   });
+  if (error) {
+    // Le trigger parle français et s'adresse déjà à l'utilisateur : on le laisse passer.
+    if (error.message.includes("dernier administrateur")) return { error: error.message };
+    console.error(`[authz] Échec d'attribution de rôle org=${ctx.orgId} user=${userId} : ${error.message}`);
+    return { error: "L'attribution du rôle a échoué. Réessayez ou signalez-le à votre administrateur." };
+  }
 
   revalidatePath("/parametres");
   return { success: true };
+}
+
+/**
+ * Informations de présentation du compte courant. Ces métadonnées ne participent jamais
+ * aux décisions d'autorisation : les rôles restent dans `user_roles`.
+ */
+export async function updateOwnProfile(input: { fullName: string; avatarUrl: string }) {
+  const ctx = await getUserContext();
+  if (!ctx) return { error: "Non autorisé." };
+
+  const fullName = input.fullName.trim();
+  const avatarUrl = input.avatarUrl.trim();
+  if (fullName.length > 80) return { error: "Le nom ne peut pas dépasser 80 caractères." };
+
+  if (avatarUrl) {
+    try {
+      const url = new URL(avatarUrl);
+      if (url.protocol !== "https:" && url.protocol !== "http:") {
+        return { error: "L’adresse de la photo doit commencer par http:// ou https://." };
+      }
+    } catch {
+      return { error: "L’adresse de la photo n’est pas valide." };
+    }
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase.auth.updateUser({
+    data: {
+      full_name: fullName || null,
+      avatar_url: avatarUrl || null,
+    },
+  });
+  if (error) {
+    console.error(`[profil] Mise à jour impossible user=${ctx.userId}: ${error.message}`);
+    return { error: "Le profil n’a pas pu être enregistré. Réessayez." };
+  }
+
+  revalidatePath("/parametres/profil");
+  return { success: true as const };
+}
+
+/**
+ * Invitation d'un utilisateur dans l'organisation courante.
+ *
+ * C'était le chaînon manquant du « rôle par défaut » : sans flux de création dans
+ * l'application, les comptes naissaient dans le dashboard Supabase et le DEFAULT
+ * 'org_member' de la colonne n'était jamais déclenché. L'insertion ci-dessous omet donc
+ * volontairement `role` — c'est la base qui décide, et elle décide au plus restreint.
+ *
+ * L'URL de retour est déduite des en-têtes de la requête (NEXT_PUBLIC_SITE_URL prime si
+ * elle est définie) : cette variable n'existe dans aucun des .env du projet, s'y fier
+ * seule produirait des liens « undefined/login ».
+ */
+export async function inviteUser(email: string) {
+  const ctx = await getUserContext();
+  if (!ctx || ctx.role !== "org_admin") return { error: "Non autorisé." };
+
+  const adresse = email.trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adresse)) return { error: "Adresse e-mail invalide." };
+
+  const entetes = await headers();
+  const hote = entetes.get("x-forwarded-host") ?? entetes.get("host");
+  const protocole = entetes.get("x-forwarded-proto") ?? "https";
+  const base = process.env.NEXT_PUBLIC_SITE_URL ?? (hote ? `${protocole}://${hote}` : null);
+  if (!base) return { error: "Impossible de déterminer l'adresse de l'application." };
+
+  const admin = createAdminClient();
+  const { data, error } = await admin.auth.admin.inviteUserByEmail(adresse, {
+    redirectTo: `${base}/login`,
+  });
+  if (error || !data.user) {
+    // Cas courant : l'adresse existe déjà côté Auth. On le dit sans exposer le détail.
+    console.error(`[authz] Invitation refusée org=${ctx.orgId} : ${error?.message ?? "aucun utilisateur renvoyé"}`);
+    return { error: "L'invitation a échoué. Cette adresse est peut-être déjà utilisée." };
+  }
+
+  const { error: erreurRole } = await admin
+    .from("user_roles")
+    .insert({ user_id: data.user.id, org_id: ctx.orgId });
+  if (erreurRole) {
+    // Le compte Auth existe désormais sans habilitation : getUserContext() le refusera
+    // (échec fermé). On le signale pour que l'administrateur reprenne la main.
+    console.error(`[authz] Compte invité sans ligne user_roles org=${ctx.orgId} user=${data.user.id} : ${erreurRole.message}`);
+    return {
+      error: "Le compte a été créé mais son rattachement a échoué. Attribuez-lui un rôle manuellement.",
+    };
+  }
+
+  revalidatePath("/parametres");
+  return { success: true as const };
 }
 
 /* ── Communes (SCRUM-14) ──────────────────────────────────────────────────────
@@ -172,7 +305,9 @@ async function basculerArchivage(id: string, archived: boolean) {
 /** Une commune touche presque toutes les vues — on les revalide toutes. */
 function revalidateVuesCommunes() {
   for (const chemin of [
-    "/parametres",
+    "/parametres/communes",
+    "/parametres/sites",
+    "/parametres/utilisateurs",
     "/analyses/consommation",
     "/rapport-excel",
     "/documents",

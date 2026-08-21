@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { hasAtLeast } from "@/lib/authz";
 import type { UserRole } from "@/lib/types/database";
 
 export interface UserContext {
@@ -32,4 +33,16 @@ export async function getUserContext(): Promise<UserContext | null> {
     role: roleRow.role as UserRole,
     communeId: roleRow.commune_id ?? null,
   };
+}
+
+/**
+ * Contexte utilisateur si — et seulement si — le rôle atteint le niveau demandé.
+ *
+ * Ne redirige pas : c'est la forme attendue par les routes API, qui doivent répondre un
+ * statut HTTP et non un Location. Les pages utilisent `requireRole()` (lib/auth-guard.ts).
+ */
+export async function getUserContextWithRole(required: UserRole): Promise<UserContext | null> {
+  const ctx = await getUserContext();
+  if (!ctx || !hasAtLeast(ctx.role, required)) return null;
+  return ctx;
 }

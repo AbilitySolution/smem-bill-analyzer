@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { getUserContext } from "@/lib/auth";
+import { getInvoiceScope } from "@/lib/data/invoice-scope";
 import { ReportPicker } from "@/components/rapports/report-picker";
 import { ReportModal } from "@/components/rapports/report-modal";
 import { FileSpreadsheet } from "lucide-react";
@@ -14,10 +15,15 @@ export default async function RapportsPage({ searchParams }: { searchParams: Pro
 
   // org_id explicite en plus de la RLS (défense en profondeur), comme sur /analyses.
   const supabase = await createClient();
-  const [communesRes, invoiceSiteIds] = await Promise.all([
+  const [communesRes, invoiceSiteIds, scope] = await Promise.all([
     supabase.from("communes").select("id, nom, travaux_debut, travaux_estimes").eq("org_id", ctx.orgId).eq("archived", false).order("nom"),
     supabase.from("invoices").select("site_id").eq("org_id", ctx.orgId).not("site_id", "is", null),
+    getInvoiceScope(ctx.orgId),
   ]);
+
+  // Le référentiel compte 34 communes ; n'en proposer que celles qui ont des documents,
+  // sinon on offre de générer un rapport sur un périmètre vide.
+  const communesAvecDocuments = (communesRes.data ?? []).filter((c) => scope.parCommune[c.id]);
 
   const siteIds = [...new Set((invoiceSiteIds.data ?? []).map((r) => r.site_id as string))];
   const sitesRes = siteIds.length
@@ -31,7 +37,7 @@ export default async function RapportsPage({ searchParams }: { searchParams: Pro
       .from("invoices").select("commune_id").eq("org_id", ctx.orgId).in("id", preIds.slice(0, 1000));
     selectionCommuneIds = new Set((selInv ?? []).map((r) => r.commune_id).filter(Boolean) as string[]);
   }
-  const selectionCommunes = (communesRes.data ?? []).filter((c) => selectionCommuneIds.has(c.id));
+  const selectionCommunes = communesAvecDocuments.filter((c) => selectionCommuneIds.has(c.id));
 
   return (
     <div className="h-full overflow-y-auto">
@@ -46,16 +52,18 @@ export default async function RapportsPage({ searchParams }: { searchParams: Pro
         </p>
 
         <ReportPicker
-          communes={communesRes.data ?? []}
+          communes={communesAvecDocuments}
           sites={sitesRes.data ?? []}
           preselectedIds={preIds}
+          scope={scope}
         />
       </div>
 
       {preIds.length > 0 && (
         <ReportModal
           ids={preIds}
-          communes={selectionCommunes.length ? selectionCommunes : (communesRes.data ?? [])}
+          communes={selectionCommunes.length ? selectionCommunes : communesAvecDocuments}
+          scope={scope}
         />
       )}
     </div>

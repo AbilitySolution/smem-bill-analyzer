@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getUserContext } from "@/lib/auth";
+import { hasAtLeast } from "@/lib/authz";
 import { invoiceExtractionReviewSchema, missingRequiredFields } from "@/lib/anthropic/invoice-schema";
 import { validateInvoice } from "@/lib/anthropic/invoice-validation";
 import { matchCommuneScored, matchSiteByContract } from "@/lib/extraction/matching";
@@ -122,9 +123,10 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     .from("document_jobs").select("id, created_by, file_path, processed_invoice_id").eq("id", id).maybeSingle();
   if (!job) return NextResponse.json({ error: "Job introuvable." }, { status: 404 });
 
-  // Un membre ne supprime que ses propres dépôts ; un administrateur d'organisation
-  // peut nettoyer la file entière.
-  if (job.created_by !== ctx.userId && ctx.role !== "org_admin") {
+  // Un membre ne supprime que ses propres dépôts. Le superviseur, lui, pilote la file :
+  // un document bloqué chez un agent absent doit pouvoir être repris sans attendre un
+  // administrateur.
+  if (job.created_by !== ctx.userId && !hasAtLeast(ctx.role, "org_supervisor")) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

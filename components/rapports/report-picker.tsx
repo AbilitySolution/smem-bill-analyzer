@@ -3,45 +3,61 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  MapPin, Wrench, Layers3, Loader2, Download, Check, Radio, Info, Sparkles, X, Calendar, Building2,
+  MapPin, Layers3, Loader2, Download, Check, Sparkles, X, Calendar, Building2,
 } from "lucide-react";
+import type { InvoiceScope } from "@/lib/data/invoice-scope";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 
 interface Commune { id: string; nom: string; travaux_debut?: string | null; travaux_estimes?: boolean | null }
 interface Site { id: string; nom: string; commune_id: string }
 
-type ReportType = "commune" | "avant_apres" | "synthese";
+// Le rapport « avant_apres » reste supporté côté générateur (app/api/reports + scripts/reports),
+// mais n'est plus proposé dans l'interface : la fenêtre de travaux SMEM n'est pas fiable sur
+// l'ensemble des communes, et un avant/après calculé sur des dates estimées induit en erreur.
+type ReportType = "commune" | "synthese";
 
 const REPORTS: { id: ReportType; label: string; desc: string; icon: typeof MapPin }[] = [
   { id: "commune", label: "Par commune", desc: "Séries temporelles kWh/€, détail par site, décomposition tarifaire (HP+HC, ratio HC/HP), TCD.", icon: MapPin },
-  { id: "avant_apres", label: "Avant / après travaux", desc: "Moyennes annualisées par site, fenêtre de travaux exclue (dates SMEM ou date de bascule saisie) + histogrammes.", icon: Wrench },
-  { id: "synthese", label: "Synthèse", desc: "Portefeuille consolidé : évolution temporelle + avant/après par commune, TCD.", icon: Layers3 },
+  { id: "synthese", label: "Synthèse", desc: "Portefeuille consolidé : évolution temporelle par commune, TCD.", icon: Layers3 },
 ];
 
-/** Générateur de rapport Excel — flux unique : type de rapport + périmètre + data logger. */
-export function ReportPicker({ communes, sites, preselectedIds = [] }: { communes: Commune[]; sites: Site[]; preselectedIds?: string[] }) {
+/** Générateur de rapport Excel — flux unique : type de rapport + périmètre. */
+export function ReportPicker({
+  communes, sites, preselectedIds = [], scope,
+}: {
+  communes: Commune[];
+  sites: Site[];
+  preselectedIds?: string[];
+  scope: InvoiceScope;
+}) {
   const router = useRouter();
   const [report, setReport] = useState<ReportType>("commune");
   const [communeId, setCommuneId] = useState("");
   const [siteIds, setSiteIds] = useState<Set<string>>(new Set());
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [cutover, setCutover] = useState("");
-  const [dataLogger, setDataLogger] = useState(false);
+  // null = « pas encore touché » : la borne suit alors le périmètre choisi (voir plus bas).
+  const [fromEdit, setFromEdit] = useState<string | null>(null);
+  const [toEdit, setToEdit] = useState<string | null>(null);
   const [usePre, setUsePre] = useState(preselectedIds.length > 0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const needsCommune = report === "commune" || report === "avant_apres";
+  const needsCommune = report === "commune";
   const sitesOfCommune = useMemo(
     () => (communeId ? sites.filter((s) => s.commune_id === communeId) : sites),
     [sites, communeId],
   );
-  const selectedCommune = communes.find((c) => c.id === communeId);
-  // Avant/après sans dates de travaux au référentiel → date de bascule obligatoire.
-  const needsCutover = report === "avant_apres" && !!selectedCommune && !selectedCommune.travaux_debut;
-  const ready = (!needsCommune || !!communeId) && (!needsCutover || !!cutover);
+  const ready = !needsCommune || !!communeId;
+
+  // Bornes réelles des documents : celles de la commune choisie, sinon celles de tout
+  // le portefeuille (cas de la synthèse). Préremplies plutôt que laissées vides — sans
+  // elles l'utilisateur doit deviner la profondeur d'historique dont il dispose.
+  // Changer de commune ou de type remet les bornes sur le nouveau périmètre : la remise
+  // à null se fait dans les gestionnaires d'événements, pas dans un effet.
+  const defaults = report === "commune" && communeId ? scope.parCommune[communeId] : scope.global;
+  const from = fromEdit ?? defaults?.from ?? "";
+  const to = toEdit ?? defaults?.to ?? "";
+  const resetDates = () => { setFromEdit(null); setToEdit(null); };
 
   const toggleSite = (id: string) =>
     setSiteIds((s) => {
@@ -64,8 +80,6 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
           ids: usePre ? preselectedIds : undefined,
           from: from || undefined,
           to: to || undefined,
-          cutover: cutover || undefined,
-          dataLogger,
         }),
       });
       if (!res.ok) { const j = await res.json().catch(() => ({})); setError(j.error ?? "Erreur de génération."); return; }
@@ -87,11 +101,11 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
     <section className="rounded-xl border border-[var(--kn-border)] bg-[var(--kn-card)] p-4">
       {/* 1. Type de rapport */}
       <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">1 · Type de rapport</p>
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="grid gap-2 sm:grid-cols-2">
         {REPORTS.map((r) => {
           const on = report === r.id;
           return (
-            <button key={r.id} onClick={() => setReport(r.id)}
+            <button key={r.id} onClick={() => { setReport(r.id); resetDates(); }}
               className={cx("flex items-start gap-2 rounded-lg border p-2.5 text-left transition-colors",
                 on ? "border-[#f97316]" : "border-[var(--kn-border)] hover:border-[#fb923c]")}>
               <span className={cx("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md",
@@ -126,7 +140,7 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
         {needsCommune && (
           <label className="flex items-center gap-2 text-[12px] text-[var(--kn-text-muted)]">
             <MapPin className="size-3.5" /> Commune
-            <select value={communeId} onChange={(e) => { setCommuneId(e.target.value); setSiteIds(new Set()); }}
+            <select value={communeId} onChange={(e) => { setCommuneId(e.target.value); setSiteIds(new Set()); resetDates(); }}
               className="h-9 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none">
               <option value="">Choisir…</option>
               {communes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
@@ -135,62 +149,43 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
         )}
         <label className="flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
           <Calendar className="size-3.5" /> Du
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
+          <input type="date" value={from} onChange={(e) => setFromEdit(e.target.value)}
             className="h-9 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none" />
           Au
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
+          <input type="date" value={to} onChange={(e) => setToEdit(e.target.value)}
             className="h-9 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none" />
         </label>
-        {report === "avant_apres" && selectedCommune?.travaux_estimes && (
-          <span className="flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
-            <Info className="size-3" /> dates de travaux estimées pour cette commune
+        {defaults && (
+          <span className="text-[11px] text-[var(--kn-text-muted)]">
+            période couverte par les documents{needsCommune && communeId ? " de cette commune" : ""}
           </span>
-        )}
-        {needsCutover && (
-          <label className="flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
-            <Wrench className="size-3.5" /> Date de bascule avant/après
-            <input type="date" value={cutover} onChange={(e) => setCutover(e.target.value)}
-              className="h-9 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none" />
-            <span className="flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
-              <Info className="size-3" /> pas de dates de travaux au référentiel — indiquez la fin des travaux
-            </span>
-          </label>
         )}
       </div>
 
-      {report !== "avant_apres" && (
-        <div className="mt-2 rounded-lg bg-[var(--kn-panel)] p-3">
-          <p className="mb-1.5 flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
-            <Building2 className="size-3.5" /> Sites (optionnel — tous si aucun choisi)
-          </p>
-          <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
-            {sitesOfCommune.map((s) => {
-              const on = siteIds.has(s.id);
-              return (
-                <button key={s.id} onClick={() => toggleSite(s.id)}
-                  className={cx("rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors",
-                    on ? "border-[#f97316] bg-[#f97316] text-white" : "border-[var(--kn-border)] bg-[var(--kn-card)] text-[var(--kn-text-muted)] hover:border-[#fb923c]")}>
-                  {s.nom}
-                </button>
-              );
-            })}
-          </div>
+      <div className="mt-2 rounded-lg bg-[var(--kn-panel)] p-3">
+        <p className="mb-1.5 flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
+          <Building2 className="size-3.5" /> Sites (optionnel — tous si aucun choisi)
+        </p>
+        <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
+          {sitesOfCommune.map((s) => {
+            const on = siteIds.has(s.id);
+            return (
+              <button key={s.id} onClick={() => toggleSite(s.id)}
+                className={cx("rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors",
+                  on ? "border-[#f97316] bg-[#f97316] text-white" : "border-[var(--kn-border)] bg-[var(--kn-card)] text-[var(--kn-text-muted)] hover:border-[#fb923c]")}>
+                {s.nom}
+              </button>
+            );
+          })}
         </div>
-      )}
+      </div>
 
-      {/* 3. Options + génération */}
-      <p className="mb-2 mt-4 text-[12px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">3 · Options</p>
-      <div className="flex flex-wrap items-center gap-3 rounded-lg bg-[var(--kn-panel)] p-3">
-        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--kn-text)]"
-          title="Section distincte des analyses tarifaires : consommation quotidienne + historique de coupures.">
-          <input type="checkbox" checked={dataLogger} onChange={(e) => setDataLogger(e.target.checked)} className="accent-[#f97316]" />
-          <Radio className="size-3.5 text-[var(--kn-text-muted)]" />
-          Inclure les données du connecteur data logger
-        </label>
-        {dataLogger && (
-          <span className="flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
-            <Info className="size-3" /> connecteur non raccordé — données de démonstration
-          </span>
+      {/* 3. Génération */}
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        {!ready && (
+          <p className="text-[12px] text-[var(--kn-text-muted)]">
+            Choisissez une commune pour ce type de rapport.
+          </p>
         )}
         <button onClick={generate} disabled={busy || !ready}
           className="ml-auto flex items-center gap-2 rounded-lg bg-[#f97316] px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-[#ea580c] disabled:opacity-50">
@@ -198,11 +193,6 @@ export function ReportPicker({ communes, sites, preselectedIds = [] }: { commune
           {busy ? "Génération…" : "Générer le rapport Excel"}
         </button>
       </div>
-      {!ready && (
-        <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">
-          {needsCutover && communeId ? "Saisissez une date de bascule avant/après pour cette commune." : "Choisissez une commune pour ce type de rapport."}
-        </p>
-      )}
       {error && <p className="mt-2 text-[13px] text-[#d33]">{error}</p>}
 
       <p className="mt-3 text-[11px] text-[var(--kn-text-muted)]">

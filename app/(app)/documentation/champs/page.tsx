@@ -1,3 +1,4 @@
+import { requireRole } from "@/lib/auth-guard";
 import { Info } from "lucide-react";
 
 const GROUPS: { titre: string; champs: { nom: string; type: string; desc: string }[] }[] = [
@@ -79,7 +80,9 @@ const GROUPS: { titre: string; champs: { nom: string; type: string; desc: string
   },
 ];
 
-export default function DocumentationChampsPage() {
+export default async function DocumentationChampsPage() {
+  await requireRole("org_supervisor");
+
   return (
     <div className="mx-auto max-w-4xl px-8 py-6">
       <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-[#fed7aa] bg-[var(--kn-yellow-soft)] px-4 py-3">
