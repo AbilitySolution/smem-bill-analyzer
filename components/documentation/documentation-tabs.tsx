@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BookOpen, SlidersHorizontal } from "lucide-react";
+import { BookOpen, SlidersHorizontal, Target } from "lucide-react";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 
 const tabs = [
   { href: "/documentation", label: "Guide", icon: BookOpen, match: (p: string) => p === "/documentation" },
   { href: "/documentation/champs", label: "Champs d'extraction", icon: SlidersHorizontal, match: (p: string) => p.startsWith("/documentation/champs") },
+  { href: "/documentation/qualite", label: "Qualité d'extraction", icon: Target, match: (p: string) => p.startsWith("/documentation/qualite") },
 ];
 
 export function DocumentationTabs() {

@@ -33,10 +33,8 @@ export function ExtractionQualityView({ data }: { data: ExtractionQuality }) {
 
   return (
     <div className="mx-auto max-w-5xl px-8 py-6">
-      <div className="mb-1 flex items-center gap-2.5">
-        <Target className="size-6 text-[var(--kn-text)]" strokeWidth={1.75} />
-        <h1 className="font-heading text-2xl font-bold text-[var(--kn-text)]">Qualité d&apos;extraction</h1>
-      </div>
+      {/* Pas de titre ici : la page est un onglet de Documentation, dont l'en-tête porte
+          déjà le titre. Seul reste ce que l'onglet ne dit pas — ce que le chiffre mesure. */}
       <p className="mb-5 max-w-3xl text-[13px] text-[var(--kn-text-muted)]">
         Précision réelle de l&apos;extraction automatique, mesurée sur les corrections que vos équipes
         ont effectivement apportées — pas une estimation du modèle sur lui-même. Seules les factures
