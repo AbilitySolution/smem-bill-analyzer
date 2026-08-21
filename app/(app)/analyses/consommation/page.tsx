@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { getUserContext } from "@/lib/auth";
 import { getConsumptionAnalysis, DEMO_CONSUMPTION, type AnalysisData } from "@/lib/data/consumption";
+import { getInvoiceScope } from "@/lib/data/invoice-scope";
 import { AnalysesView } from "@/components/analyses/analyses-view";
 
 const EMPTY: AnalysisData = {
@@ -37,10 +38,15 @@ export default async function ConsumptionAnalysisPage({
   }
 
   const supabase = await createClient();
-  const [communesRes, invoiceSiteIds] = await Promise.all([
+  const [communesRes, invoiceSiteIds, scope] = await Promise.all([
     supabase.from("communes").select("id, nom").eq("org_id", ctx.orgId).eq("archived", false).order("nom"),
     supabase.from("invoices").select("site_id").eq("org_id", ctx.orgId).not("site_id", "is", null),
+    getInvoiceScope(ctx.orgId),
   ]);
+
+  // Comme la liste des sites juste en dessous : ne proposer que les communes qui ont des
+  // documents. Filtrer sur une commune sans facture ne produit qu'un écran vide.
+  const communes = (communesRes.data ?? []).filter((c) => scope.parCommune[c.id]);
 
   const siteIds = [...new Set((invoiceSiteIds.data ?? []).map((row) => row.site_id as string))];
   const sitesRes = siteIds.length
@@ -60,7 +66,7 @@ export default async function ConsumptionAnalysisPage({
   return (
     <AnalysesView
       analysis={analysis}
-      communes={communesRes.data ?? []}
+      communes={communes}
       sites={sitesRes.data ?? []}
       filters={{ commune: sp.commune ?? "", site: sp.site ?? "", cat: sp.cat ?? "" }}
     />

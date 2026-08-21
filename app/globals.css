@@ -173,8 +173,8 @@
   --kn-card: #161a20;
   --kn-panel: #181c22;
   --kn-value-box: #1d222a;
-  --kn-text: #e7e9ee;
-  --kn-text-muted: #98a2b3;
+  --kn-text: #f1f3f6;
+  --kn-text-muted: #b2bcc9;
   --kn-badge-bg: #10271d;
   --kn-badge-fg: #4ade80;
   --kn-active: #232831;
@@ -184,6 +184,28 @@
   --kn-solid-fg: #ffffff;
   --kn-yellow: #fb923c;
   --kn-yellow-soft: rgba(249, 115, 22, 0.16);
+}
+
+/*
+ * Compatibilité des écrans historiques : plusieurs composants utilisent encore des
+ * couleurs Slate prévues pour le thème clair. En sombre, les niveaux 700–950 devenaient
+ * presque noirs sur les cartes. Ces règles les raccordent aux deux niveaux de texte du
+ * design system sans modifier leur rendu clair.
+ */
+.dark :is(.text-slate-950, .text-slate-900, .text-slate-800, .text-slate-700) {
+  color: var(--kn-text);
+}
+
+.dark :is(.text-slate-600, .text-slate-500, .text-slate-400) {
+  color: var(--kn-text-muted);
+}
+
+.dark :is(.border-slate-100, .border-slate-200, .border-slate-300) {
+  border-color: var(--kn-border);
+}
+
+.dark :is(.bg-slate-50, .bg-slate-100) {
+  background-color: var(--kn-panel);
 }
 
 /* type badge (façon Koncile : pill verte avec icône) */

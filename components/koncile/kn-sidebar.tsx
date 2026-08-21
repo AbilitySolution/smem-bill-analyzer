@@ -8,13 +8,14 @@ import {
   FileSpreadsheet,
   Gauge,
   AlertTriangle,
-  Plug,
   BookOpen,
   UploadCloud,
   Settings,
   LogOut,
 } from "lucide-react";
 import { logout } from "@/app/login/actions";
+import { hasAtLeast } from "@/lib/authz";
+import type { UserRole } from "@/lib/types/database";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 
@@ -23,7 +24,14 @@ export interface SidebarUser {
   roleLabel: string;
 }
 
-type NavChild = { href: string; label: string; match: (pathname: string) => boolean };
+/** `minRole` reflète la matrice de lib/authz.ts. Le masquage n'est qu'un confort : la
+ *  page et le middleware refusent de leur côté, une entrée oubliée ici n'ouvre rien. */
+type NavChild = {
+  href: string;
+  label: string;
+  match: (pathname: string) => boolean;
+  minRole?: UserRole;
+};
 type NavItem = {
   href: string;
   label: string;
@@ -32,6 +40,7 @@ type NavItem = {
   children?: NavChild[];
   /** Racine de la section, quand `href` pointe vers un sous-item (ex. /analyses vs /analyses/consommation). */
   section?: string;
+  minRole?: UserRole;
 };
 
 const mainNav: NavItem[] = [
@@ -40,9 +49,8 @@ const mainNav: NavItem[] = [
     children: [
       { href: "/upload", label: "Importer des documents", match: (p) => p.startsWith("/upload") },
       { href: "/documents", label: "Mes documents", match: (p) => p === "/documents" },
-      { href: "/corrections", label: "Contrôle qualité", match: (p) => p.startsWith("/corrections") },
-      { href: "/qualite-extraction", label: "Qualité d'extraction", match: (p) => p.startsWith("/qualite-extraction") },
-      { href: "/documents/extraction", label: "Extraction", match: (p) => p.startsWith("/documents/extraction") },
+      { href: "/corrections", label: "Contrôle qualité", match: (p) => p.startsWith("/corrections"), minRole: "org_supervisor" },
+      { href: "/documents/extraction", label: "Extraction", match: (p) => p.startsWith("/documents/extraction"), minRole: "org_supervisor" },
     ],
   },
   { href: "/rapport-excel", label: "Rapports", icon: FileSpreadsheet },
@@ -53,26 +61,46 @@ const mainNav: NavItem[] = [
       { href: "/analyses/couverture", label: "Couverture", match: (p) => p === "/analyses/couverture" },
     ],
   },
-  { href: "/anomalies", label: "Anomalies", icon: AlertTriangle, soon: true },
-  { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true },
+  { href: "/anomalies", label: "Anomalies", icon: AlertTriangle },
+  // Connecteurs : page conservée (/connecteurs) mais retirée de la navigation tant que
+  // rien n'est réellement raccordé — elle promettait une intégration qui n'existe pas.
+  // { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true, minRole: "org_admin" },
 ];
 
 const adminNav: NavItem[] = [
-  { href: "/documentation", label: "Documentation", icon: BookOpen },
-  { href: "/parametres", label: "Paramètres", icon: Settings },
+  { href: "/documentation", label: "Documentation", icon: BookOpen, minRole: "org_supervisor" },
+  { href: "/parametres", label: "Paramètres", icon: Settings, minRole: "org_admin" },
 ];
+
+/**
+ * Applique la matrice à une liste d'entrées. Un parent dont tous les enfants sont filtrés
+ * disparaît : il pointe vers la racine d'une section devenue vide, l'afficher promettrait
+ * un contenu que la page refusera.
+ */
+function filtrerNav(items: NavItem[], role: UserRole): NavItem[] {
+  return items.flatMap((item) => {
+    if (item.minRole && !hasAtLeast(role, item.minRole)) return [];
+    if (!item.children) return [item];
+    const children = item.children.filter((c) => !c.minRole || hasAtLeast(role, c.minRole));
+    return children.length === 0 ? [] : [{ ...item, children }];
+  });
+}
 
 export function AbilitySidebar({
   user,
-  isAdmin = false,
+  role,
   isPlatformOperator = false,
 }: {
   user: SidebarUser;
-  isAdmin?: boolean;
-  /** Membre de l'org Ability (opérateur de la plateforme) — voir lib/auth-platform.ts. */
+  role: UserRole;
+  /** Membre de l'org Ability (opérateur de la plateforme) — voir lib/auth-platform.ts.
+   *  Périmètre orthogonal aux rôles d'organisation : un opérateur n'est pas un admin
+   *  client, et réciproquement. */
   isPlatformOperator?: boolean;
 }) {
   const pathname = usePathname();
+  const navPrincipale = filtrerNav(mainNav, role);
+  const navAdmin = filtrerNav(adminNav, role);
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
   const initials = (user.email ?? "?").slice(0, 2).toUpperCase();
 
@@ -92,7 +120,7 @@ export function AbilitySidebar({
         <p className="px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">
           Extraction
         </p>
-        {mainNav.map((item) => {
+        {navPrincipale.map((item) => {
           const anyChildActive = item.children?.some((c) => c.match(pathname)) ?? false;
           // Une entrée à sous-menu englobe toute sa section (ex. /analyses couvre aussi la
           // redirection legacy /analyses, dont le href pointe sur /analyses/consommation).
@@ -148,12 +176,14 @@ export function AbilitySidebar({
           );
         })}
 
-        {isAdmin && (
+        {navAdmin.length > 0 && (
           <>
+            {/* Le superviseur n'y voit que la Documentation : lui annoncer « Administration »
+                lui promettrait des droits qu'il n'a pas. */}
             <p className="px-2.5 pb-1 pt-4 text-[10px] font-semibold uppercase tracking-wide text-[var(--kn-text-muted)]">
-              Administration
+              {hasAtLeast(role, "org_admin") ? "Administration" : "Pilotage"}
             </p>
-            {adminNav.map((item) => {
+            {navAdmin.map((item) => {
               const active = isActive(item.href);
               return (
                 <Link

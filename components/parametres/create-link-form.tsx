@@ -26,11 +26,11 @@ export function CreateLinkForm({ communes }: { communes: { id: string; nom: stri
   }
 
   return (
-    <div className="flex items-end gap-2">
-      <div>
-        <label className="mb-1 block text-xs font-medium text-slate-500">Commune</label>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+      <div className="sm:w-48">
+        <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">Commune</label>
         <Select value={communeId} onValueChange={(v) => setCommuneId(v ?? "")}>
-          <SelectTrigger className="w-44">
+          <SelectTrigger className="w-full">
             <SelectValue placeholder="Choisir" />
           </SelectTrigger>
           <SelectContent>
@@ -42,9 +42,9 @@ export function CreateLinkForm({ communes }: { communes: { id: string; nom: stri
           </SelectContent>
         </Select>
       </div>
-      <div>
-        <label className="mb-1 block text-xs font-medium text-slate-500">Message (optionnel)</label>
-        <Input ref={labelRef} placeholder="Ex: Factures S1 2026" className="w-56" />
+      <div className="sm:w-64">
+        <label className="mb-1 block text-xs font-medium text-[var(--kn-text-muted)]">Message (optionnel)</label>
+        <Input ref={labelRef} placeholder="Ex: Factures S1 2026" className="w-full" />
       </div>
       <Button onClick={submit} disabled={pending || !communeId}>
         Créer le lien

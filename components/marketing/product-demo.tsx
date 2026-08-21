@@ -104,7 +104,7 @@ export function ProductDemo() {
 
         <div className="flex h-[440px]">
           <div className="pointer-events-none hidden shrink-0 border-r border-[var(--kn-border)] md:block">
-            <AbilitySidebar user={{ email: "demo@smem.mq", roleLabel: "Administrateur" }} isAdmin />
+            <AbilitySidebar user={{ email: "demo@smem.mq", roleLabel: "Administrateur" }} role="org_admin" />
           </div>
 
           <div className="min-w-0 flex-1 overflow-hidden bg-[var(--kn-page)]">

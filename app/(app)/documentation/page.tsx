@@ -1,6 +1,7 @@
+import { requireRole } from "@/lib/auth-guard";
 import Link from "next/link";
 import {
-  FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, Plug, UploadCloud, SlidersHorizontal,
+  FileText, ScanText, FileSpreadsheet, Gauge, AlertTriangle, Target, UploadCloud, SlidersHorizontal,
   ArrowRight, Lightbulb, ListChecks,
 } from "lucide-react";
 
@@ -37,11 +38,11 @@ const GUIDES: Guide[] = [
   },
   {
     icon: FileSpreadsheet, title: "Rapports", href: "/rapport-excel", hrefLabel: "Ouvrir Rapports",
-    role: "Un seul flux « Générer un rapport Excel » : 3 rapports (Par commune, Avant/après travaux, Synthèse) avec séries temporelles, TCD natifs et décomposition tarifaire.",
+    role: "Un seul flux « Générer un rapport Excel » : 2 rapports (Par commune, Synthèse) avec séries temporelles, TCD natifs et décomposition tarifaire.",
     steps: [
-      "1 · Choisissez le type : Par commune (séries kWh/€ avec fenêtre de travaux marquée), Avant/après travaux (dates réelles SMEM, une feuille d'analyse), ou Synthèse (toutes les communes).",
+      "1 · Choisissez le type : Par commune (séries kWh/€ pour une commune) ou Synthèse (toutes les communes).",
       "2 · Définissez le périmètre : commune, dates, sites — ou sélectionnez des factures dans Mes documents puis « Exporter Excel » (préselection automatique).",
-      "3 · Option : « Inclure les données du connecteur data logger » (conso quotidienne + coupures, données de démonstration).",
+      "Les dates sont préremplies sur la période réellement couverte par vos documents : celle de la commune choisie, ou celle de tout le portefeuille pour la synthèse.",
       "Les graphiques sont des séries temporelles avec axes et unités affichés ; les périodes de facturation sont ventilées au pro-rata des jours.",
       "Les TCD s'actualisent à l'ouverture dans Excel ; la feuille « Données » (masquée) contient le détail normalisé.",
     ],
@@ -58,20 +59,12 @@ const GUIDES: Guide[] = [
   },
   {
     icon: AlertTriangle, title: "Anomalies", href: "/anomalies", hrefLabel: "Ouvrir Anomalies", role:
-      "Repérer les factures atypiques (version bêta) : un contrôle automatique de démonstration.",
+      "Repérer les factures atypiques : un contrôle automatique de démonstration.",
     steps: [
       "Les alertes sont classées par gravité (élevée / moyenne / faible).",
       "Survolez un point du graphique « Montant vs consommation » : l'alerte correspondante ressort dans la liste.",
       "« Marquer résolue » envoie l'alerte dans l'Historique (où l'on peut la Rouvrir).",
       "Depuis Mes documents, le lien « Résoudre l'anomalie » mène directement ici.",
-    ],
-  },
-  {
-    icon: Plug, title: "Connecteurs", href: "/connecteurs", hrefLabel: "Ouvrir Connecteurs",
-    role: "Version bêta — connecter des sources externes (EDF, dépôt des communes, data loggers, IPPER) pour obtenir à terme les données réelles de consommation.",
-    steps: [
-      "Aperçu non fonctionnel : aucune connexion réelle n'est établie à ce stade.",
-      "Le connecteur data logger alimente déjà les Rapports avec des données de démonstration (case dédiée).",
     ],
   },
   {
@@ -84,6 +77,15 @@ const GUIDES: Guide[] = [
     ],
   },
   {
+    icon: Target, title: "Qualité d'extraction", href: "/documentation/qualite", hrefLabel: "Voir la qualité",
+    role: "La précision réelle de l'OCR, champ par champ, mesurée sur les corrections que vos équipes ont apportées.",
+    steps: [
+      "Onglet « Qualité d'extraction » de cette page.",
+      "Seules les factures relues champ par champ comptent : accepter une facture sans la lire ne dit rien de la justesse de sa lecture.",
+      "Les champs les moins fiables sont listés en premier — c'est là qu'il y a à agir.",
+    ],
+  },
+  {
     icon: SlidersHorizontal, title: "Champs d'extraction", href: "/documentation/champs", hrefLabel: "Voir les champs",
     role: "Le modèle unique « Facture d'électricité » et la liste des champs lus par l'OCR.",
     steps: [
@@ -93,7 +95,11 @@ const GUIDES: Guide[] = [
   },
 ];
 
-export default function GuidePage() {
+export default async function GuidePage() {
+  // La documentation décrit le paramétrage de l'extraction : elle s'adresse aux profils
+  // qui pilotent la donnée, pas à l'opérateur qui dépose des factures.
+  await requireRole("org_supervisor");
+
   return (
     <div className="mx-auto max-w-4xl px-8 py-6">
       <p className="mb-5 text-[13px] text-[var(--kn-text-muted)]">

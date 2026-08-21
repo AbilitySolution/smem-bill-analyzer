@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { estLectureOuverte, hasAtLeast, isUserRole, requiredRoleFor } from "@/lib/authz";
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -49,6 +50,37 @@ export async function proxy(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
+  }
+
+  // Garde de rôle — première des quatre couches (middleware, page/action, UI, RLS).
+  // Elle bloque avant tout rendu, routes API comprises, mais ne fait PAS autorité : un
+  // Server Action appelé directement ne passe pas par ici. Chaque page et chaque route
+  // protégée revérifie le rôle de son côté.
+  //
+  // La lecture de user_roles n'a lieu que sur les chemins effectivement restreints : la
+  // matrice renvoie null partout ailleurs, et on ne paie donc pas une requête à chaque
+  // navigation. Le rôle n'est volontairement pas mis dans le JWT — une rétrogradation
+  // doit prendre effet tout de suite, pas à l'expiration du token.
+  const requiredRole = requiredRoleFor(request.nextUrl.pathname);
+  const exempte = estLectureOuverte(request.nextUrl.pathname, request.method);
+  if (data.user && requiredRole && !exempte) {
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", data.user.id)
+      .maybeSingle();
+
+    // Ligne absente = provisionnement incomplet : on refuse, comme getUserContext().
+    const role = roleRow?.role;
+    if (!isUserRole(role) || !hasAtLeast(role, requiredRole)) {
+      if (request.nextUrl.pathname.startsWith("/api/")) {
+        return NextResponse.json({ error: "Non autorisé." }, { status: 403 });
+      }
+      const url = request.nextUrl.clone();
+      url.pathname = "/documents";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
   }
 
   return response;

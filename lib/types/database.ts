@@ -7,7 +7,9 @@ export type AnomalyType =
 export type AnomalySeverity = "low" | "medium" | "high";
 export type TauxUnit = "eur_per_kwh" | "percent";
 export type Categorie = "batiment" | "eclairage_public";
-export type UserRole = "org_admin" | "org_member";
+/** Rôles hiérarchiques : org_admin ⊇ org_supervisor ⊇ org_member. Hiérarchie et
+ *  matrice d'accès dans lib/authz.ts. */
+export type UserRole = "org_admin" | "org_supervisor" | "org_member";
 export type ChargeCategory = "fixed" | "tax";
 export type TarifType = "BASE" | "HPHC" | "TEMPO" | "EJP";
 

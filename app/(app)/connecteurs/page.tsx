@@ -1,3 +1,4 @@
+import { requireRole } from "@/lib/auth-guard";
 import { Plug, Info, Zap, Inbox, Radio, Landmark, Clock } from "lucide-react";
 
 const CONNECTEURS = [
@@ -27,7 +28,11 @@ const CONNECTEURS = [
   },
 ];
 
-export default function ConnecteursPage() {
+export default async function ConnecteursPage() {
+  // Brancher une source de données est un acte d'administration, même tant que la page
+  // ne fait qu'annoncer les connecteurs à venir.
+  await requireRole("org_admin");
+
   return (
     <div className="mx-auto max-w-4xl px-8 py-6">
       <div className="mb-1 flex items-center gap-2.5">
