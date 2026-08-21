@@ -99,7 +99,6 @@ export function ExtractionPanel({ data }: { data: ExtractionData }) {
             <Section title="Contrat">
               {data.contract ? <>
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="contract_number" label="N° de contrat" />
-                <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="pdl" label="PDL (14 chiffres)" />
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="tarif_type" label="Type tarifaire" kind="select" options={TARIF_TYPE_OPTS} />
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="offre" label="Offre" />
                 <Edit invoiceId={inv.id} table="contracts" row={data.contract} field="service" label="Service" />
@@ -113,7 +112,6 @@ export function ExtractionPanel({ data }: { data: ExtractionData }) {
             <Section title="Site / point de livraison">
               {data.site ? <>
                 <Edit invoiceId={inv.id} table="sites" row={data.site} field="nom" label="Nom du site" />
-                <Edit invoiceId={inv.id} table="sites" row={data.site} field="pdl" label="PDL" />
                 <Edit invoiceId={inv.id} table="sites" row={data.site} field="kva" label="kVA" kind="number" />
                 <Edit invoiceId={inv.id} table="sites" row={data.site} field="ampere" label="Ampère" kind="number" />
                 <Edit invoiceId={inv.id} table="sites" row={data.site} field="categorie" label="Catégorie" kind="select" options={CAT_OPTS} />

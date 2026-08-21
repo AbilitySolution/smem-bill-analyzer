@@ -5,6 +5,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { documentTypeOf, releaseRemoteFile } from "../_shared/ai-client.ts";
+import { EXTRACTOR_VERSION } from "../_shared/edf-extraction.ts";
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
 
@@ -121,6 +122,7 @@ async function collectBatch(
       } else {
         await supabase.from("document_jobs").update({
           status: "needs_review", extraction_json: extraction,
+          extractor_version: EXTRACTOR_VERSION,
           validation_json: { anthropic_usage: line.result.message?.usage ?? null },
           completed_at: resultAvailableAt, result_available_at: resultAvailableAt,
           updated_at: resultAvailableAt, last_error: null,

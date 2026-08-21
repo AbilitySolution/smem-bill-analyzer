@@ -7,6 +7,10 @@ import { AnalysesView } from "@/components/analyses/analyses-view";
 const EMPTY: AnalysisData = {
   months: [],
   kpis: { totalKwh: 0, varEur: 0, aboEur: 0, totalCost: 0, avgPrice: 0, invoiceCount: 0, approxCount: 0 },
+  coverage: [],
+  chained: [],
+  panel: { ok: false, siteIds: [], totalSites: 0, from: null, to: null, months: [], excluded: [], siteSpans: [] },
+  panelMonths: [],
 };
 
 export default async function ConsumptionAnalysisPage({

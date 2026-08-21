@@ -128,7 +128,11 @@ describe("validateInvoice", () => {
         consommation_kwh: 100, prix_unitaire_ckwh: null, montant_eur: 10, index_estime: false,
       }],
     }));
-    expect(result.issues.some((i) => i.code === "INDEX_INVERSION")).toBe(true);
+    // Consommation positive avec index qui recule : les deux valeurs se contredisent, d'où
+    // le code spécifique et la gravité `error`. Un index qui recule accompagné d'une
+    // consommation négative reste un simple avertissement — voir « index contre
+    // consommation » plus bas.
+    expect(result.issues.some((i) => i.code === "INDEX_CONSUMPTION_CONTRADICTION")).toBe(true);
   });
 
   it("détecte une inversion de dates (début > fin)", () => {
@@ -156,15 +160,19 @@ describe("validateInvoice", () => {
     expect(result.issues.some((i) => i.code === "TARIF_TYPE_MISMATCH")).toBe(true);
   });
 
-  it("HP et HC même prix sur la même période -> avertissement (probable erreur OCR)", () => {
+  it("HP et HC au même prix ne produit PLUS d'avertissement", () => {
+    // La règle HPHC_SAME_PRICE a été retirée : elle représentait 95 des 330 anomalies du
+    // portefeuille, dont aucune n'a jamais été traitée. Beaucoup d'offres récentes — et
+    // les factures à tarif unique typées HPHC par erreur — ont légitimement le même prix
+    // sur les deux postes. Ce test garde la suppression contre une réintroduction.
     const result = validateInvoice(baseExtraction({
       contract: { ...baseExtraction().contract, tarif_type: "HPHC" },
       consumption_lines: [
-        { poste_tarifaire: "HP", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 12, montant_eur: 12, index_estime: false },
-        { poste_tarifaire: "HC", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 12, montant_eur: 12, index_estime: false },
+        { poste_tarifaire: "HP", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 15.2544, montant_eur: 15.25, index_estime: false },
+        { poste_tarifaire: "HC", date_debut: "2026-01-01", date_fin: "2026-01-31", numero_compteur: null, ancien_index: null, nouveau_index: null, coefficient: 1, consommation_kwh: 100, prix_unitaire_ckwh: 15.2544, montant_eur: 15.25, index_estime: false },
       ],
     }));
-    expect(result.issues.some((i) => i.code === "HPHC_SAME_PRICE")).toBe(true);
+    expect(result.issues.some((i) => i.code === "HPHC_SAME_PRICE")).toBe(false);
   });
 
   it("faible confiance sur un champ critique -> issue LOW_CONFIDENCE", () => {
@@ -179,5 +187,115 @@ describe("validateInvoice", () => {
     expect(issue).toBeDefined();
     expect(issue?.severity).toBe("error"); // score < 0.4
     expect(result.needsReview).toBe(true);
+  });
+});
+
+/** Ligne de charge fixe, avec les valeurs réelles d'une facture EDF du corpus. */
+function charge(overrides: Partial<InvoiceExtraction["fixed_charges"][number]> = {}) {
+  return {
+    libelle: "prime fixe du 14 mars 2016 au 31 juillet 2016 (puissance souscrite de 6 kVA - 4,57 mois)",
+    date_debut: "2016-03-14",
+    date_fin: "2016-07-31",
+    tarif_kva_an: 81.24,
+    montant_eur: 185.43,
+    ...overrides,
+  } as InvoiceExtraction["fixed_charges"][number];
+}
+
+describe("cohérence des périodes", () => {
+  it("ne signale rien quand la durée annoncée correspond aux dates", () => {
+    const result = validateInvoice(baseExtraction({ fixed_charges: [charge()] }));
+    expect(result.issues.map((i) => i.code)).not.toContain("PERIOD_DURATION_MISMATCH");
+  });
+
+  it("détecte le millésime mal lu — cas réel 6365641E", () => {
+    // « 14 mars 2016 » lu « 14 mars 2010 » : le libellé annonce 4,57 mois, les dates en
+    // couvrent 76. C'est l'erreur qui a traversé la validation sans être vue.
+    const result = validateInvoice(baseExtraction({
+      fixed_charges: [charge({
+        libelle: "prime fixe du 14 mars 2010 au 31 juillet 2016 (puissance souscrite de 6 kVA - 4,67 mois)",
+        date_debut: "2010-03-14",
+      })],
+    }));
+    const issue = result.issues.find((i) => i.code === "PERIOD_DURATION_MISMATCH");
+    expect(issue?.severity).toBe("error");
+  });
+
+  it("détecte une durée mal lue même quand les dates sont justes — cas réel 6365637E", () => {
+    // Ici ce sont les dates qui sont bonnes et le libellé qui dit « 5 mois » au lieu de 6.
+    // Le contrôle ne tranche pas laquelle des deux lectures est fausse — il constate qu'une
+    // des deux l'est, ce qui suffit à demander une relecture.
+    const result = validateInvoice(baseExtraction({
+      fixed_charges: [charge({
+        libelle: "terme fixe du 14 mars 2016 au 13 septembre 2016 (5 mois)",
+        date_fin: "2016-09-13",
+      })],
+    }));
+    expect(result.issues.map((i) => i.code)).toContain("PERIOD_DURATION_MISMATCH");
+  });
+
+  it("tolère un demi-mois d'écart — EDF arrondit ses prorata", () => {
+    const result = validateInvoice(baseExtraction({
+      fixed_charges: [charge({ libelle: "prime fixe (4,3 mois)" })],
+    }));
+    expect(result.issues.map((i) => i.code)).not.toContain("PERIOD_DURATION_MISMATCH");
+  });
+
+  it("reste muet quand le libellé n'annonce aucune durée", () => {
+    // Les lignes CTA/CSPE n'annoncent pas de durée et couvrent légitimement plusieurs
+    // années : les signaler ferait perdre sa crédibilité à l'écran de contrôle.
+    const result = validateInvoice(baseExtraction({
+      taxes: [{
+        libelle: "Contribution Tarifaire d'Acheminement électricité (CTA)",
+        date_debut: "2021-08-01", date_fin: "2025-04-13",
+        assiette: null, taux: null, taux_numeric: null, taux_unit: null, montant_eur: 42,
+      } as InvoiceExtraction["taxes"][number]],
+    }));
+    expect(result.issues.map((i) => i.code)).not.toContain("PERIOD_DURATION_MISMATCH");
+    expect(result.fieldConfidence.periodes).toBeUndefined();
+  });
+
+  it("signale une période inversée", () => {
+    const result = validateInvoice(baseExtraction({
+      fixed_charges: [charge({ date_debut: "2023-02-01", date_fin: "2023-01-31", libelle: "CSPE" })],
+    }));
+    const issue = result.issues.find((i) => i.code === "PERIOD_REVERSED");
+    expect(issue?.severity).toBe("error");
+  });
+
+  it("fait baisser la confiance des périodes sans pénaliser une facture saine", () => {
+    const sain = validateInvoice(baseExtraction({ fixed_charges: [charge()] }));
+    const faux = validateInvoice(baseExtraction({
+      fixed_charges: [charge({ date_debut: "2010-03-14" })],
+    }));
+    expect(sain.fieldConfidence.periodes).toBe(1);
+    expect(faux.fieldConfidence.periodes).toBeLessThan(0.5);
+  });
+});
+
+describe("index contre consommation", () => {
+  const ligne = (o: Record<string, unknown>) => ({
+    poste_tarifaire: "BASE", date_debut: "2024-01-01", date_fin: "2024-02-01",
+    numero_compteur: null, ancien_index: 100, nouveau_index: 200, coefficient: 1,
+    consommation_kwh: 100, prix_unitaire_ckwh: 10, montant_eur: 10, index_estime: false,
+    ...o,
+  } as InvoiceExtraction["consumption_lines"][number]);
+
+  it("bloque un index qui recule avec une consommation positive — cas réel 13606260E", () => {
+    const result = validateInvoice(baseExtraction({
+      consumption_lines: [ligne({ ancien_index: 55392, nouveau_index: 34553, consommation_kwh: 6589, montant_eur: 606.46 })],
+    }));
+    const issue = result.issues.find((i) => i.code === "INDEX_CONSUMPTION_CONTRADICTION");
+    expect(issue?.severity).toBe("error");
+  });
+
+  it("laisse passer un avoir : index qui recule ET consommation négative", () => {
+    // 6 lignes du corpus sont dans ce cas et sont légitimes — un avoir annule une période
+    // déjà facturée. Les bloquer signalerait des factures justes.
+    const result = validateInvoice(baseExtraction({
+      consumption_lines: [ligne({ ancien_index: 19266, nouveau_index: 19141, consommation_kwh: -125, montant_eur: -9.86 })],
+    }));
+    expect(result.issues.map((i) => i.code)).not.toContain("INDEX_CONSUMPTION_CONTRADICTION");
+    expect(result.issues.map((i) => i.code)).toContain("INDEX_INVERSION");
   });
 });

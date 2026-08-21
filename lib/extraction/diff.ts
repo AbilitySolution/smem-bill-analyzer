@@ -160,7 +160,7 @@ const EDITABLE_COLUMNS: Record<string, readonly string[]> = {
   ],
   clients: ["nom", "reference_client", "reference_compte", "adresse"],
   contracts: [
-    "contract_number", "pdl", "tarif_type", "espace_livraison", "offre", "service",
+    "contract_number", "tarif_type", "espace_livraison", "offre", "service",
     "puissance_souscrite_kva", "reglage_protection_a", "type_compteur", "numero_compteur",
   ],
   consumption_periods: [

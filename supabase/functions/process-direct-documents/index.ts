@@ -11,7 +11,7 @@ import { aiRequest, documentTypeOf, isRetryableProcessingError, releaseRemoteFil
 import { toUserSafeError } from "../_shared/ai-error.ts";
 import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { isServiceToken } from "../_shared/service-token.ts";
-import { AI_MODEL_OCR, EXTRACTION_PROMPT, SYSTEM_PROMPT, extractionTool } from "../_shared/edf-extraction.ts";
+import { AI_MODEL_OCR, EXTRACTION_PROMPT, EXTRACTOR_VERSION, SYSTEM_BLOCKS, extractionTool } from "../_shared/edf-extraction.ts";
 
 const MAX_JOBS = 10;
 const CONCURRENCY = 3;
@@ -48,7 +48,8 @@ async function extractInvoice(job: DocumentJob, supabase: ReturnType<typeof crea
     body: JSON.stringify({
       model: AI_MODEL_OCR,
       max_tokens: 8192,
-      system: SYSTEM_PROMPT,
+      // Point de cache sur le préfixe outils + system — voir `SYSTEM_BLOCKS`.
+      system: SYSTEM_BLOCKS,
       tools: [extractionTool],
       tool_choice: { type: "tool", name: "extract_edf_invoice" },
       messages: [{
@@ -137,6 +138,7 @@ Deno.serve(async (request) => {
         await supabase.from("document_jobs").update({
           status: "needs_review",
           extraction_json: result.extraction,
+          extractor_version: EXTRACTOR_VERSION,
           validation_json: { anthropic_usage: result.usage },
           completed_at: now,
           result_available_at: now,

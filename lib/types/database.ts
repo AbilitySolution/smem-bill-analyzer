@@ -34,7 +34,6 @@ export interface Site {
   commune_id: string;
   categorie: Categorie;
   nom: string;
-  pdl: string | null;
   kva: number | null;
   ampere: number | null;
   created_at: string;
@@ -58,7 +57,6 @@ export interface Contract {
   client_id: string | null;
   site_id: string | null;
   contract_number: string;
-  pdl: string | null;
   tarif_type: TarifType | null;
   espace_livraison: string | null;
   offre: string | null;

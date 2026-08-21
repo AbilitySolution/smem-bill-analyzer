@@ -163,7 +163,6 @@ async function Detail({ id }: { id: string }) {
     },
     contract: {
       contract_number: (contract?.contract_number as string) ?? "",
-      pdl: (contract?.pdl as string | null) ?? null,
       tarif_type: (contract?.tarif_type as string | null) ?? null,
       espace_livraison: (contract?.espace_livraison as string | null) ?? null,
       offre: (contract?.offre as string | null) ?? null,

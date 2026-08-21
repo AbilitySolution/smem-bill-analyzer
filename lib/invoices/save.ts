@@ -46,6 +46,13 @@ export const saveRequestSchema = z.object({
    * terrain sur la précision réelle du modèle.
    */
   original_extraction: invoiceExtractionSchema.optional(),
+  /**
+   * Empreinte de l'extracteur ayant produit `original_extraction`, reportée telle quelle
+   * en base. Absente = provenance inconnue, et la colonne reste NULL : y mettre la version
+   * courante serait une affirmation fausse sur une extraction produite ailleurs, peut-être
+   * des mois plus tôt.
+   */
+  extractor_version: z.string().optional(),
   file_path: z.string(),
   site_id: z.string().uuid().optional(),
   commune_id: z.string().uuid().optional(),
@@ -190,7 +197,7 @@ export async function saveInvoice(
       site = matched;
     } else {
       const { data: newSite, error: siteErr } = await supabase.from("sites")
-        .insert({ org_id: ctx.orgId, commune_id: commune_id!, categorie, nom, pdl: null })
+        .insert({ org_id: ctx.orgId, commune_id: commune_id!, categorie, nom })
         .select("id, commune_id, categorie").single();
       if (siteErr || !newSite) return { ok: false, status: 500, error: `Création site: ${siteErr?.message}` };
       site = newSite;
@@ -238,7 +245,6 @@ export async function saveInvoice(
       .insert({
         ...extraction.contract,
         org_id: ctx.orgId,
-        pdl: null,
         tarif_type: extraction.contract.tarif_type ?? null,
         client_id: clientId,
         site_id: site.id,
@@ -303,6 +309,7 @@ export async function saveInvoice(
       file_path,
       status: initialStatus,
       auto_saved: opts.autoSaved ?? false,
+      extractor_version: payload.extractor_version ?? null,
       created_by: ctx.userId,
       raw_ocr_json: isOverride
         ? { ...extraction, _override: { comment: override_comment, flag_anomaly: override_flag_anomaly } }

@@ -74,7 +74,6 @@ export interface InvoiceEditData {
   };
   contract: {
     contract_number: string;
-    pdl: string | null;
     tarif_type: string | null;
     espace_livraison: string | null;
     offre: string | null;
@@ -449,9 +448,6 @@ export function InvoiceEditPanel({ data }: { data: InvoiceEditData }) {
           <div className="grid grid-cols-2 gap-3">
             <Field label="N° Contrat">
               <input className={inputCls} value={con.contract_number} onChange={(e) => setCon((v) => ({ ...v, contract_number: e.target.value }))} />
-            </Field>
-            <Field label="PDL (14 chiffres)">
-              <input className={inputCls} value={con.pdl ?? ""} onChange={(e) => setCon((v) => ({ ...v, pdl: e.target.value || null }))} />
             </Field>
             <Field label="Type tarifaire">
               <select value={con.tarif_type ?? ""} onChange={(e) => setCon((v) => ({ ...v, tarif_type: e.target.value || null }))} className={inputCls}>
