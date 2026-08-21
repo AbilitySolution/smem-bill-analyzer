@@ -8,7 +8,6 @@ import {
   FileSpreadsheet,
   Gauge,
   AlertTriangle,
-  Plug,
   BookOpen,
   UploadCloud,
   Settings,
@@ -51,7 +50,6 @@ const mainNav: NavItem[] = [
       { href: "/upload", label: "Importer des documents", match: (p) => p.startsWith("/upload") },
       { href: "/documents", label: "Mes documents", match: (p) => p === "/documents" },
       { href: "/corrections", label: "Contrôle qualité", match: (p) => p.startsWith("/corrections"), minRole: "org_supervisor" },
-      { href: "/qualite-extraction", label: "Qualité d'extraction", match: (p) => p.startsWith("/qualite-extraction"), minRole: "org_supervisor" },
       { href: "/documents/extraction", label: "Extraction", match: (p) => p.startsWith("/documents/extraction"), minRole: "org_supervisor" },
     ],
   },
@@ -64,7 +62,9 @@ const mainNav: NavItem[] = [
     ],
   },
   { href: "/anomalies", label: "Anomalies", icon: AlertTriangle },
-  { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true, minRole: "org_admin" },
+  // Connecteurs : page conservée (/connecteurs) mais retirée de la navigation tant que
+  // rien n'est réellement raccordé — elle promettait une intégration qui n'existe pas.
+  // { href: "/connecteurs", label: "Connecteurs", icon: Plug, soon: true, minRole: "org_admin" },
 ];
 
 const adminNav: NavItem[] = [
