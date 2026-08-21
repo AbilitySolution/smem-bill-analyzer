@@ -181,10 +181,26 @@ CREATE TABLE IF NOT EXISTS activities (
 );
 
 -- ===== FILE REQUEST LINKS =====
+--
+-- `extensions.gen_random_bytes` est qualifié à dessein. Sur un projet Supabase, pgcrypto
+-- est pré-installé dans le schéma `extensions` : le `CREATE EXTENSION IF NOT EXISTS` en
+-- tête de ce fichier ne fait donc rien, et la fonction reste hors de `public`.
+--
+-- `supabase db push` ne se connecte pas en `postgres` (dont le search_path contient
+-- `extensions`) mais via un rôle `cli_login_postgres` créé pour l'occasion, sans réglage
+-- de search_path — donc `"$user", public`. L'appel non qualifié y échoue :
+--   ERROR: function gen_random_bytes(integer) does not exist (SQLSTATE 42883)
+-- Mesuré le 2026-08-21 en rejouant ces migrations sur le projet de dev. Le stack local ne
+-- le voyait pas : la CLI s'y connecte en `postgres`.
+--
+-- C'est la raison pour laquelle ce squash n'avait jamais pu être rejoué sur un projet
+-- Supabase — et donc la raison pour laquelle la dérive avec la production a pu s'installer.
+--
+-- `gen_random_uuid` n'a pas le même problème : elle est native depuis PostgreSQL 13.
 CREATE TABLE IF NOT EXISTS file_request_links (
   id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   commune_id  uuid        NOT NULL REFERENCES communes(id) ON DELETE CASCADE,
-  token       text        NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(16),'hex'),
+  token       text        NOT NULL UNIQUE DEFAULT encode(extensions.gen_random_bytes(16),'hex'),
   label       text,
   created_by  uuid        REFERENCES auth.users(id),
   expires_at  timestamptz,
