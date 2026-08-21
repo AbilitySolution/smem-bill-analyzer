@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   push:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   build-and-test:
@@ -35,3 +35,45 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # Une base neuve reconstruite depuis supabase/migrations/ doit être utilisable. Deux
+  # pannes déjà rencontrées sur ce projet et qu'aucun test applicatif n'attrapait :
+  #   - migrations qui passent au vert mais laissent les tables sans GRANT, donc toute
+  #     l'API REST en 403 (corrigé par 20260817044616_postgrest_table_grants) ;
+  #   - schéma du dépôt qui diverge de la production sans que rien ne le signale
+  #     (corrigé par 20260820010000_reconcile_prod_schema).
+  # Ce job rejoue les migrations à partir de zéro et vérifie que PostgREST atteint bien les
+  # tables avec la clé anon.
+  db-rebuild:
+    name: Reconstruction de la base depuis les migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Démarrer le stack local
+        run: supabase start -x studio,imgproxy,logflare,vector,edge-runtime,realtime,mailpit,supavisor
+
+      - name: Rejouer toutes les migrations sur une base vierge
+        run: supabase db reset
+
+      - name: PostgREST atteint les tables avec la clé anon
+        run: |
+          set -euo pipefail
+          ANON=$(supabase status -o json | jq -r .ANON_KEY)
+          echec=0
+          for t in communes sites invoices contracts anomalies document_jobs \
+                   consumption_periods organizations pending_uploads invoice_analytics; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+              "http://127.0.0.1:54321/rest/v1/$t?limit=1")
+            echo "$t -> $code"
+            if [ "$code" != "200" ]; then
+              echo "::error::$t inatteignable depuis PostgREST (HTTP $code)"
+              echec=1
+            fi
+          done
+          exit $echec

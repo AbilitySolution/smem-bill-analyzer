@@ -46,3 +46,6 @@ next-env.d.ts
 
 # Jeu de référence et rapports du banc de mesure : données client, hors dépôt.
 .extraction-eval/
+
+# fixtures locales (factures client réelles) — jamais versionnées
+/.agents/
