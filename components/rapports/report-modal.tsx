@@ -3,17 +3,19 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  MapPin, Wrench, Layers3, Loader2, Download, Check, Radio, Info, Sparkles, X, Calendar,
+  MapPin, Layers3, Loader2, Download, Check, Sparkles, X, Calendar,
 } from "lucide-react";
+import type { InvoiceScope } from "@/lib/data/invoice-scope";
 
 const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 
 interface Commune { id: string; nom: string; travaux_debut?: string | null; travaux_estimes?: boolean | null }
-type ReportType = "commune" | "avant_apres" | "synthese";
+
+// « avant_apres » reste supporté côté générateur mais n'est plus proposé ici — voir report-picker.tsx.
+type ReportType = "commune" | "synthese";
 
 const REPORTS: { id: ReportType; label: string; desc: string; icon: typeof MapPin }[] = [
   { id: "commune", label: "Par commune", desc: "Séries temporelles kWh/€, détail par site, TCD.", icon: MapPin },
-  { id: "avant_apres", label: "Avant / après travaux", desc: "Moyennes annualisées + histogrammes (une commune).", icon: Wrench },
   { id: "synthese", label: "Synthèse", desc: "Portefeuille consolidé de la sélection + TCD.", icon: Layers3 },
 ];
 
@@ -22,23 +24,26 @@ const REPORTS: { id: ReportType; label: string; desc: string; icon: typeof MapPi
  * S'ouvre automatiquement à l'arrivée sur /rapport-excel?ids=… ; laisse choisir le type
  * de rapport (appliqué à la sélection) puis génère le classeur via /api/reports.
  */
-export function ReportModal({ ids, communes }: { ids: string[]; communes: Commune[] }) {
+export function ReportModal({ ids, communes, scope }: { ids: string[]; communes: Commune[]; scope: InvoiceScope }) {
   const router = useRouter();
   const [open, setOpen] = useState(ids.length > 0);
   const [report, setReport] = useState<ReportType>("synthese");
   const [communeId, setCommuneId] = useState(communes.length === 1 ? communes[0].id : "");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [cutover, setCutover] = useState("");
-  const [dataLogger, setDataLogger] = useState(false);
+  // null = « pas encore touché » : la borne suit alors le périmètre choisi.
+  const [fromEdit, setFromEdit] = useState<string | null>(null);
+  const [toEdit, setToEdit] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const needsCommune = report === "commune" || report === "avant_apres";
-  const selectedCommune = communes.find((c) => c.id === communeId);
-  // Avant/après sans dates de travaux au référentiel → date de bascule obligatoire.
-  const needsCutover = report === "avant_apres" && !!selectedCommune && !selectedCommune.travaux_debut;
-  const ready = (!needsCommune || !!communeId) && (!needsCutover || !!cutover);
+  const needsCommune = report === "commune";
+  const ready = !needsCommune || !!communeId;
+
+  // Mêmes bornes préremplies que sur la page (voir report-picker.tsx) : période couverte
+  // par la commune choisie, sinon par l'ensemble des documents.
+  const defaults = report === "commune" && communeId ? scope.parCommune[communeId] : scope.global;
+  const from = fromEdit ?? defaults?.from ?? "";
+  const to = toEdit ?? defaults?.to ?? "";
+  const resetDates = () => { setFromEdit(null); setToEdit(null); };
 
   function close() {
     setOpen(false);
@@ -57,8 +62,6 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
           ids,
           from: from || undefined,
           to: to || undefined,
-          cutover: cutover || undefined,
-          dataLogger,
         }),
       });
       if (!res.ok) { const j = await res.json().catch(() => ({})); setError(j.error ?? "Erreur de génération."); return; }
@@ -96,11 +99,11 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
         </p>
 
         {/* Type */}
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2">
           {REPORTS.map((r) => {
             const on = report === r.id;
             return (
-              <button key={r.id} onClick={() => setReport(r.id)}
+              <button key={r.id} onClick={() => { setReport(r.id); resetDates(); }}
                 className={cx("flex flex-col gap-1 rounded-lg border p-2.5 text-left transition-colors",
                   on ? "border-[#f97316]" : "border-[var(--kn-border)] hover:border-[#fb923c]")}>
                 <span className={cx("flex size-6 items-center justify-center rounded-md",
@@ -118,50 +121,28 @@ export function ReportModal({ ids, communes }: { ids: string[]; communes: Commun
         {needsCommune && (
           <label className="mt-3 flex items-center gap-2 text-[12px] text-[var(--kn-text-muted)]">
             <MapPin className="size-3.5" /> Commune
-            <select value={communeId} onChange={(e) => setCommuneId(e.target.value)}
+            <select value={communeId} onChange={(e) => { setCommuneId(e.target.value); resetDates(); }}
               className="h-9 flex-1 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] text-[var(--kn-text)] focus:border-[#f97316] focus:outline-none">
               <option value="">Choisir…</option>
               {communes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
             </select>
           </label>
         )}
-        {report === "avant_apres" && selectedCommune?.travaux_estimes && (
-          <span className="mt-2 inline-flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
-            <Info className="size-3" /> dates de travaux estimées pour cette commune
-          </span>
-        )}
-        {needsCutover && (
-          <label className="mt-2 flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
-            <Wrench className="size-3.5" /> Date de bascule avant/après
-            <input type="date" value={cutover} onChange={(e) => setCutover(e.target.value)}
-              className="h-8 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] focus:border-[#f97316] focus:outline-none" />
-            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--kn-yellow-soft)] px-2 py-0.5 text-[11px] text-[#9a3412]">
-              <Info className="size-3" /> pas de dates de travaux au référentiel
-            </span>
-          </label>
-        )}
-
         {/* Options */}
         <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-[var(--kn-panel)] p-3">
           <label className="flex items-center gap-1.5 text-[12px] text-[var(--kn-text-muted)]">
             <Calendar className="size-3.5" /> Du
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
+            <input type="date" value={from} onChange={(e) => setFromEdit(e.target.value)}
               className="h-8 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] focus:border-[#f97316] focus:outline-none" />
             Au
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
+            <input type="date" value={to} onChange={(e) => setToEdit(e.target.value)}
               className="h-8 rounded-lg border border-[var(--kn-border)] bg-[var(--kn-card)] px-2 text-[13px] focus:border-[#f97316] focus:outline-none" />
-          </label>
-          <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--kn-text)]">
-            <input type="checkbox" checked={dataLogger} onChange={(e) => setDataLogger(e.target.checked)} className="accent-[#f97316]" />
-            <Radio className="size-3.5 text-[var(--kn-text-muted)]" /> Data logger (démo)
           </label>
         </div>
 
         {error && <p className="mt-2 text-[13px] text-[#d33]">{error}</p>}
         {!ready && (
-          <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">
-            {needsCutover && communeId ? "Saisissez une date de bascule avant/après pour cette commune." : "Choisissez une commune pour ce type de rapport."}
-          </p>
+          <p className="mt-2 text-[12px] text-[var(--kn-text-muted)]">Choisissez une commune pour ce type de rapport.</p>
         )}
 
         <div className="mt-4 flex justify-end gap-2">
